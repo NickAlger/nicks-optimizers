@@ -1,6 +1,7 @@
 """Lanczos, the small trust-region solvers and the subproblem solver, checked
 against dense linear algebra."""
 
+import dataclasses
 
 import numpy as np
 
@@ -274,16 +275,23 @@ def test_metric_requirements() -> None:
 
 
 def test_outer_loop_checks_the_metric_arguments() -> None:
-    """trust_region_newton refuses a separate preconditioner without M, a
-    custom space without M^{-1} (no silent Euclidean fallback), krylov='cg'
-    with a separate preconditioner or saddle_free, and unknown options."""
+    """trust_region_newton refuses a user metric_solve with a separate
+    preconditioner but no metric_apply (the space's M is not mixed with a
+    user M^{-1}), metric_apply without metric_solve, a space without a
+    default metric and no metric_solve, krylov='cg' with a separate
+    preconditioner or saddle_free, and unknown options. Without any metric,
+    numpy spaces (also distributed ones) use M = I."""
     x0 = Point(np.ones(4))
     pieces = (rosen_fun, rosen_grad, rosen_hessvec, x0)
     reductions = numpy_space_with_reductions(lambda c: c)
+    no_metric = dataclasses.replace(numpy_space, metric_solve=None, metric_apply=None)
     with pytest.raises(ValueError):
-        trust_region_newton(*pieces, precond_solve=jacobi_precond_solve)
+        trust_region_newton(*pieces, metric_solve=lambda x, w: Vector(2.0 * w),
+                            precond_solve=jacobi_precond_solve)
     with pytest.raises(ValueError):
-        trust_region_newton(*pieces, space=reductions)
+        trust_region_newton(*pieces, metric_apply=lambda x, v: Covector(0.5 * v))
+    with pytest.raises(ValueError):
+        trust_region_newton(*pieces, space=no_metric)
     with pytest.raises(ValueError):
         trust_region_newton(*pieces, krylov="cg", precond_solve=jacobi_precond_solve,
                             metric_apply=lambda x, v: Covector(v))
@@ -293,7 +301,9 @@ def test_outer_loop_checks_the_metric_arguments() -> None:
         trust_region_newton(*pieces, krylov="steihaug")  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         trust_region_newton(*pieces, convergence_norm="euclidean")  # type: ignore[arg-type]
-    trust_region_newton(*pieces, space=numpy_space, max_iter=2)   # M = I for explicit numpy_space
+    trust_region_newton(*pieces, space=numpy_space, max_iter=2)   # M = I, the space's metric
+    trust_region_newton(*pieces, space=reductions, max_iter=2)
+    trust_region_newton(*pieces, precond_solve=jacobi_precond_solve, max_iter=2)
 
 
 def test_mismatch_example() -> None:

@@ -16,16 +16,17 @@ Problem pieces
   x0                                   starting point
 
 Geometry and preconditioning (keyword arguments):
-  metric_solve(x, w) -> Vector         M(x)^{-1} w. Defaults to M = I for
-                                       plain numpy arrays (numpy_space, the
-                                       default space); any other
-                                       representation must pass it.
+  metric_solve(x, w) -> Vector         M(x)^{-1} w. Defaults to the space's
+                                       own metric: M = I for numpy arrays,
+                                       the direct sum of the leaves' metrics
+                                       for tuple trees (see spaces).
   precond_solve(x, w) -> Vector        P(x)^{-1} w, if P should differ from M
                                        (e.g. a Hessian preconditioner inside a
                                        fixed metric). Optional.
-  metric_apply(x, v) -> Covector       M(x) v; needed only with precond_solve,
-                                       and must be consistent with
-                                       metric_solve.
+  metric_apply(x, v) -> Covector       M(x) v; needed only with precond_solve.
+                                       It goes with metric_solve and must be
+                                       its inverse: pass both, or neither to
+                                       use the space's metric.
 
 With P = M (no precond_solve) only M^{-1} is ever applied: any symmetric
 positive definite operator passed as metric_solve, a multigrid cycle for
@@ -117,7 +118,7 @@ def _normalized(f: Callable[ParamsP, ResultT], normalize: Optional[Callable[[Res
 class PointOperators(Generic[VectorT, CovectorT]):
     """The linear operators at one point, frozen: what operators_at(x)
     returns. Fields left None fall back to the keyword arguments of
-    trust_region_newton (and metric_solve to M = I for plain numpy arrays).
+    trust_region_newton (and the metric to the space's default).
 
       hessvec(v) -> Covector         H v
       metric_solve(w) -> Vector      M^{-1} w
@@ -216,8 +217,8 @@ def trust_region_newton(
 
     Convergence: stops when ||g|| <= max(gtol, rtol * gnorm0); with the
     default gtol = 0, when ||g|| <= rtol ||g(x0)||. The norm is
-    ||g||_{M(x)^{-1}} ("metric", the default; the Euclidean norm for plain
-    numpy arrays without metric_solve) or ||g||_{P(x)^{-1}}
+    ||g||_{M(x)^{-1}} ("metric", the default; the Euclidean norm for numpy
+    arrays without metric_solve) or ||g||_{P(x)^{-1}}
     ("preconditioner"; the same unless precond_solve is given, and then one
     more P solve per new iterate). The recorded and displayed ||g|| is this
     norm. gnorm0 defaults to ||g(x0)|| and can be passed explicitly, e.g.
@@ -248,10 +249,6 @@ def trust_region_newton(
     """
     if (hessvec is None) == (operators_at is None):
         raise ValueError("pass hessvec, or operators_at (with hessvec=None), but not both")
-    euclidean_default = space is None or space is numpy_space
-    if metric_solve is None and operators_at is None and not euclidean_default:
-        raise ValueError("metric_solve is required with a custom space "
-                         "(the default, M = I, is only for plain numpy arrays)")
     if krylov not in ("auto", "cg", "lanczos"):
         raise ValueError(f"krylov must be 'auto', 'cg' or 'lanczos', not {krylov!r}")
     if krylov == "cg" and (saddle_free or precond_solve is not None):
@@ -273,10 +270,6 @@ def trust_region_newton(
     if g0 is not None and to_covector is not None:
         g0 = to_covector(g0)
 
-    def default_metric_solve(w: CovectorT) -> VectorT:
-        """M = I for plain numpy arrays: the same array, as a vector."""
-        return cast(VectorT, w)
-
     def operators(x: PointT) -> PointOperators[VectorT, CovectorT]:
         """The operators at x, with fallbacks resolved and checked."""
         given = operators_at(x) if operators_at is not None else None
@@ -287,28 +280,31 @@ def trust_region_newton(
             hv = hessvec
             H = lambda v: hv(x, v)                                      # noqa: E731
         H = _normalized(H, to_covector)
+        # The metric comes from the user, or as a pair from the space.
         Ms = given.metric_solve if given is not None else None
         if Ms is None and metric_solve is not None:
             ms = metric_solve
             Ms = lambda w: ms(x, w)                                     # noqa: E731
+        Ma = given.metric_apply if given is not None else None
+        if Ma is None and metric_apply is not None:
+            ma = metric_apply
+            Ma = lambda v: ma(x, v)                                     # noqa: E731
         if Ms is not None:
             Ms = _normalized(Ms, to_vector)
-        elif euclidean_default:
-            Ms = default_metric_solve
+            Ma = None if Ma is None else _normalized(Ma, to_covector)
+        elif Ma is not None:
+            raise ValueError("metric_apply without metric_solve: pass both, or neither "
+                             "to use the space's metric")
+        elif sp.metric_solve is not None:
+            Ms, Ma = sp.metric_solve, sp.metric_apply
         else:
-            raise ValueError("metric_solve is required with a custom space")
+            raise ValueError("no metric: pass metric_solve (the space has no default metric)")
         Ps = given.precond_solve if given is not None else None
         if Ps is None and precond_solve is not None:
             ps = precond_solve
             Ps = lambda w: ps(x, w)                                     # noqa: E731
         if Ps is not None:
             Ps = _normalized(Ps, to_vector)
-        Ma = given.metric_apply if given is not None else None
-        if Ma is None and metric_apply is not None:
-            ma = metric_apply
-            Ma = lambda v: ma(x, v)                                     # noqa: E731
-        if Ma is not None:
-            Ma = _normalized(Ma, to_covector)
         if Ps is not None and Ma is None:
             raise ValueError("a separate preconditioner needs metric_apply (M)")
         if krylov == "cg" and Ps is not None:

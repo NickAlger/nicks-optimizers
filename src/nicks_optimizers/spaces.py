@@ -21,8 +21,15 @@ supply their own record:
 
 check_space(space, ...) verifies a record's internal consistency on sample
 vectors. Vector and covector operations are separate fields on purpose, so a
-space spells out which kind of object every function acts on. A space says
-nothing about geometry: the metric is given by operators (see metrics).
+space spells out which kind of object every function acts on.
+
+Geometry. A space may carry a default metric, the fixed Hilbert structure of
+its representation: metric_solve (M^{-1}) and metric_apply (M), used when the
+optimizer is given no metric of its own. numpy_space has M = I; a tuple tree
+has the direct sum of its leaves' metrics, which direct_sum_operator lets
+you change leaf by leaf; tuple_block_space has one only if you give it. A
+metric passed to the optimizer (point-dependent, see metrics) always takes
+precedence.
 
 Types
 -----
@@ -68,7 +75,7 @@ class VectorSpace(Generic[PointT, VectorT, CovectorT, VectorBlockT, CovectorBloc
     methods, no inheritance. Build one with a constructor (numpy_space,
     numpy_space_with_reductions, tuple_tree_space, tuple_block_space) and
     change entries with dataclasses.replace. Every entry is required except
-    translate, dimension and the normalize_* entries.
+    translate, dimension, the default metric and the normalize_* entries.
 
       scale_vector(a, v) -> Vector           a v
       scale_covector(a, w) -> Covector       a w
@@ -87,6 +94,11 @@ class VectorSpace(Generic[PointT, VectorT, CovectorT, VectorBlockT, CovectorBloc
                                              retraction); None on a manifold
       dimension(v) -> int                    optional: the dimension n, used to
                                              cap the number of Lanczos steps
+      metric_solve(w) -> Vector              optional: the default metric, M^{-1} w
+      metric_apply(v) -> Covector            and M v, of the representation (fixed,
+                                             not point-dependent), used when the
+                                             optimizer is given no metric; the
+                                             two must be inverse to each other
       normalize_point(x) -> Point            optional: the space's own form of a
       normalize_vector(v) -> Vector          point, vector or covector supplied
       normalize_covector(w) -> Covector      by the user (x0, g0, and the results
@@ -112,6 +124,8 @@ class VectorSpace(Generic[PointT, VectorT, CovectorT, VectorBlockT, CovectorBloc
     combine_covectors: Callable[[CovectorBlockT, Coords], CovectorT]
     translate: Optional[Callable[[PointT, VectorT], PointT]] = None
     dimension: Optional[Callable[[VectorT], int]] = None
+    metric_solve: Optional[Callable[[CovectorT], VectorT]] = None
+    metric_apply: Optional[Callable[[VectorT], CovectorT]] = None
     normalize_point: Optional[Callable[[PointT], PointT]] = None
     normalize_vector: Optional[Callable[[VectorT], VectorT]] = None
     normalize_covector: Optional[Callable[[CovectorT], CovectorT]] = None
@@ -207,6 +221,15 @@ def _np_dimension(v: Vector) -> int:
     return int(v.size)
 
 
+def _np_metric_solve(w: Covector) -> Vector:
+    """M = I: the same array, as a vector."""
+    return Vector(w)
+
+
+def _np_metric_apply(v: Vector) -> Covector:
+    return Covector(v)
+
+
 numpy_space: NumpySpace = VectorSpace(
     scale_vector=_np_scale_vector, scale_covector=_np_scale_covector,
     axpy_vector=_np_axpy_vector, axpy_covector=_np_axpy_covector,
@@ -214,7 +237,8 @@ numpy_space: NumpySpace = VectorSpace(
     vector_block=_np_vector_block, covector_block=_np_covector_block,
     append_vector=_np_append_vector, append_covector=_np_append_covector,
     combine_vectors=_np_combine_vectors, combine_covectors=_np_combine_covectors,
-    translate=_np_translate, dimension=_np_dimension)
+    translate=_np_translate, dimension=_np_dimension,
+    metric_solve=_np_metric_solve, metric_apply=_np_metric_apply)
 
 
 def numpy_space_with_reductions(allreduce: Callable[[Coords], Coords]) -> NumpySpace:
@@ -227,7 +251,8 @@ def numpy_space_with_reductions(allreduce: Callable[[Coords], Coords]) -> NumpyS
     the method makes comes from reduced numbers, so the processes stay in
     lockstep. Operators (metric_solve, precond_solve, hessvec) act on the
     local arrays, with whatever neighbor communication they need; the
-    pairings that turn their results into numbers are reduced here.
+    pairings that turn their results into numbers are reduced here. The
+    default metric is M = I, as for numpy_space (it acts locally).
     """
     def pair(w: Covector, v: Vector) -> float:
         return float(allreduce(np.array([_np_pair(w, v)]))[0])
@@ -321,6 +346,21 @@ class LeafBlock(Generic[BlockT]):
     block: BlockT
 
 
+def direct_sum_operator(operators: Any) -> Callable[[Any], Any]:
+    """The operator on tuple trees that applies each leaf of `operators` (a
+    tuple tree of functions, lists allowed) to the corresponding leaf of its
+    argument: the direct sum of the leaf operators. For example, a metric
+    that weights two leaves differently:
+
+        space = dataclasses.replace(
+            tuple_tree_space(),
+            metric_solve=direct_sum_operator((lambda w: w / m1, lambda w: w / m2)),
+            metric_apply=direct_sum_operator((lambda v: m1 * v, lambda v: m2 * v)))
+    """
+    ops = as_tuple_tree(operators)
+    return lambda tree: _tree_map2(lambda op, leaf: op(leaf), ops, tree)
+
+
 TreeNumpySpace = VectorSpace[Tree[Point], Tree[Vector], Tree[Covector],
                              Tree[LeafBlock[VectorBlock]], Tree[LeafBlock[CovectorBlock]]]
 
@@ -340,15 +380,25 @@ def tuple_tree_space(leaf_space: Any = None) -> Any:
     """Points, vectors and covectors as tuple trees: nested tuples whose
     leaves belong to leaf_space (default numpy_space, so leaves are numpy
     arrays of any shape). For example ((a, b), c) with arrays a, b, c of
-    different shapes; vectors and covectors at x share the structure of x.
+    different shapes. Vectors and covectors share one structure, and points
+    have it too when they are translated (on a manifold, with retract,
+    points can be any tree).
 
     Every operation works leaf by leaf with the leaf space's functions:
     pairings add up the leaves' pairings, and a block of vectors is a tree of
     the same structure whose leaves are leaf-space blocks (each wrapped in a
     LeafBlock), so the leaf space's batched block operations are used (e.g.
-    one matrix product per numpy leaf). translate and dimension exist when the leaf space has them. With
-    leaf_space = numpy_space_with_reductions(allreduce) the trees are
-    distributed (one reduction per leaf per pairing).
+    one matrix product per numpy leaf). translate and dimension exist when
+    the leaf space has them. With leaf_space =
+    numpy_space_with_reductions(allreduce) the trees are distributed (one
+    reduction per leaf per pairing).
+
+    The default metric is the direct sum of the leaves' Hilbert spaces: M
+    applies the leaf space's metric to every leaf (M = I for numpy leaves),
+    when the leaf space has one. Override it as a whole, or leaf by leaf
+    with direct_sum_operator, through dataclasses.replace(space,
+    metric_solve=..., metric_apply=...); a metric passed to the optimizer
+    overrides it too.
 
     Lists are accepted where user objects enter the optimizer: x0, g0 and the
     results of the user's functions go through as_tuple_tree (the
@@ -390,6 +440,20 @@ def tuple_tree_space(leaf_space: Any = None) -> Any:
         def dimension(v: Any) -> int:
             return sum(leaf_dimension(vl) for vl in _tree_leaves(v))
 
+    metric_solve = None
+    if leaf.metric_solve is not None:
+        leaf_metric_solve = leaf.metric_solve
+
+        def metric_solve(w: Any) -> Any:
+            return _tree_map(leaf_metric_solve, w)
+
+    metric_apply = None
+    if leaf.metric_apply is not None:
+        leaf_metric_apply = leaf.metric_apply
+
+        def metric_apply(v: Any) -> Any:
+            return _tree_map(leaf_metric_apply, v)
+
     return VectorSpace(
         scale_vector=lambda a, v: _tree_map(lambda vl: leaf.scale_vector(a, vl), v),
         scale_covector=lambda a, w: _tree_map(lambda wl: leaf.scale_covector(a, wl), w),
@@ -404,6 +468,7 @@ def tuple_tree_space(leaf_space: Any = None) -> Any:
             lambda Cl, wl: LeafBlock(leaf.append_covector(Cl.block, wl)), C, w),
         combine_vectors=combine_vectors, combine_covectors=combine_covectors,
         translate=translate, dimension=dimension,
+        metric_solve=metric_solve, metric_apply=metric_apply,
         normalize_point=as_tuple_tree, normalize_vector=as_tuple_tree,
         normalize_covector=as_tuple_tree)
 
@@ -414,11 +479,14 @@ def tuple_block_space(*, scale_vector: Callable[[float, VectorT], VectorT],
                       axpy_covector: Callable[[float, CovectorT, CovectorT], CovectorT],
                       pair: Callable[[CovectorT, VectorT], float],
                       translate: Optional[Callable[[PointT, VectorT], PointT]] = None,
-                      dimension: Optional[Callable[[VectorT], int]] = None
+                      dimension: Optional[Callable[[VectorT], int]] = None,
+                      metric_solve: Optional[Callable[[CovectorT], VectorT]] = None,
+                      metric_apply: Optional[Callable[[VectorT], CovectorT]] = None
                       ) -> VectorSpace[PointT, VectorT, CovectorT,
                                        tuple[VectorT, ...], tuple[CovectorT, ...]]:
     """A complete space for any vector type, from five functions (plus
-    translate for a flat space, and optionally dimension).
+    translate for a flat space, and optionally dimension and a default
+    metric).
 
     Blocks are tuples of vectors (or covectors), and the block entries are
     built from the functions given: pair_block pairs one vector at a time and
@@ -460,7 +528,8 @@ def tuple_block_space(*, scale_vector: Callable[[float, VectorT], VectorT],
         vector_block=vector_block, covector_block=covector_block,
         append_vector=append_vector, append_covector=append_covector,
         combine_vectors=combine_vectors, combine_covectors=combine_covectors,
-        translate=translate, dimension=dimension)
+        translate=translate, dimension=dimension, metric_solve=metric_solve,
+        metric_apply=metric_apply)
 
 
 def check_space(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlockT, CovectorBlockT],

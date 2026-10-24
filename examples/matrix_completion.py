@@ -39,8 +39,11 @@ Covectors. The same pairs (gU, gV), acting on tangent vectors by the same
 dot product. An ambient functional xi -> <Z, xi>_F becomes
 ((I - U U^T) Z V, Z^T U). In these coordinates the Frobenius metric is M = I:
 M^{-1} maps a canonical covector (below) to the tangent vector with the same
-components (frobenius_metric_solve). So the trust region is a Frobenius ball
-of matrix changes, and with P = M the Krylov solver is unpreconditioned.
+components. That is the default metric of the tuple tree space (the direct
+sum of the leaves' Euclidean metrics), so no metric is passed: the trust
+region is a Frobenius ball of matrix changes, and with P = M the Krylov
+solver is unpreconditioned. (M^{-1} keeps the gauge because the optimizer
+only passes it canonical covectors, through project_covector.)
 
 Redundancy. The components (N r + M r numbers) outnumber the dimension by
 r^2: the block U^T gU of a covector pairs to zero with every tangent vector.
@@ -194,19 +197,12 @@ def tangent_dimension(v: Tangent) -> int:
 
 def fixed_rank_space() -> FixedRankSpace:
     """Tangent vectors and covectors as tuple trees (dU, dV) of numpy
-    matrices, with two changes to tuple_tree_space: no translate, since
+    matrices, with the Frobenius metric (the tree's default, M = I in these
+    coordinates) and two changes to tuple_tree_space: no translate, since
     points move only through retract, and the dimension of the tangent
     space."""
     space = cast(FixedRankSpace, tuple_tree_space())
     return dataclasses.replace(space, translate=None, dimension=tangent_dimension)
-
-
-def frobenius_metric_solve(x: LowRank, w: Cotangent) -> Tangent:
-    """M^{-1} w for the Frobenius metric, which is the identity in these
-    coordinates: a canonical covector's components are already the tangent
-    vector it represents (U^T gU = 0 is the gauge). The optimizer passes only
-    canonical covectors, through project_covector."""
-    return Tangent(w)
 
 
 def gauge_projection(x: LowRank, w: Cotangent) -> Cotangent:
@@ -351,8 +347,7 @@ def complete(samples: Samples, x0: LowRank, saddle_free: bool = False, curvature
         lambda x: objective(samples, x),
         lambda x: gradient(samples, x),
         lambda x, v: hessian_action(samples, x, v, curvature),
-        x0, metric_solve=frobenius_metric_solve,
-        space=fixed_rank_space(), retract=retract,
+        x0, space=fixed_rank_space(), retract=retract,
         project_covector=gauge_projection if project else None,
         saddle_free=saddle_free, krylov=krylov, radius=radius, display=display,
         max_iter=max_iter, max_krylov=max_krylov, rtol=rtol)

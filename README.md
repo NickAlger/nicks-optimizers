@@ -11,7 +11,8 @@ accelerant.
   `||g||_{M^{-1}} <= rtol ||g(x0)||_{M^{-1}}`, and defines the curvature used
   by the saddle-free model. You give it by operators: `metric_solve`
   (`M^{-1}`), plus `metric_apply` (`M`) only when a separate preconditioner
-  is used. For plain numpy arrays the default is `M = I`.
+  is used. Without them the space's own metric is used: `M = I` for numpy
+  arrays, the direct sum of the leaves' metrics for tuple trees.
 - **Preconditioning through the metric.** By default `P = M`: the
   conventional (Steihaug-Toint) trust region, where only `M^{-1}` is ever
   applied. Any symmetric positive definite operator passed as `metric_solve`,
@@ -88,7 +89,8 @@ x, summary = trust_region_newton(
 print(summary.reason, summary.f)
 ```
 
-Without `metric_solve` the metric is the identity. See
+Without `metric_solve` the metric is the space's default, the identity for
+numpy arrays. See
 [`examples/quickstart.py`](examples/quickstart.py) for a typed, matrix-free
 version on the chained Rosenbrock function, with a separate preconditioner
 as well.
@@ -106,14 +108,17 @@ trust_region_newton(fun, grad, hessvec, x0, *, metric_solve=None, precond_solve=
 | `grad` | `(x) -> Covector` | differential `df(x)` |
 | `hessvec` | `(x, v) -> Covector` | `H(x) v` |
 | `x0` | `Point` | starting point, in the representation of `space` |
-| `metric_solve` | `(x, w) -> Vector` | `M(x)^{-1} w`. Default `M = I` for numpy arrays; required for other spaces |
+| `metric_solve` | `(x, w) -> Vector` | `M(x)^{-1} w`. Default: the space's metric (`M = I` for numpy arrays, a direct sum for tuple trees) |
 | `precond_solve` | `(x, w) -> Vector` | `P(x)^{-1} w`, if `P` should differ from `M` |
-| `metric_apply` | `(x, v) -> Covector` | `M(x) v`; needed only with `precond_solve` |
+| `metric_apply` | `(x, v) -> Covector` | `M(x) v`; needed only with `precond_solve`, and passed together with `metric_solve` |
 
 `M` and `P` are symmetric positive definite. With a separate preconditioner,
 `metric_apply` and `metric_solve` must be inverse to each other: the Lanczos
 solver builds the M-Gram matrix of its basis with `metric_apply` and measures
-residuals with `metric_solve`.
+residuals with `metric_solve`. So a metric comes as a pair: pass both (or
+`metric_solve` alone when `P = M`), or neither to use the space's metric;
+`metric_apply` alone is refused, and so is a user `metric_solve` with a
+separate preconditioner but no `metric_apply`.
 
 Optional: `space` (see [Other representations](#other-representations)),
 `retract(x, s) -> Point` and `project_covector(x, w) -> Covector` (see
@@ -222,8 +227,23 @@ input). Ready-made spaces:
   tuples of vectors. Override `pair_block` and `combine_*` with
   `dataclasses.replace` for batched versions.
 
-For any space other than `numpy_space`, pass `metric_solve` (for `M = I` on
-a tree of arrays, `lambda x, w: w`).
+A space may carry a default metric, the fixed Hilbert structure of its
+representation (`VectorSpace.metric_solve` and `metric_apply`): `M = I` for
+the numpy spaces, and for a tuple tree the direct sum of the leaves' metrics
+(the leaf space's metric on every leaf). Override it leaf by leaf with
+`direct_sum_operator`, a tree of leaf operators applied to the
+corresponding leaves:
+
+```python
+space = dataclasses.replace(
+    tuple_tree_space(),
+    metric_solve=direct_sum_operator(((lambda w: w / m1, lambda w: w / m2), lambda w: w / m3)),
+    metric_apply=direct_sum_operator(((lambda v: m1 * v, lambda v: m2 * v), lambda v: m3 * v)))
+```
+
+or replace it as a whole the same way. A metric passed to
+`trust_region_newton` (which may depend on the point) overrides the space's.
+`tuple_block_space` takes a default metric as an option.
 
 `check_space(space, v1, v2, w1, w2)` verifies a space's internal consistency on
 sample vectors. The method never modifies objects in place.
@@ -303,8 +323,8 @@ trust-region Newton on the manifold of rank-r matrices:
 
 - points as thin SVD factors;
 - tangent vectors as gauged variations `(dU, dV)`, a `tuple_tree_space` of
-  matrices, so the Frobenius metric is the identity in the components
-  (`metric_solve` returns them unchanged);
+  matrices, so the Frobenius metric is the identity in the components: the
+  tree's default metric, so none is passed;
 - the truncated SVD of a rank-2r factorization as the retraction;
 - the exact Riemannian Hessian, curvature term included.
 
@@ -348,7 +368,7 @@ code and are meant to be reused by other optimizers.
 
 | module | contents |
 |---|---|
-| `spaces` | how points, vectors and covectors are represented: `VectorSpace`, `numpy_space`, `numpy_space_with_reductions`, `tuple_tree_space` (with `as_tuple_tree`), `tuple_block_space`, `check_space` |
+| `spaces` | how points, vectors and covectors are represented, with optional default metrics: `VectorSpace`, `numpy_space`, `numpy_space_with_reductions`, `tuple_tree_space` (with `as_tuple_tree`, `direct_sum_operator`), `tuple_block_space`, `check_space` |
 | `metrics` | the metric, given by operators, and norms: `MetricSolve`, `MetricApply`, `euclidean_metric_solve`, `euclidean_metric_apply`, `vector_norm`, `covector_norm`, M-Gram matrix growth |
 | `dense` | small dense linear algebra in coordinates: Rayleigh–Ritz for a projected pencil, the trust-region problem on a ball (with the hard case) |
 | `krylov` | Krylov processes, immutable: preconditioned Lanczos (`lanczos_start`, `lanczos_advance`, `LanczosState`, `lanczos_tridiagonal`) and conjugate gradients (`cg_start`, `cg_curvature`, `cg_advance`, `CGState`, with recurrences for P-norms); optional covector projection for redundant representations |

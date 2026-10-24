@@ -15,7 +15,6 @@ from nicks_optimizers import (
     PointOperators,
     Vector,
     covector_norm,
-    euclidean_metric_apply,
     forcing_term,
     history_array,
     numpy_space,
@@ -129,7 +128,7 @@ def check_gnorm0_and_rtol() -> bool:
     def run(x_start: Point, gnorm0: float | None = None) -> tuple[Point, Array]:
         x, summary = trust_region_newton(
             rosen_fun, rosen_grad, rosen_hessvec, x_start, precond_solve=jacobi_precond_solve,
-            metric_apply=euclidean_metric_apply, rtol=rtol, gnorm0=gnorm0, max_iter=1000)
+            rtol=rtol, gnorm0=gnorm0, max_iter=1000)
         return x, history_array(summary)
 
     def stopped_at_first_below(x: Point, hist: Array) -> bool:
@@ -143,7 +142,7 @@ def check_gnorm0_and_rtol() -> bool:
                  float(np.max(np.abs(x_def - x_exp))), 0.0)
     x_mid, _ = trust_region_newton(
         rosen_fun, rosen_grad, rosen_hessvec, x0, precond_solve=jacobi_precond_solve,
-        metric_apply=euclidean_metric_apply, max_iter=40)
+        max_iter=40)
     x_restart, h_restart = run(x_mid, gnorm0=g0)
     _, h_naive = run(x_mid)
     ok &= report("restart with gnorm0 = ||g(x0)|| stops at the original threshold",
@@ -236,8 +235,7 @@ def test_operators_at_matches_and_runs_once_per_point() -> None:
     for separate in (False, True):
         if separate:
             _, reference = trust_region_newton(rosen_fun, rosen_grad, rosen_hessvec, x0,
-                                               precond_solve=jacobi_precond_solve,
-                                               metric_apply=euclidean_metric_apply)
+                                               precond_solve=jacobi_precond_solve)
         else:
             _, reference = trust_region_newton(rosen_fun, rosen_grad, rosen_hessvec, x0,
                                                metric_solve=jacobi_precond_solve)
@@ -251,9 +249,8 @@ def test_operators_at_matches_and_runs_once_per_point() -> None:
                 return PointOperators(hessvec=H, precond_solve=P_solve)
             return PointOperators(hessvec=H, metric_solve=P_solve)
 
-        # With a separate P, M = I comes from the default, and M itself from the keyword.
-        x, summary = trust_region_newton(rosen_fun, rosen_grad, None, x0, operators_at=operators_at,
-                                         metric_apply=euclidean_metric_apply if separate else None)
+        # With a separate P, the metric (M = I) is the space's default.
+        x, summary = trust_region_newton(rosen_fun, rosen_grad, None, x0, operators_at=operators_at)
         assert without_times(summary.iterations) == without_times(reference.iterations)
         records = summary.iterations
         assert any(not r.accepted for r in records)             # rejections did happen
@@ -268,10 +265,17 @@ def test_operator_arguments_are_checked() -> None:
         return PointOperators(hessvec=lambda v: rosen_hessvec(x, v))
 
     def p_ops(x: Point) -> PointOperators[Vector, Covector]:
-        """A separate preconditioner, but no metric_apply anywhere."""
+        """A user metric and a separate preconditioner, but no metric_apply
+        (the space's M must not be paired with a user M^{-1})."""
         return PointOperators(hessvec=lambda v: rosen_hessvec(x, v),
+                              metric_solve=lambda w: smoothing_metric_solve(x, w),
                               precond_solve=lambda w: jacobi_precond_solve(x, w))
-    for hv, ops in ((None, None), (rosen_hessvec, hv_ops), (None, p_ops)):
+
+    def ma_ops(x: Point) -> PointOperators[Vector, Covector]:
+        """metric_apply without metric_solve."""
+        return PointOperators(hessvec=lambda v: rosen_hessvec(x, v),
+                              metric_apply=lambda v: smoothing_metric_apply(x, v))
+    for hv, ops in ((None, None), (rosen_hessvec, hv_ops), (None, p_ops), (None, ma_ops)):
         try:
             trust_region_newton(rosen_fun, rosen_grad, hv, x0, operators_at=ops)
         except ValueError:
@@ -312,8 +316,7 @@ def test_krylov_selection() -> None:
                                               krylov="lanczos"),
         "auto, saddle-free": trust_region_newton(*pieces, metric_solve=jacobi_precond_solve,
                                                  saddle_free=True),
-        "auto, M = I, P = Jacobi": trust_region_newton(*pieces, precond_solve=jacobi_precond_solve,
-                                                       metric_apply=euclidean_metric_apply),
+        "auto, M = I, P = Jacobi": trust_region_newton(*pieces, precond_solve=jacobi_precond_solve),
     }
     expected = {"auto, M = P = I": "cg", "auto, M = P = Jacobi": "cg", "lanczos, M = P": "lanczos",
                 "auto, saddle-free": "lanczos", "auto, M = I, P = Jacobi": "lanczos"}

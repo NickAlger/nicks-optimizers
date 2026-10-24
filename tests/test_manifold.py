@@ -93,7 +93,8 @@ def test_gauge_stays_clean_only_with_projection() -> None:
     x = mc.random_point((80, 60), 3, rng)
     sp = mc.fixed_rank_space()
     hessvec = lambda v: mc.hessian_action(samples, x, v, curvature=False)
-    precond = lambda w: mc.frobenius_metric_solve(x, w)
+    assert sp.metric_solve is not None
+    precond = sp.metric_solve                       # the Frobenius metric, M = I
 
     def run(project: Optional[Callable[[mc.Cotangent], mc.Cotangent]]) -> tuple[float, float]:
         state = lanczos_start(sp, mc.gradient(samples, x), precond)

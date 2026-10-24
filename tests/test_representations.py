@@ -21,6 +21,7 @@ from nicks_optimizers import (
     VectorSpace,
     as_tuple_tree,
     check_space,
+    direct_sum_operator,
     history_array,
     numpy_space,
     numpy_space_with_reductions,
@@ -321,3 +322,101 @@ def test_composite_representation() -> None:
 
 def test_distributed_lockstep() -> None:
     assert check_distributed_lockstep(np.random.default_rng(8))
+
+
+def tree_problem() -> tuple[Any, Any, Any, Any, Any]:
+    """Rosenbrock on to_tree's structure: (fun, grad, hessvec, jacobi, x0),
+    with jacobi(x, w) the Jacobi solve on trees."""
+    def fun(x: Any) -> float:
+        return rosen_fun(Point(from_tree(x)))
+
+    def grad(x: Any) -> Any:
+        return to_tree(rosen_grad(Point(from_tree(x))))
+
+    def hessvec(x: Any, v: Any) -> Any:
+        return to_tree(rosen_hessvec(Point(from_tree(x)), Vector(from_tree(v))))
+
+    def jacobi(x: Any, w: Any) -> Any:
+        return to_tree(jacobi_precond_solve(Point(from_tree(x)), Covector(from_tree(w))))
+
+    return fun, grad, hessvec, jacobi, to_tree(np.tile([-1.2, 1.0], 25))
+
+
+def same_path(a: RunSummary, b: RunSummary, upto: int = 40) -> bool:
+    """Both runs converge, and f, |g| and the radius agree to 1e-8 over the
+    first `upto` iterations. (Tree pairings add up per leaf, so rounding
+    differs from the flat run, and along Rosenbrock's path the differences
+    grow, from 1e-16 to about 1e-9 by iteration 50.)"""
+    ha, hb = history_array(a), history_array(b)
+    return (a.reason == b.reason == "converged" and min(len(ha), len(hb)) >= upto
+            and bool(np.allclose(ha[:upto, 1:4], hb[:upto, 1:4], rtol=1e-8, atol=0.0)))
+
+
+def test_tree_default_metric_is_the_direct_sum() -> None:
+    """Without a metric, a tree uses the direct sum of its leaves' metrics:
+    M = I for numpy leaves (the same run as passing the identity), with
+    P = M and with a separate preconditioner; and a leaf space with its own
+    metric, here 2 I, gives the run of the flat problem with M = 2 I."""
+    fun, grad, hessvec, jacobi, x0 = tree_problem()
+    space: VectorSpace[Any, Any, Any, Any, Any] = tuple_tree_space()
+    ident_solve, ident_apply = (lambda x, w: w), (lambda x, v: v)
+    _, default = trust_region_newton(fun, grad, hessvec, x0, space=space, max_krylov=200)
+    _, explicit = trust_region_newton(fun, grad, hessvec, x0, space=space, max_krylov=200,
+                                      metric_solve=ident_solve)
+    assert default.reason == "converged"
+    assert without_times(default.iterations) == without_times(explicit.iterations)
+    _, default_p = trust_region_newton(fun, grad, hessvec, x0, space=space, precond_solve=jacobi)
+    _, explicit_p = trust_region_newton(fun, grad, hessvec, x0, space=space, precond_solve=jacobi,
+                                        metric_solve=ident_solve, metric_apply=ident_apply)
+    assert default_p.iterations[0].subproblem.krylov == "lanczos"
+    assert without_times(default_p.iterations) == without_times(explicit_p.iterations)
+
+    doubled = dataclasses.replace(numpy_space, metric_solve=lambda w: Vector(0.5 * w),
+                                  metric_apply=lambda v: Covector(2.0 * v))
+    tree_doubled: VectorSpace[Any, Any, Any, Any, Any] = tuple_tree_space(doubled)
+    _, tree_run_2 = trust_region_newton(fun, grad, hessvec, x0, space=tree_doubled,
+                                        precond_solve=jacobi)
+    _, flat_2 = trust_region_newton(rosen_fun, rosen_grad, rosen_hessvec,
+                                    Point(np.tile([-1.2, 1.0], 25)),
+                                    metric_solve=lambda x, w: Vector(0.5 * w),
+                                    metric_apply=lambda x, v: Covector(2.0 * v),
+                                    precond_solve=jacobi_precond_solve)
+    assert same_path(tree_run_2, flat_2)
+
+
+def test_tree_metric_overrides() -> None:
+    """A different metric for each leaf through direct_sum_operator (lists
+    allowed) gives the run of the flat problem with the block-diagonal
+    metric, with P = M (CG) and with a separate preconditioner (Lanczos);
+    passing the metric to the optimizer instead overrides the space's."""
+    fun, grad, hessvec, jacobi, x0 = tree_problem()
+    rng = np.random.default_rng(10)
+    m = 0.5 + rng.random(50)
+    m1, m2, m3 = to_tree(m)[0][0], to_tree(m)[0][1], to_tree(m)[1]
+    solves = [[lambda w: w / m1, lambda w: w / m2], lambda w: w / m3]
+    applies = [[lambda v: m1 * v, lambda v: m2 * v], lambda v: m3 * v]
+    weighted: VectorSpace[Any, Any, Any, Any, Any] = dataclasses.replace(
+        tuple_tree_space(), metric_solve=direct_sum_operator(solves),
+        metric_apply=direct_sum_operator(applies))
+    v = to_tree(rng.standard_normal(50))
+    assert weighted.metric_solve is not None and weighted.metric_apply is not None
+    assert np.allclose(from_tree(weighted.metric_solve(weighted.metric_apply(v))), from_tree(v))
+
+    flat_solve = lambda x, w: Vector(w / m)                       # noqa: E731
+    flat_apply = lambda x, v: Covector(m * v)                     # noqa: E731
+    flat_x0 = Point(np.tile([-1.2, 1.0], 25))
+    for separate in (False, True):
+        precond = jacobi if separate else None
+        _, tree_summary = trust_region_newton(fun, grad, hessvec, x0, space=weighted,
+                                              precond_solve=precond, max_krylov=200)
+        _, flat = trust_region_newton(rosen_fun, rosen_grad, rosen_hessvec, flat_x0,
+                                      metric_solve=flat_solve, metric_apply=flat_apply,
+                                      precond_solve=jacobi_precond_solve if separate else None,
+                                      max_krylov=200)
+        assert same_path(tree_summary, flat)
+        _, overridden = trust_region_newton(
+            fun, grad, hessvec, x0, space=tuple_tree_space(), precond_solve=precond,
+            metric_solve=lambda x, w: weighted.metric_solve(w),   # type: ignore[misc]
+            metric_apply=lambda x, v: weighted.metric_apply(v),   # type: ignore[misc]
+            max_krylov=200)
+        assert without_times(overridden.iterations) == without_times(tree_summary.iterations)
