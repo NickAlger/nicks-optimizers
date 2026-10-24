@@ -31,8 +31,9 @@ accelerant.
   value *with respect to M* (generalized eigenvalues of `H u = theta M u`), so
   saddle points repel iterates instead of attracting them.
 - **Representation-generic.** Points, vectors and covectors can be numpy arrays
-  (the default), distributed objects, collections of arrays, or anything else,
-  through a `VectorSpace` record of functions.
+  of any shape (the default), tuple trees of arrays (given as tuples or
+  lists), distributed objects, or anything else, through a `VectorSpace`
+  record of functions.
 - **Distributed.** Every reduction goes through the space, so vectors can
   live on many MPI ranks and the method runs in lockstep.
   [`examples/p_laplacian.py`](examples/p_laplacian.py) minimizes a
@@ -201,15 +202,28 @@ See [`dev/TODO.md`](dev/TODO.md).
 
 `trust_region_newton(..., space=...)` takes a `VectorSpace`: a frozen record of
 functions (`scale_vector`, `scale_covector`, `axpy_covector`, `pair`, block
-operations, and optionally `translate` and `dimension`). Ready-made spaces:
+operations, and optionally `translate`, `dimension` and conversions of user
+input). Ready-made spaces:
 
-- `numpy_space`: the default, one numpy array per vector.
+- `numpy_space`: the default, one numpy array per vector, of any shape (a
+  matrix-valued unknown can stay a matrix).
 - `numpy_space_with_reductions(allreduce)`: one local numpy array per process
   (e.g. MPI ranks); only the reductions change. All decisions come from reduced
   numbers, so processes stay in lockstep.
+- `tuple_tree_space(leaf_space)`: nested tuples whose leaves belong to
+  `leaf_space`, numpy arrays by default (`tuple_tree_space()`), e.g.
+  `((a, b), c)` with arrays of different shapes. Every operation works leaf
+  by leaf with the leaf space's functions, so trees can hold distributed
+  arrays (`numpy_space_with_reductions` leaves) or any other basic vector
+  type. Lists are accepted wherever user objects enter (`x0`, `g0`, the
+  results of your functions) and turned into tuples there, so the method
+  works with, and returns, tuple trees. Leaves must not be tuples or lists.
 - `tuple_block_space(...)`: any vector type from five functions; blocks are
   tuples of vectors. Override `pair_block` and `combine_*` with
   `dataclasses.replace` for batched versions.
+
+For any space other than `numpy_space`, pass `metric_solve` (for `M = I` on
+a tree of arrays, `lambda x, w: w`).
 
 `check_space(space, v1, v2, w1, w2)` verifies a space's internal consistency on
 sample vectors. The method never modifies objects in place.
@@ -288,8 +302,9 @@ Nothing in the method assumes a flat space. On a manifold:
 trust-region Newton on the manifold of rank-r matrices:
 
 - points as thin SVD factors;
-- tangent vectors as gauged variations, so the Frobenius metric is the
-  identity in the components (`metric_solve` returns them unchanged);
+- tangent vectors as gauged variations `(dU, dV)`, a `tuple_tree_space` of
+  matrices, so the Frobenius metric is the identity in the components
+  (`metric_solve` returns them unchanged);
 - the truncated SVD of a rank-2r factorization as the retraction;
 - the exact Riemannian Hessian, curvature term included.
 
@@ -333,7 +348,7 @@ code and are meant to be reused by other optimizers.
 
 | module | contents |
 |---|---|
-| `spaces` | how points, vectors and covectors are represented: `VectorSpace`, `numpy_space`, `numpy_space_with_reductions`, `tuple_block_space`, `check_space` |
+| `spaces` | how points, vectors and covectors are represented: `VectorSpace`, `numpy_space`, `numpy_space_with_reductions`, `tuple_tree_space` (with `as_tuple_tree`), `tuple_block_space`, `check_space` |
 | `metrics` | the metric, given by operators, and norms: `MetricSolve`, `MetricApply`, `euclidean_metric_solve`, `euclidean_metric_apply`, `vector_norm`, `covector_norm`, M-Gram matrix growth |
 | `dense` | small dense linear algebra in coordinates: Rayleigh–Ritz for a projected pencil, the trust-region problem on a ball (with the hard case) |
 | `krylov` | Krylov processes, immutable: preconditioned Lanczos (`lanczos_start`, `lanczos_advance`, `LanczosState`, `lanczos_tridiagonal`) and conjugate gradients (`cg_start`, `cg_curvature`, `cg_advance`, `CGState`, with recurrences for P-norms); optional covector projection for redundant representations |

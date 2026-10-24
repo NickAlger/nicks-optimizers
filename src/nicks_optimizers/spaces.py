@@ -7,10 +7,14 @@ combined. numpy_space, the default, uses plain numpy arrays; other
 representations (distributed objects, collections of arrays, GPU arrays, ...)
 supply their own record:
 
-  numpy_space                          one numpy array per vector
+  numpy_space                          one numpy array (of any shape) per
+                                       vector
   numpy_space_with_reductions(allreduce)  one local numpy array per process
                                        (e.g. MPI ranks); only the reductions
                                        change
+  tuple_tree_space(leaf_space)         nested tuples whose leaves are vectors
+                                       of another space (numpy arrays by
+                                       default); lists are accepted on entry
   tuple_block_space(...)               any vector type, from five functions;
                                        blocks are tuples of vectors
   dataclasses.replace(space, ...)      override individual entries
@@ -41,7 +45,7 @@ representation if you define NewTypes over it.
 
 import dataclasses
 from dataclasses import dataclass
-from typing import Callable, Generic, NewType, Optional, TypeVar
+from typing import Any, Callable, Generic, Iterator, NewType, Optional, TypeVar, Union, overload
 
 import numpy as np
 import numpy.typing as npt
@@ -62,9 +66,9 @@ class VectorSpace(Generic[PointT, VectorT, CovectorT, VectorBlockT, CovectorBloc
 
     A frozen, keyword-only dataclass used purely as a composite value: no
     methods, no inheritance. Build one with a constructor (numpy_space,
-    numpy_space_with_reductions, tuple_block_space) and change entries with
-    dataclasses.replace. Every entry is required except translate and
-    dimension.
+    numpy_space_with_reductions, tuple_tree_space, tuple_block_space) and
+    change entries with dataclasses.replace. Every entry is required except
+    translate, dimension and the normalize_* entries.
 
       scale_vector(a, v) -> Vector           a v
       scale_covector(a, w) -> Covector       a w
@@ -83,6 +87,13 @@ class VectorSpace(Generic[PointT, VectorT, CovectorT, VectorBlockT, CovectorBloc
                                              retraction); None on a manifold
       dimension(v) -> int                    optional: the dimension n, used to
                                              cap the number of Lanczos steps
+      normalize_point(x) -> Point            optional: the space's own form of a
+      normalize_vector(v) -> Vector          point, vector or covector supplied
+      normalize_covector(w) -> Covector      by the user (x0, g0, and the results
+                                             of the user's functions), applied
+                                             once where they enter the
+                                             optimizer; e.g. lists to tuples for
+                                             tuple_tree_space. None: used as is
 
     The method never modifies an object in place, and it only calls these
     functions; pairings are the only places where numbers come out of vectors.
@@ -101,6 +112,9 @@ class VectorSpace(Generic[PointT, VectorT, CovectorT, VectorBlockT, CovectorBloc
     combine_covectors: Callable[[CovectorBlockT, Coords], CovectorT]
     translate: Optional[Callable[[PointT, VectorT], PointT]] = None
     dimension: Optional[Callable[[VectorT], int]] = None
+    normalize_point: Optional[Callable[[PointT], PointT]] = None
+    normalize_vector: Optional[Callable[[VectorT], VectorT]] = None
+    normalize_covector: Optional[Callable[[CovectorT], CovectorT]] = None
 
 
 # --- numpy representation ---------------------------------------------------
@@ -142,36 +156,47 @@ def _np_axpy_covector(a: float, w: Covector, z: Covector) -> Covector:
     return Covector(a * w + z)
 
 
+# Vectors may have any shape; a block of k of them has the shape of a vector
+# plus a trailing axis of length k (a matrix of columns for 1-D vectors).
+# Products flatten the vector axes, so an array of any shape computes exactly
+# what its flattened 1-D version would.
+
+
 def _np_pair(w: Covector, v: Vector) -> float:
-    return float(w @ v)
+    return float(w.ravel() @ v.ravel())
 
 
 def _np_pair_block(B: VectorBlock, w: Covector) -> Coords:
-    return B.T @ w
+    return B.reshape(-1, B.shape[-1]).T @ w.ravel()
 
 
 def _np_vector_block(v: Vector) -> VectorBlock:
-    return VectorBlock(v[:, None])
+    return VectorBlock(v[..., None])
 
 
 def _np_covector_block(w: Covector) -> CovectorBlock:
-    return CovectorBlock(w[:, None])
+    return CovectorBlock(w[..., None])
 
 
 def _np_append_vector(B: VectorBlock, v: Vector) -> VectorBlock:
-    return VectorBlock(np.column_stack((B, v)))
+    return VectorBlock(np.concatenate((B, v[..., None]), axis=-1))
 
 
 def _np_append_covector(C: CovectorBlock, w: Covector) -> CovectorBlock:
-    return CovectorBlock(np.column_stack((C, w)))
+    return CovectorBlock(np.concatenate((C, w[..., None]), axis=-1))
+
+
+def _np_combine(B: Array, c: Coords) -> Array:
+    combined: Array = (B.reshape(-1, B.shape[-1]) @ c).reshape(B.shape[:-1])
+    return combined
 
 
 def _np_combine_vectors(B: VectorBlock, c: Coords) -> Vector:
-    return Vector(B @ c)
+    return Vector(_np_combine(B, c))
 
 
 def _np_combine_covectors(C: CovectorBlock, c: Coords) -> Covector:
-    return Covector(C @ c)
+    return Covector(_np_combine(C, c))
 
 
 def _np_translate(x: Point, s: Vector) -> Point:
@@ -179,7 +204,7 @@ def _np_translate(x: Point, s: Vector) -> Point:
 
 
 def _np_dimension(v: Vector) -> int:
-    return int(v.shape[0])
+    return int(v.size)
 
 
 numpy_space: NumpySpace = VectorSpace(
@@ -205,15 +230,182 @@ def numpy_space_with_reductions(allreduce: Callable[[Coords], Coords]) -> NumpyS
     pairings that turn their results into numbers are reduced here.
     """
     def pair(w: Covector, v: Vector) -> float:
-        return float(allreduce(np.array([float(w @ v)]))[0])
+        return float(allreduce(np.array([_np_pair(w, v)]))[0])
 
     def pair_block(B: VectorBlock, w: Covector) -> Coords:
-        return allreduce(B.T @ w)
+        return allreduce(_np_pair_block(B, w))
 
     def dimension(v: Vector) -> int:
-        return int(round(float(allreduce(np.array([float(v.shape[0])]))[0])))
+        return int(round(float(allreduce(np.array([float(v.size)]))[0])))
 
     return dataclasses.replace(numpy_space, pair=pair, pair_block=pair_block, dimension=dimension)
+
+
+# --- tuple trees ---------------------------------------------------------------
+
+
+LeafT = TypeVar("LeafT")
+Tree = Union[LeafT, tuple["Tree[LeafT]", ...]]
+"""A tuple tree: a leaf, or a tuple of tuple trees. Anything that is not a
+tuple is a leaf, so leaves must not be tuples or lists themselves."""
+
+
+def as_tuple_tree(tree: Any) -> Any:
+    """The same tree with every list turned into a tuple (recursively).
+    Leaves are returned as they are, not copied. Named tuples become plain
+    tuples."""
+    if isinstance(tree, (tuple, list)):
+        return tuple(as_tuple_tree(child) for child in tree)
+    return tree
+
+
+def _not_a_list(tree: Any) -> None:
+    if isinstance(tree, list):
+        raise TypeError("a tuple tree contains a list; convert user input with as_tuple_tree "
+                        "(trust_region_newton does this for the objects it is given)")
+
+
+def _tree_map(f: Callable[[Any], Any], tree: Any) -> Any:
+    """f applied to every leaf; the result has the same tuple structure."""
+    if isinstance(tree, tuple):
+        return tuple(_tree_map(f, child) for child in tree)
+    _not_a_list(tree)
+    return f(tree)
+
+
+def _leaf_pairs(a: Any, b: Any) -> Iterator[tuple[Any, Any]]:
+    """The corresponding leaves of two trees, in order. Raises if the trees
+    differ in structure."""
+    if isinstance(a, tuple) and isinstance(b, tuple) and len(a) == len(b):
+        for x, y in zip(a, b):
+            yield from _leaf_pairs(x, y)
+        return
+    _not_a_list(a)
+    _not_a_list(b)
+    if isinstance(a, tuple) or isinstance(b, tuple):
+        raise ValueError("tuple trees with different structures")
+    yield a, b
+
+
+def _tree_map2(f: Callable[[Any, Any], Any], a: Any, b: Any) -> Any:
+    """f applied to corresponding leaves; the result has the structure of a."""
+    if isinstance(a, tuple):
+        if not (isinstance(b, tuple) and len(a) == len(b)):
+            _not_a_list(b)
+            raise ValueError("tuple trees with different structures")
+        return tuple(_tree_map2(f, x, y) for x, y in zip(a, b))
+    _not_a_list(a)
+    _not_a_list(b)
+    if isinstance(b, tuple):
+        raise ValueError("tuple trees with different structures")
+    return f(a, b)
+
+
+def _tree_leaves(tree: Any) -> Iterator[Any]:
+    if isinstance(tree, tuple):
+        for child in tree:
+            yield from _tree_leaves(child)
+        return
+    _not_a_list(tree)
+    yield tree
+
+
+BlockT = TypeVar("BlockT")
+
+
+@dataclass(frozen=True)
+class LeafBlock(Generic[BlockT]):
+    """A leaf of a block of tuple trees: a block of the leaf space, wrapped so
+    that a leaf space whose blocks are tuples (tuple_block_space) cannot be
+    mistaken for more tree."""
+    block: BlockT
+
+
+TreeNumpySpace = VectorSpace[Tree[Point], Tree[Vector], Tree[Covector],
+                             Tree[LeafBlock[VectorBlock]], Tree[LeafBlock[CovectorBlock]]]
+
+
+@overload
+def tuple_tree_space() -> TreeNumpySpace: ...
+
+
+@overload
+def tuple_tree_space(leaf_space: VectorSpace[PointT, VectorT, CovectorT, VectorBlockT, CovectorBlockT]
+                     ) -> VectorSpace[Tree[PointT], Tree[VectorT], Tree[CovectorT],
+                                      Tree[LeafBlock[VectorBlockT]],
+                                      Tree[LeafBlock[CovectorBlockT]]]: ...
+
+
+def tuple_tree_space(leaf_space: Any = None) -> Any:
+    """Points, vectors and covectors as tuple trees: nested tuples whose
+    leaves belong to leaf_space (default numpy_space, so leaves are numpy
+    arrays of any shape). For example ((a, b), c) with arrays a, b, c of
+    different shapes; vectors and covectors at x share the structure of x.
+
+    Every operation works leaf by leaf with the leaf space's functions:
+    pairings add up the leaves' pairings, and a block of vectors is a tree of
+    the same structure whose leaves are leaf-space blocks (each wrapped in a
+    LeafBlock), so the leaf space's batched block operations are used (e.g.
+    one matrix product per numpy leaf). translate and dimension exist when the leaf space has them. With
+    leaf_space = numpy_space_with_reductions(allreduce) the trees are
+    distributed (one reduction per leaf per pairing).
+
+    Lists are accepted where user objects enter the optimizer: x0, g0 and the
+    results of the user's functions go through as_tuple_tree (the
+    normalize_* entries), so the method works with, and returns, tuples
+    only. Inside, a list is an error. Leaves must not be tuples or lists:
+    anything that is a tuple is taken for an inner node of the tree.
+    """
+    leaf = numpy_space if leaf_space is None else leaf_space
+
+    def pair(w: Any, v: Any) -> float:
+        return float(sum(leaf.pair(wl, vl) for wl, vl in _leaf_pairs(w, v)))
+
+    def pair_block(B: Any, w: Any) -> Coords:
+        total: Optional[Coords] = None
+        for Bl, wl in _leaf_pairs(B, w):
+            p = leaf.pair_block(Bl.block, wl)
+            total = p if total is None else total + p
+        if total is None:
+            raise ValueError("a tuple tree without leaves")
+        return total
+
+    def combine_vectors(B: Any, c: Coords) -> Any:
+        return _tree_map(lambda Bl: leaf.combine_vectors(Bl.block, c), B)
+
+    def combine_covectors(C: Any, c: Coords) -> Any:
+        return _tree_map(lambda Cl: leaf.combine_covectors(Cl.block, c), C)
+
+    translate = None
+    if leaf.translate is not None:
+        leaf_translate = leaf.translate
+
+        def translate(x: Any, s: Any) -> Any:
+            return _tree_map2(leaf_translate, x, s)
+
+    dimension = None
+    if leaf.dimension is not None:
+        leaf_dimension = leaf.dimension
+
+        def dimension(v: Any) -> int:
+            return sum(leaf_dimension(vl) for vl in _tree_leaves(v))
+
+    return VectorSpace(
+        scale_vector=lambda a, v: _tree_map(lambda vl: leaf.scale_vector(a, vl), v),
+        scale_covector=lambda a, w: _tree_map(lambda wl: leaf.scale_covector(a, wl), w),
+        axpy_vector=lambda a, v, z: _tree_map2(lambda vl, zl: leaf.axpy_vector(a, vl, zl), v, z),
+        axpy_covector=lambda a, w, z: _tree_map2(lambda wl, zl: leaf.axpy_covector(a, wl, zl), w, z),
+        pair=pair, pair_block=pair_block,
+        vector_block=lambda v: _tree_map(lambda vl: LeafBlock(leaf.vector_block(vl)), v),
+        covector_block=lambda w: _tree_map(lambda wl: LeafBlock(leaf.covector_block(wl)), w),
+        append_vector=lambda B, v: _tree_map2(
+            lambda Bl, vl: LeafBlock(leaf.append_vector(Bl.block, vl)), B, v),
+        append_covector=lambda C, w: _tree_map2(
+            lambda Cl, wl: LeafBlock(leaf.append_covector(Cl.block, wl)), C, w),
+        combine_vectors=combine_vectors, combine_covectors=combine_covectors,
+        translate=translate, dimension=dimension,
+        normalize_point=as_tuple_tree, normalize_vector=as_tuple_tree,
+        normalize_covector=as_tuple_tree)
 
 
 def tuple_block_space(*, scale_vector: Callable[[float, VectorT], VectorT],

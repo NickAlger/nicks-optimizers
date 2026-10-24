@@ -86,8 +86,9 @@ number of Krylov steps and reaches the same fit.)
 Run:  python examples/matrix_completion.py
 """
 
+import dataclasses
 from dataclasses import dataclass
-from typing import NewType
+from typing import NewType, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -97,9 +98,12 @@ from typing import Literal
 from nicks_optimizers import (
     Array,
     RunSummary,
+    CovectorBlock,
+    LeafBlock,
+    VectorBlock,
     VectorSpace,
     trust_region_newton,
-    tuple_block_space,
+    tuple_tree_space,
 )
 
 
@@ -109,8 +113,8 @@ IntArray = npt.NDArray[np.intp]
 LowRank = NewType("LowRank", tuple[Array, Array, Array])     # (U, s, V): U diag(s) V^T
 Tangent = NewType("Tangent", tuple[Array, Array])            # (dU, dV), U^T dU = 0
 Cotangent = NewType("Cotangent", tuple[Array, Array])        # (gU, gV), canonical if U^T gU = 0
-TangentBlock = tuple[Tangent, ...]
-CotangentBlock = tuple[Cotangent, ...]
+TangentBlock = tuple[LeafBlock[VectorBlock], LeafBlock[VectorBlock]]          # blocks of dU, dV
+CotangentBlock = tuple[LeafBlock[CovectorBlock], LeafBlock[CovectorBlock]]
 FixedRankSpace = VectorSpace[LowRank, Tangent, Cotangent, TangentBlock, CotangentBlock]
 
 
@@ -183,16 +187,18 @@ def relative_error(x: LowRank, a: LowRank) -> float:
 # --- the vector space and the metric ------------------------------------------
 
 
+def tangent_dimension(v: Tangent) -> int:
+    """(N + M - r) r: the components number (N + M) r, less r^2 for the gauge."""
+    return int((v[0].shape[0] + v[1].shape[0] - v[0].shape[1]) * v[0].shape[1])
+
+
 def fixed_rank_space() -> FixedRankSpace:
-    """Tangent vectors and covectors as component pairs. There is no
-    translate: points move only through retract."""
-    return tuple_block_space(
-        scale_vector=lambda a, v: Tangent((a * v[0], a * v[1])),
-        scale_covector=lambda a, w: Cotangent((a * w[0], a * w[1])),
-        axpy_vector=lambda a, v, z: Tangent((a * v[0] + z[0], a * v[1] + z[1])),
-        axpy_covector=lambda a, w, z: Cotangent((a * w[0] + z[0], a * w[1] + z[1])),
-        pair=lambda w, v: float(np.vdot(w[0], v[0]) + np.vdot(w[1], v[1])),
-        dimension=lambda v: (v[0].shape[0] + v[1].shape[0] - v[0].shape[1]) * v[0].shape[1])
+    """Tangent vectors and covectors as tuple trees (dU, dV) of numpy
+    matrices, with two changes to tuple_tree_space: no translate, since
+    points move only through retract, and the dimension of the tangent
+    space."""
+    space = cast(FixedRankSpace, tuple_tree_space())
+    return dataclasses.replace(space, translate=None, dimension=tangent_dimension)
 
 
 def frobenius_metric_solve(x: LowRank, w: Cotangent) -> Tangent:

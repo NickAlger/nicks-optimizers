@@ -68,7 +68,7 @@ happened (see trust_region_diagnostics).
 
 import time
 from dataclasses import dataclass
-from typing import Callable, Generic, Literal, Optional, cast
+from typing import Callable, Generic, Literal, Optional, ParamSpec, TypeVar, cast
 
 import numpy as np
 
@@ -93,6 +93,24 @@ from .trust_region_diagnostics import (
     format_summary,
 )
 from .trust_region_subproblem import solve_tr_subproblem, solve_tr_subproblem_cg
+
+
+ParamsP = ParamSpec("ParamsP")
+ResultT = TypeVar("ResultT")
+
+
+def _normalized(f: Callable[ParamsP, ResultT], normalize: Optional[Callable[[ResultT], ResultT]]
+                ) -> Callable[ParamsP, ResultT]:
+    """f followed by normalize, or f itself when normalize is None: how the
+    results of user functions are put in the space's own form (e.g. lists
+    to tuples for tuple trees)."""
+    if normalize is None:
+        return f
+    norm = normalize
+
+    def normalized(*args: ParamsP.args, **kwargs: ParamsP.kwargs) -> ResultT:
+        return norm(f(*args, **kwargs))
+    return normalized
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -168,11 +186,13 @@ def trust_region_newton(
     measured in the M(x)-norm of that iterate.
 
     space says how points, vectors and covectors are represented (default
-    numpy_space), and x0 must already be a point in that representation; it
-    is not copied or converted. retract defaults to space.translate; a space
-    without one (a manifold) needs retract. On a manifold, hessvec is the
-    Hessian of the pullback s -> f(retract(x, s)), which for a second-order
-    retraction is the Riemannian Hessian. If the representation of vectors
+    numpy_space). x0, g0 and the results of the user's functions are taken
+    as they are, except for the space's normalize_* conversions (lists to
+    tuples for tuple_tree_space); nothing is copied. retract defaults to
+    space.translate; a space without one (a manifold) needs retract. On a
+    manifold, hessvec is the Hessian of the pullback s -> f(retract(x, s)),
+    which for a second-order retraction is the Riemannian Hessian. If the
+    representation of vectors
     and covectors at x is redundant (a subspace or quotient of the stored
     components), pass project_covector (see the module docstring).
 
@@ -243,6 +263,16 @@ def trust_region_newton(
     sp = space if space is not None else cast(
         VectorSpace[PointT, VectorT, CovectorT, VectorBlockT, CovectorBlockT], numpy_space)
 
+    # User objects enter in the space's own form (e.g. lists become tuples).
+    to_vector, to_covector = sp.normalize_vector, sp.normalize_covector
+    grad_ = _normalized(grad, to_covector)
+    retract_ = None if retract is None else _normalized(retract, sp.normalize_point)
+    project_ = None if project_covector is None else _normalized(project_covector, to_covector)
+    if sp.normalize_point is not None:
+        x0 = sp.normalize_point(x0)
+    if g0 is not None and to_covector is not None:
+        g0 = to_covector(g0)
+
     def default_metric_solve(w: CovectorT) -> VectorT:
         """M = I for plain numpy arrays: the same array, as a vector."""
         return cast(VectorT, w)
@@ -256,23 +286,29 @@ def trust_region_newton(
             assert hessvec is not None
             hv = hessvec
             H = lambda v: hv(x, v)                                      # noqa: E731
+        H = _normalized(H, to_covector)
         Ms = given.metric_solve if given is not None else None
-        if Ms is None:
-            if metric_solve is not None:
-                ms = metric_solve
-                Ms = lambda w: ms(x, w)                                 # noqa: E731
-            elif euclidean_default:
-                Ms = default_metric_solve
-            else:
-                raise ValueError("metric_solve is required with a custom space")
+        if Ms is None and metric_solve is not None:
+            ms = metric_solve
+            Ms = lambda w: ms(x, w)                                     # noqa: E731
+        if Ms is not None:
+            Ms = _normalized(Ms, to_vector)
+        elif euclidean_default:
+            Ms = default_metric_solve
+        else:
+            raise ValueError("metric_solve is required with a custom space")
         Ps = given.precond_solve if given is not None else None
         if Ps is None and precond_solve is not None:
             ps = precond_solve
             Ps = lambda w: ps(x, w)                                     # noqa: E731
+        if Ps is not None:
+            Ps = _normalized(Ps, to_vector)
         Ma = given.metric_apply if given is not None else None
         if Ma is None and metric_apply is not None:
             ma = metric_apply
             Ma = lambda v: ma(x, v)                                     # noqa: E731
+        if Ma is not None:
+            Ma = _normalized(Ma, to_covector)
         if Ps is not None and Ma is None:
             raise ValueError("a separate preconditioner needs metric_apply (M)")
         if krylov == "cg" and Ps is not None:
@@ -295,7 +331,7 @@ def trust_region_newton(
         return m_norm, m_norm, None, 1, 0
 
     start = time.perf_counter()
-    retraction = retract if retract is not None else sp.translate
+    retraction = retract_ if retract_ is not None else sp.translate
     if retraction is None:
         raise ValueError("the space has no translate (e.g. a manifold): pass retract")
     x = x0
@@ -307,12 +343,12 @@ def trust_region_newton(
         radius, gnorm0, it = resume.radius, resume.gnorm0, resume.next_iteration
 
     def canonical(x: PointT, w: CovectorT) -> CovectorT:
-        return w if project_covector is None else project_covector(x, w)
+        return w if project_ is None else project_(x, w)
 
     if g0 is not None:
         g, grad_calls = canonical(x, g0), 0
     else:
-        g, grad_calls = canonical(x, grad(x)), 1
+        g, grad_calls = canonical(x, grad_(x)), 1
     ops = operators(x)
     gnorm, metric_gnorm, start_vector, metric_solves, precond_solves = gradient_norms(g, ops)
     if gnorm0 is None:
@@ -329,7 +365,7 @@ def trust_region_newton(
             reason = "max_iter"
             break
         forcing = forcing_term(gnorm, gnorm0, forcing_max)
-        project = None if project_covector is None else (lambda w: project_covector(x, w))
+        project = None if project_ is None else (lambda w: project_(x, w))
         assert ops.metric_solve is not None
         use_cg = krylov == "cg" or (krylov == "auto" and ops.precond_solve is None
                                     and not saddle_free)
@@ -360,7 +396,7 @@ def trust_region_newton(
         records.append(record)
         if accepted:
             x, fx = x_trial, f_trial
-            g = canonical(x, grad(x))
+            g = canonical(x, grad_(x))
             grad_calls += 1
             ops = operators(x)
             gnorm, metric_gnorm, start_vector, a, b = gradient_norms(g, ops)
