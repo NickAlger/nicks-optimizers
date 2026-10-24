@@ -46,7 +46,6 @@ from dataclasses import dataclass
 from typing import Callable
 
 import numpy as np
-import pyamg
 from mpi4py import MPI
 from scipy.integrate import solve_ivp
 from scipy.optimize import brentq
@@ -125,8 +124,7 @@ def operators_at(loc: pl.Local, e: Eigen, precond: str, u: Point
     if precond == "jacobi":
         d = block.diagonal()
         return hessvec, lambda w: Vector(w / d)
-    cycle = pyamg.smoothed_aggregation_solver(block, symmetry="symmetric").aspreconditioner(cycle="V")
-    return hessvec, lambda w: Vector(np.asarray(cycle @ w, dtype=float))
+    return hessvec, pl.multigrid_cycle(block)
 
 
 def eigenvalue(loc: pl.Local, e: Eigen, u: Array) -> float:

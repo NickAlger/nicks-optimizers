@@ -62,13 +62,13 @@ both hold, in different problems, and neither looks like a bug.
 
 *Problem with known saddles* (`examples/p_laplacian_eigen.py`, 1898
 unknowns, 10 random sign-mixed starts per p; the higher eigenfunctions are
-saddles):
+saddles; deterministic multigrid):
 
 | p | plain: ground state, median it / Lanczos | saddle-free: ground state, median it / Lanczos |
 |---|---|---|
-| 2 | 10/10, 8 / 35 | 10/10, 13 / 250 |
-| 3 | 10/10, 14 / 51 | 10/10, 14 / 71 |
-| 4 | 10/10, 19 / 70 | 10/10, 19 / 71 |
+| 2 | 10/10, 8 / 36 | 10/10, 13 / 208 |
+| 3 | 10/10, 14 / 54 | 10/10, 15 / 75 |
+| 4 | 10/10, 18 / 67 | 10/10, 18 / 67 |
 
 Plain trust-region Newton escapes every saddle by itself. At a random start
 the Hessian has dozens of negative eigenvalues (the -diag(m |u|^{p-2}) / B
@@ -91,7 +91,8 @@ solve hits the cap with rho = 1.01, and the full-matrix error drifts from
 discards information that plain TR exploits through boundary steps.
 
 *Tried:* letting the model-stall test also stop interior saddle-free solves
-(lam = 0). No real effect: eigen p = 2 median Lanczos 250 -> 239, and
+(lam = 0). No real effect: eigen p = 2 median Lanczos 250 -> 239 (measured
+before the multigrid was made deterministic), and
 completion still fails (error 16x -> 12x best).
 
 *Current view.* No evidence so far that saddle-free helps inside a trust
@@ -138,9 +139,9 @@ subproblem (one extra solve per iteration, or share it with the first
 Lanczos vector).
 
 Evidence (2026-10-24, `examples/p_laplacian.py`, serial, p = 5, eps = 1e-3,
-20/40/80 rings): the L^2 ball needed 58 / 99 / 156 iterations and 298 / 542 / 1127
+20/40/80 rings): the L^2 ball needed 62 / 91 / 176 iterations and 311 / 512 / 1274
 Lanczos steps; an H^1 ball (stiffness matrix, exact dual by sparse LU)
-needed 22 / 27 / 40 and 78 / 125 / 163. At p = 3: 11 / 13 / 16 against 8 / 9 / 10. The
+needed 23 / 26 / 42 and 78 / 108 / 212. At p = 3: 12 / 14 / 17 against 8 / 9 / 10. The
 L^2 ball admits rough steps that a gradient-dependent energy punishes, and
 more of them as the mesh is refined.
 

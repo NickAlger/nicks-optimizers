@@ -174,7 +174,7 @@ mpiexec -n 4 python examples/p_laplacian.py --p 1.5 3 5
   iterates are the same on any number of ranks, and the tests check this.
 
 p is a dial: p = 1.5 takes 9 Newton iterations on every mesh, while p = 5 takes
-50 to 130 and grows with refinement. The example's docstring explains why (the
+40 to 120 and grows with refinement. The example's docstring explains why (the
 L^2 ball admits rough steps) and compares an H^1 ball.
 
 [`examples/p_laplacian_eigen.py`](examples/p_laplacian_eigen.py) finds the first
@@ -191,7 +191,7 @@ minimization of `f(u) = A(u)/p - log(B(u))/p` with `A = int |grad u|^p` and
   value from a radial shooting computation (`j_{0,1}^2` for p = 2).
 - **Escaping saddles:** from random sign-mixed starts, plain trust-region
   Newton reaches the ground state every time. The saddle-free model gets
-  there too, at up to 7 times the Krylov cost (see
+  there too, at up to 6 times the Krylov cost (see
   [`dev/TODO.md`](dev/TODO.md)).
 
 ## Manifolds

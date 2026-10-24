@@ -44,15 +44,15 @@ What to expect (from u = 0, eps = 1e-3, 2 ranks, 20/40/80 rings, i.e. about
 or better.
 
   p = 1.5   9 / 9 / 9 Newton iterations
-  p = 3     16 / 19 / 21
-  p = 5     51 / 92 / 130
+  p = 3     16 / 17 / 23
+  p = 5     43 / 89 / 120
 
 Near u = 0 the Hessian of the p = 5 energy is eps^3 times a Laplacian, so
 Newton steps are huge and the method spends most iterations on the
 trust-region boundary. Those iterations grow with refinement because the L^2
 ball admits rough steps, cheap in L^2 but expensive for an energy that grows
 like |grad s|^5. In a serial experiment, an H^1 ball (stiffness matrix, exact
-dual by sparse LU) took 22 / 27 / 40 iterations instead of 58 / 99 / 156.
+dual by sparse LU) took 23 / 26 / 42 iterations instead of 62 / 91 / 176.
 Block Jacobi has no coarse space, so Lanczos steps per solve grow with the
 number of ranks.
 
@@ -311,6 +311,18 @@ def owned_block(loc: Local, g: Array, a: Array, c: Array) -> scipy.sparse.csr_ma
     return block
 
 
+def multigrid_cycle(A: scipy.sparse.csr_matrix) -> Callable[[Covector], Vector]:
+    """One smoothed-aggregation V-cycle for A (symmetric positive definite).
+
+    'local' weighting of the prolongation smoother uses a Gershgorin bound
+    instead of pyamg's default spectral radius estimate, which starts from an
+    unseeded random vector and makes runs irreproducible: with p = 5 the
+    iteration count varied from 49 to 63 between identical runs."""
+    cycle = pyamg.smoothed_aggregation_solver(
+        A, symmetry="symmetric", smooth=("jacobi", {"weighting": "local"})).aspreconditioner(cycle="V")
+    return lambda w: Vector(np.asarray(cycle @ w, dtype=float))
+
+
 def operators_at(loc: Local, e: Energy, precond: str, u: Point) -> Operators:
     """H(u) and P(u)^{-1}, set up once per point: the Hessian's element data,
     and for block Jacobi the owned block and its multigrid hierarchy."""
@@ -319,8 +331,7 @@ def operators_at(loc: Local, e: Energy, precond: str, u: Point) -> Operators:
     if precond == "jacobi":
         diagonal = A.diagonal()
         return hessvec, lambda w: Vector(w / diagonal)
-    cycle = pyamg.smoothed_aggregation_solver(A, symmetry="symmetric").aspreconditioner(cycle="V")
-    return hessvec, lambda w: Vector(np.asarray(cycle @ w, dtype=float))
+    return hessvec, multigrid_cycle(A)
 
 
 # --- the space and the L^2 ball --------------------------------------------------------

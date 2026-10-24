@@ -64,3 +64,14 @@ def test_block_jacobi_multigrid_converges(tmp_path: Path) -> None:
     block) finds the exact discrete solution on 2 ranks."""
     history = run_example(2, tmp_path, "--p", "1.5", "3", "5")
     assert all(entry["error"] < 1e-8 for entry in history.values())
+
+
+def test_amg_runs_are_reproducible(tmp_path: Path) -> None:
+    """Two identical runs give identical histories. (pyamg's default
+    prolongation smoothing estimates a spectral radius from an unseeded random
+    vector; the example uses 'local' weighting to avoid it. The p = 5 path is
+    sensitive enough to show any difference.)"""
+    first = run_example(2, tmp_path, "--p", "5")
+    (tmp_path / "history_2.json").rename(tmp_path / "first.json")
+    second = run_example(2, tmp_path, "--p", "5")
+    assert first == second
