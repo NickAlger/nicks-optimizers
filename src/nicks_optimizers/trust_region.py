@@ -203,7 +203,7 @@ def trust_region_newton(
     if retraction is None:
         raise ValueError("the space has no translate (e.g. a manifold): pass retract")
     x = x0
-    fx = fun(x)
+    fx = float(fun(x))                          # records hold Python floats
     fun_calls, outer_dual_calls = 1, 1
     it = 0
     if resume is not None:
@@ -244,11 +244,11 @@ def trust_region_newton(
                 lambda w: project_covector(x, w)))
 
         x_trial = retraction(x, s)
-        f_trial = fun(x_trial)
+        f_trial = float(fun(x_trial))
         fun_calls += 1
         predicted = -stats.model_value
         rho = reduction_ratio(fx, f_trial, predicted)
-        accepted = rho > eta
+        accepted = bool(rho > eta)
         new_radius = update_radius(radius, rho, stats.step_norm, radius_max)
         record = IterationRecord(
             iteration=it, f=fx, gnorm=gnorm,

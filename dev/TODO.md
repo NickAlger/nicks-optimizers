@@ -57,6 +57,51 @@ directions as strongly positively curved.
 - Variants: flip only Ritz values below -tau * |theta|_max; switch to |H|
   only when the plain model's step is rejected; stop on the plain residual.
 
+**Update (2026-10-24, later).** Two more experiments; hypotheses 1 and 2
+both hold, in different problems, and neither looks like a bug.
+
+*Problem with known saddles* (`examples/p_laplacian_eigen.py`, 1898
+unknowns, 10 random sign-mixed starts per p; the higher eigenfunctions are
+saddles):
+
+| p | plain: ground state, median it / Lanczos | saddle-free: ground state, median it / Lanczos |
+|---|---|---|
+| 2 | 10/10, 8 / 35 | 10/10, 13 / 250 |
+| 3 | 10/10, 14 / 51 | 10/10, 14 / 71 |
+| 4 | 10/10, 19 / 70 | 10/10, 19 / 71 |
+
+Plain trust-region Newton escapes every saddle by itself. At a random start
+the Hessian has dozens of negative eigenvalues (the -diag(m |u|^{p-2}) / B
+term). Plain TR needs only the leftmost one: its solves go to the boundary
+(lam = 360) and stall after 3-5 Lanczos steps. The saddle-free model needs
+all of them resolved. In one solve the count of negative Ritz values grew
+1, 2, 4, 7, 13, 25, 44, 62 over 100 steps while the surrogate residual stayed
+near 20 times its tolerance (hypothesis 2). Its interior steps also
+overshot the non-quadratic -log B term (rho = -15).
+
+*Matrix completion, traced* (600 x 500, r = 5, 2^-k, from X = 0):
+saddle-free takes a different path rather than a slower one. By iteration
+2 it has grown all components together: singular values
+[.65 .49 .44 .43 .41], against [.26 .17 .16 .15 .15] for plain TR. Flipping the
+negative curvature along junk components turns them into ordinary descent
+directions. From iteration 80 it sits in a nearly flat region,
+f = 4.40e-5 for 120 iterations against the optimum 3.85e-5. Every Krylov
+solve hits the cap with rho = 1.01, and the full-matrix error drifts from
+0.28 to 0.50. This is hypothesis 1: inside a trust region the |H| model
+discards information that plain TR exploits through boundary steps.
+
+*Tried:* letting the model-stall test also stop interior saddle-free solves
+(lam = 0). No real effect: eigen p = 2 median Lanczos 250 -> 239, and
+completion still fails (error 16x -> 12x best).
+
+*Current view.* No evidence so far that saddle-free helps inside a trust
+region; it costs more whenever H has many negative eigenvalues. Possible
+roles to test: a fallback only when plain TR stalls with a tiny gradient
+and negative curvature; or line-search Newton, where nothing else handles
+negative curvature. A test problem where plain TR genuinely stalls at a
+saddle is still missing. Symmetric starts are no good: they trap both
+models, since the Krylov space never sees the symmetric negative direction.
+
 **Reproduce.**
 
 ```python

@@ -177,6 +177,23 @@ p is a dial: p = 1.5 takes 9 Newton iterations on every mesh, while p = 5 takes
 50 to 130 and grows with refinement. The example's docstring explains why (the
 L^2 ball admits rough steps) and compares an H^1 ball.
 
+[`examples/p_laplacian_eigen.py`](examples/p_laplacian_eigen.py) finds the first
+p-Laplacian eigenvalue on the same distributed setup, by unconstrained
+minimization of `f(u) = A(u)/p - log(B(u))/p` with `A = int |grad u|^p` and
+`B = int |u|^p`:
+
+- **Why this f:** its minimizers are exactly the ground states, scaled to
+  `A = 1`, so `lambda_1 = A / B` there. Unlike the Rayleigh quotient, f has
+  no flat directions.
+- **Saddles:** f is nonconvex, and the higher eigenfunctions are its saddle
+  points.
+- **Accuracy:** the discrete eigenvalues converge at second order to the
+  value from a radial shooting computation (`j_{0,1}^2` for p = 2).
+- **Escaping saddles:** from random sign-mixed starts, plain trust-region
+  Newton reaches the ground state every time. The saddle-free model gets
+  there too, at up to 7 times the Krylov cost (see
+  [`dev/TODO.md`](dev/TODO.md)).
+
 ## Manifolds
 
 Nothing in the method assumes a flat space. On a manifold:

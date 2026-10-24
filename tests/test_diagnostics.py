@@ -227,3 +227,17 @@ def test_display_output() -> None:
 
 def test_resume() -> None:
     assert check_resume()
+
+
+def test_records_hold_python_scalars() -> None:
+    """An objective returning numpy scalars still gives records of Python
+    floats and bools (so they serialize, e.g. to JSON)."""
+    x0 = Point(np.tile([-1.2, 1.0], 5))
+    _, summary = trust_region_newton(lambda x: np.float64(rosen_fun(x)), rosen_grad, rosen_hessvec,
+                                     jacobi_precond_solve, euclidean_inner, euclidean_dual_inner, x0,
+                                     max_iter=5)
+    for record in summary.iterations:
+        assert type(record.accepted) is bool
+        assert all(type(getattr(record, name)) is float
+                   for name in ("f", "gnorm", "radius", "new_radius", "predicted", "actual", "rho"))
+    json.dumps([dataclasses.asdict(r) for r in summary.iterations])

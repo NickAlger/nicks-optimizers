@@ -33,6 +33,7 @@ jobs:
           python matched_vs_mismatched.py
           python matrix_completion.py | tail -10
           mpiexec -n 2 python p_laplacian.py --rings 25
+          mpiexec -n 2 python p_laplacian_eigen.py --rings 25 --start random
 
   types:
     runs-on: ubuntu-latest
