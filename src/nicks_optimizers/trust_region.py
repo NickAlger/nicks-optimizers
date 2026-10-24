@@ -19,6 +19,16 @@ Problem pieces
                                        (psi_i, phi)_{M^{-1}} = <psi_i, B(x) phi>;
                                        used for dual norms (stopping tests).
 
+Optional for representations with redundant components (e.g. gauged
+tangent vectors of a low-rank manifold):
+  project_covector(x, w) -> Covector   the canonical representative of w,
+                                       dropping components that pair to zero
+                                       with every vector at x. Applied to
+                                       gradients and to every Krylov covector,
+                                       where the Lanczos recurrence would
+                                       otherwise amplify rounding errors in
+                                       the invisible components (see krylov).
+
 H and P^{-1} are the only operators the method applies; the geometry enters
 only through the two inner products (see metrics), which must be exact
 duals. The radius carries over from one point to the next, so the theory
@@ -90,6 +100,7 @@ def trust_region_newton(
         x0: PointT,
         space: Optional[VectorSpace[PointT, VectorT, CovectorT, VectorBlockT, CovectorBlockT]] = None,
         retract: Optional[Callable[[PointT, VectorT], PointT]] = None,
+        project_covector: Optional[Callable[[PointT, CovectorT], CovectorT]] = None,
         saddle_free: bool = False,
         radius: float = 1.0, radius_max: float = 1e4,
         radius_min: float = 1e-14, eta: float = 1e-4,
@@ -112,7 +123,12 @@ def trust_region_newton(
 
     space says how points, vectors and covectors are represented (default
     numpy_space), and x0 must already be a point in that representation; it
-    is not copied or converted. retract defaults to space.translate.
+    is not copied or converted. retract defaults to space.translate; a space
+    without one (a manifold) needs retract. On a manifold, hessvec is the
+    Hessian of the pullback s -> f(retract(x, s)), which for a second-order
+    retraction is the Riemannian Hessian. If the representation of vectors
+    and covectors at x is redundant (a subspace or quotient of the stored
+    components), pass project_covector (see the module docstring).
 
     Gradient norms are dual norms, ||g|| = ||g||_{M(x)^{-1}}. With saddle_free, the model
     Hessian is |H|_{M}, approximated through the M-Ritz pairs of the Krylov
@@ -153,6 +169,8 @@ def trust_region_newton(
     sp = space if space is not None else cast(
         VectorSpace[PointT, VectorT, CovectorT, VectorBlockT, CovectorBlockT], numpy_space)
     retraction = retract if retract is not None else sp.translate
+    if retraction is None:
+        raise ValueError("the space has no translate (e.g. a manifold): pass retract")
     x = x0
     fx = fun(x)
     fun_calls, outer_dual_calls = 1, 1
@@ -160,10 +178,13 @@ def trust_region_newton(
     if resume is not None:
         check_resume_matches(resume, fx)
         radius, gnorm0, it = resume.radius, resume.gnorm0, resume.next_iteration
+    def canonical(x: PointT, w: CovectorT) -> CovectorT:
+        return w if project_covector is None else project_covector(x, w)
+
     if g0 is not None:
-        g, grad_calls = g0, 0
+        g, grad_calls = canonical(x, g0), 0
     else:
-        g, grad_calls = grad(x), 1
+        g, grad_calls = canonical(x, grad(x)), 1
     gnorm = covector_norm(sp, lambda Psi, phi: ball_dual_inner(x, Psi, phi), g)
     if gnorm0 is None:
         gnorm0 = gnorm
@@ -186,7 +207,9 @@ def trust_region_newton(
             lambda U, v: ball_inner(x, U, v),
             lambda Psi, phi: ball_dual_inner(x, Psi, phi),
             radius, forcing * gnorm, max_lanczos,
-            g_dual_norm=gnorm, stall_tol=stall_tol, saddle_free=saddle_free)
+            g_dual_norm=gnorm, stall_tol=stall_tol, saddle_free=saddle_free,
+            project_covector=None if project_covector is None else (
+                lambda w: project_covector(x, w)))
 
         x_trial = retraction(x, s)
         f_trial = fun(x_trial)
@@ -204,7 +227,7 @@ def trust_region_newton(
         records.append(record)
         if accepted:
             x, fx = x_trial, f_trial
-            g = grad(x)
+            g = canonical(x, grad(x))
             grad_calls += 1
             gnorm = covector_norm(sp, lambda Psi, phi: ball_dual_inner(x, Psi, phi), g)
             outer_dual_calls += 1

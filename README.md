@@ -20,6 +20,11 @@ the **shape of the trust region** are independent choices.
 - **Representation-generic.** Points, vectors and covectors can be numpy arrays
   (the default), distributed objects, collections of arrays, or anything else,
   through a `VectorSpace` record of functions.
+- **Manifolds.** Points move only through a retraction, and tangent vectors may
+  be stored redundantly (e.g. gauged factor variations), with an optional
+  covector projection that keeps the Krylov process inside the tangent space.
+  [`examples/matrix_completion.py`](examples/matrix_completion.py) completes a
+  matrix on the manifold of rank-r matrices.
 - **Diagnostics, callback and exact resumption.** Per-iteration records, a
   readable iteration log, `callback(x, info)`, and a `ResumeState` that lets an
   interrupted run continue exactly as if it had not stopped.
@@ -80,6 +85,10 @@ version on the chained Rosenbrock function.
 | `ball_dual_inner` | `(x, Psi, phi) -> array` | `(psi_i, phi)_{M^{-1}}` for each covector in `Psi` |
 | `x0` | `Point` | starting point, in the representation of `space` |
 
+Optional: `space` (see [Other representations](#other-representations)),
+`retract(x, s) -> Point` and `project_covector(x, w) -> Covector` (see
+[Manifolds](#manifolds)).
+
 `H` and `P^{-1}` are the only operators the method applies. The two inner
 products must be **exact duals** of each other: the residual norm on the
 trust-region boundary relies on `(M u, M v)_{M^{-1}} = (u, v)_M`. For `M = I`
@@ -115,18 +124,53 @@ from the Lanczos relation at no extra cost.
 
 `trust_region_newton(..., space=...)` takes a `VectorSpace`: a frozen record of
 functions (`scale_vector`, `scale_covector`, `axpy_covector`, `pair`, block
-operations, `translate`, optional `dimension`). Ready-made spaces:
+operations, and optionally `translate` and `dimension`). Ready-made spaces:
 
 - `numpy_space`: the default, one numpy array per vector.
 - `numpy_space_with_reductions(allreduce)`: one local numpy array per process
   (e.g. MPI ranks); only the reductions change. All decisions come from reduced
   numbers, so processes stay in lockstep.
-- `tuple_block_space(...)`: any vector type from six functions; blocks are
+- `tuple_block_space(...)`: any vector type from five functions; blocks are
   tuples of vectors. Override `pair_block` and `combine_*` with
   `dataclasses.replace` for batched versions.
 
 `check_space(space, v1, v2, w1, w2)` verifies a space's internal consistency on
 sample vectors. The method never modifies objects in place.
+
+## Manifolds
+
+Nothing in the method assumes a flat space. On a manifold:
+
+- **Retraction.** Pass `retract(x, s)`; the space needs no `translate`.
+  `hessvec` is the Hessian of the pullback `s -> f(retract(x, s))` at `s = 0`,
+  which for a second-order retraction is the Riemannian Hessian.
+- **Tangent and cotangent vectors** are whatever the representation says,
+  tied to the current point. The method never moves a vector from one point
+  to another, so no vector transport is needed.
+- **Redundant representations.** Tangent spaces are often stored with more
+  numbers than their dimension, e.g. low-rank tangent vectors as gauged
+  factor variations `(dU, dV)` with `U^T dU = 0`. A covector component that
+  pairs to zero with every tangent vector is invisible to every pairing, so
+  reorthogonalization cannot remove its rounding errors, and the Lanczos
+  recurrence amplifies them exponentially. Within tens of steps they swamp
+  the covectors, the basis leaves the tangent space, and spurious Ritz values
+  appear. Pass `project_covector(x, w)`, the projection onto canonical
+  representatives; it is applied to gradients and to every Krylov covector.
+
+[`examples/matrix_completion.py`](examples/matrix_completion.py) recovers a
+1000 x 800 matrix with decaying spectrum from 7% of its entries by
+trust-region Newton on the manifold of rank-r matrices:
+
+- points as thin SVD factors;
+- tangent vectors as gauged variations, so the Frobenius inner product is the
+  dot product of the components;
+- the truncated SVD of a rank-2r factorization as the retraction;
+- the exact Riemannian Hessian, curvature term included.
+
+It starts from `X = 0`, which the gauged representation handles, and fits
+ranks 1, ..., r in turn, adding a component of size zero each time. Every
+stage comes within 15% of the best rank-k error, and the last converges
+quadratically.
 
 ## Diagnostics and the callback
 
@@ -166,7 +210,7 @@ code and are meant to be reused by other optimizers.
 | `spaces` | how points, vectors and covectors are represented: `VectorSpace`, `numpy_space`, `numpy_space_with_reductions`, `tuple_block_space`, `check_space` |
 | `metrics` | inner products and norms: `InnerProduct`, `DualInnerProduct`, `euclidean_inner`, `vector_norm`, `covector_norm`, Gram-matrix growth |
 | `dense` | small dense linear algebra in coordinates: Rayleigh–Ritz for a projected pencil, the trust-region problem on a ball (with the hard case) |
-| `krylov` | preconditioned Lanczos as an immutable process: `lanczos_start`, `lanczos_advance`, `LanczosState`, `lanczos_tridiagonal` |
+| `krylov` | preconditioned Lanczos as an immutable process: `lanczos_start`, `lanczos_advance`, `LanczosState`, `lanczos_tridiagonal`; optional covector projection for redundant representations |
 | `criteria` | tests shared by inexact Newton methods: `gradient_converged`, `forcing_term`, `reduction_ratio` |
 | `trust_region_subproblem` | the trust-region subproblem over a Krylov space: `solve_tr_subproblem` |
 | `trust_region_diagnostics` | records, `ResumeState`, and text output |

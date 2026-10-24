@@ -1,11 +1,16 @@
 """The Lanczos process used on its own, without any trust region."""
 
+from typing import Callable, Optional
+
 import numpy as np
 import pytest
 
 from nicks_optimizers import (
     Covector,
+    CovectorBlock,
+    LanczosState,
     Vector,
+    VectorBlock,
     lanczos_advance,
     lanczos_start,
     lanczos_tridiagonal,
@@ -60,3 +65,43 @@ def test_extreme_ritz_values_converge_early() -> None:
     ritz = np.linalg.eigvalsh(lanczos_tridiagonal(state))
     assert abs(ritz[0] - (-50.0)) <= 1e-8 * 50.0
     assert abs(ritz[-1] - 100.0) <= 1e-8 * 100.0
+
+
+def test_redundant_representation_needs_projection() -> None:
+    """Vectors and covectors stored with redundant components: the space is
+    {v : B^T v = 0} inside R^n, and H = Pi A Pi with Pi = I - B B^T. The
+    components along B pair to zero with every vector, so reorthogonalization
+    cannot see them, and the recurrence amplifies their rounding errors.
+    Without project_covector they grow to O(1), a spurious zero Ritz value
+    appears and the process runs past the dimension n - m; with it the Ritz
+    values are those of A on the subspace and the process breaks down after
+    exactly n - m steps."""
+    rng = np.random.default_rng(3)
+    n, m = 120, 10
+    B = np.linalg.qr(rng.standard_normal((n, m)))[0]
+
+    def project(w: Covector) -> Covector:
+        return Covector(w - B @ (B.T @ w))
+
+    A = matrix_with_spectrum(np.linspace(1.0, 10.0, n), rng)
+    hessvec = lambda v: project(Covector(A @ project(Covector(v))))
+    basis = np.linalg.svd(np.eye(n) - B @ B.T)[0][:, :n - m]
+    exact = np.linalg.eigvalsh(basis.T @ A @ basis)
+    g = project(Covector(rng.standard_normal(n)))
+
+    def run(project_covector: Optional[Callable[[Covector], Covector]]
+            ) -> LanczosState[Vector, Covector, VectorBlock, CovectorBlock]:
+        state = lanczos_start(numpy_space, g, lambda w: Vector(w))
+        while not state.breakdown and state.steps < n - m:
+            state = lanczos_advance(numpy_space, state, hessvec, lambda w: Vector(w),
+                                    project_covector=project_covector)
+        return state
+
+    plain, projected = run(None), run(project)
+    assert np.abs(B.T @ plain.v).max() > 1e-3
+    assert np.linalg.eigvalsh(lanczos_tridiagonal(plain))[0] < 1e-6 * exact[0]
+    assert not plain.breakdown
+    assert np.abs(B.T @ projected.v).max() < 1e-14
+    ritz = np.linalg.eigvalsh(lanczos_tridiagonal(projected))
+    assert projected.breakdown and projected.steps == n - m
+    assert np.max(np.abs(ritz - exact)) <= 1e-9 * exact[-1]

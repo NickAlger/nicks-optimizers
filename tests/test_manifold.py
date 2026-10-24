@@ -1,0 +1,135 @@
+"""The trust-region method on a manifold: rank-r matrix completion, from
+examples/matrix_completion.py."""
+
+from typing import Callable, Optional
+
+import numpy as np
+
+import matrix_completion as mc
+from nicks_optimizers import Array, lanczos_advance, lanczos_start, lanczos_tridiagonal
+
+
+def small_problem(seed: int, shape: tuple[int, int], r: int, oversampling: float
+                  ) -> tuple[mc.LowRank, mc.Samples, np.random.Generator]:
+    """A rank-10 matrix with singular values 2^-k, and K = oversampling * dim
+    uniformly sampled entries, dim = (N + M - r) r."""
+    rng = np.random.default_rng(seed)
+    a = mc.random_low_rank(shape, 0.5 ** np.arange(10, dtype=float), rng)
+    K = int(oversampling * (shape[0] + shape[1] - r) * r)
+    return a, mc.sample_uniformly(a, K, rng), rng
+
+
+def test_derivatives_match_retraction_curves() -> None:
+    """Gradient and Hessian against central differences of f(retract(x, t xi)).
+    At a point with unit singular values the agreement is close to rounding.
+    At a point with small singular values the curve bends sharply (third
+    derivatives ~ 1/s^2), so the test is the O(t^2) rate of the difference
+    errors. The Hessian is symmetric at both."""
+    a, samples, rng = small_problem(0, (40, 30), 3, 4.0)
+    x = mc.random_point((40, 30), 3, rng)
+    g_err, h_err, asym = mc.derivative_check(samples, x, np.random.default_rng(6), t=1e-4)
+    assert g_err < 1e-8 and h_err < 1e-5 and asym < 1e-12
+
+    x = mc.random_low_rank((40, 30), np.array([1.0, 0.1, 0.01]), rng)
+    coarse = mc.derivative_check(samples, x, np.random.default_rng(6), t=1e-4)
+    fine = mc.derivative_check(samples, x, np.random.default_rng(6), t=1e-5)
+    assert coarse[0] / fine[0] > 50.0 and fine[0] < 1e-7          # gradient: t^2
+    assert coarse[1] / fine[1] > 5.0 and fine[1] < 1e-4           # Hessian: t^2, then rounding
+    assert fine[2] < 1e-12
+
+
+def test_tangent_coordinates_are_isometric() -> None:
+    """The component dot product equals the Frobenius inner product of the
+    ambient matrices dU V^T + U dV^T, and pairing with the gradient is the
+    ambient pairing <R, xi>."""
+    a, samples, rng = small_problem(1, (40, 30), 3, 4.0)
+    x = mc.random_point((40, 30), 3, rng)
+    U, s, V = x
+    xi, eta = mc.random_tangent(x, rng), mc.random_tangent(x, rng)
+
+    def ambient(v: mc.Tangent) -> Array:
+        matrix: Array = v[0] @ V.T + U @ v[1].T
+        return matrix
+
+    sp = mc.fixed_rank_space()
+    assert abs(sp.pair(mc.Cotangent(xi), eta) - float(np.sum(ambient(xi) * ambient(eta)))) < 1e-14
+    R = np.zeros((40, 30))
+    R[samples.rows, samples.cols] = mc.residual(samples, x)
+    g = mc.gradient(samples, x)
+    assert abs(sp.pair(g, xi) - float(np.sum(R * ambient(xi)))) < 1e-13
+
+
+def test_retraction_is_second_order() -> None:
+    """R(x, 0) = X with orthonormal factors, and R(x, t xi) - X - t xi has a
+    tangent component of order t^3 (the second-order term is normal)."""
+    a, samples, rng = small_problem(2, (40, 30), 3, 4.0)
+    x = mc.random_low_rank((40, 30), np.array([2.0, 1.0, 0.5]), rng)
+    U, s, V = x
+    X = (U * s) @ V.T
+    xi = mc.random_tangent(x, rng)
+    xi_matrix = xi[0] @ V.T + U @ xi[1].T
+    y = mc.retract(x, mc.fixed_rank_space().scale_vector(0.0, xi))
+    assert np.max(np.abs((y[0] * y[1]) @ y[2].T - X)) < 1e-14
+    assert np.max(np.abs(y[0].T @ y[0] - np.eye(3))) < 1e-14
+
+    def tangent_defect(t: float) -> float:
+        yU, ys, yV = mc.retract(x, mc.Tangent((t * xi[0], t * xi[1])))
+        D = (yU * ys) @ yV.T - X - t * xi_matrix
+        tangent_part = U @ (U.T @ D) + D @ V @ V.T - U @ (U.T @ D @ V) @ V.T
+        return float(np.linalg.norm(tangent_part))
+
+    ratio = tangent_defect(1e-2) / tangent_defect(5e-3)
+    assert 6.0 < ratio < 10.0                    # 8 for a t^3 defect
+
+
+def test_gauge_stays_clean_only_with_projection() -> None:
+    """Gauss-Newton Lanczos at a random point. Without project_covector the
+    invisible block U^T gU of the Krylov covectors grows to O(1) and a
+    spurious zero Ritz value appears (the true minimum is about 2e-2); with
+    it the gauge stays at rounding level."""
+    a, samples, rng = small_problem(1, (80, 60), 3, 3.0)
+    x = mc.random_point((80, 60), 3, rng)
+    sp = mc.fixed_rank_space()
+    hessvec = lambda v: mc.hessian_action(samples, x, v, curvature=False)
+    precond = lambda w: mc.identity_precond(x, w)
+
+    def run(project: Optional[Callable[[mc.Cotangent], mc.Cotangent]]) -> tuple[float, float]:
+        state = lanczos_start(sp, mc.gradient(samples, x), precond)
+        for _ in range(200):
+            state = lanczos_advance(sp, state, hessvec, precond, project_covector=project)
+        gauge = float(np.max(np.abs(x[0].T @ state.v_next[0])))
+        return gauge, float(np.linalg.eigvalsh(lanczos_tridiagonal(state))[0])
+
+    gauge_plain, ritz_plain = run(None)
+    gauge_projected, ritz_projected = run(lambda w: mc.gauge_projection(x, w))
+    assert gauge_plain > 1e-3 and ritz_plain < 1e-8
+    assert gauge_projected < 1e-14 and ritz_projected > 1e-2
+
+
+def test_completion_from_zero() -> None:
+    """From X = 0 the method converges to a fit within 20% of the best rank-r
+    error, with Newton's quadratic convergence at the end."""
+    a, samples, rng = small_problem(3, (120, 90), 4, 4.0)
+    x, summary = mc.complete(samples, mc.zero_point((120, 90), 4, rng))
+    assert summary.reason == "converged"
+    d = a[1]
+    best = float(np.sqrt(np.sum(d[4:] ** 2) / np.sum(d ** 2)))
+    assert mc.relative_error(x, a) < 1.2 * best
+    gnorms = [rec.gnorm for rec in summary.iterations] + [summary.gnorm]
+    assert gnorms[-1] < gnorms[-2] ** 1.5 / gnorms[0] ** 0.5     # superlinear last step
+
+
+def test_rank_continuation_on_fast_decay() -> None:
+    """Singular values 4^-k: the direct rank-4 fit is hard (the last
+    components are tiny), but fitting ranks 1, ..., 4 in turn, each from the
+    previous fit plus a zero component, tracks the best rank-k error at
+    every stage."""
+    rng = np.random.default_rng(4)
+    d = 0.25 ** np.arange(10, dtype=float)
+    a = mc.random_low_rank((150, 120), d, rng)
+    samples = mc.sample_uniformly(a, 4 * (150 + 120 - 4) * 4, rng)
+    stages = mc.complete_by_rank_continuation(samples, 4, rng)
+    for k, (x, summary) in enumerate(stages, start=1):
+        assert summary.reason == "converged"
+        best = float(np.sqrt(np.sum(d[k:] ** 2) / np.sum(d ** 2)))
+        assert mc.relative_error(x, a) < 1.3 * best

@@ -178,7 +178,8 @@ def solve_tr_subproblem(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlo
                         ball_dual_inner: Callable[[CovectorBlockT, CovectorT], Coords],
                         radius: float, resid_tol: float, max_iter: int,
                         g_dual_norm: Optional[float] = None, stall_tol: float = 1e-3,
-                        saddle_free: bool = False, breakdown_tol: float = 1e-12
+                        saddle_free: bool = False, breakdown_tol: float = 1e-12,
+                        project_covector: Optional[Callable[[CovectorT], CovectorT]] = None
                         ) -> tuple[VectorT, SubproblemStats]:
     """Approximately solve  min <g, s> + 0.5 <H_model s, s>  s.t.  ||s||_M <= radius
     over the growing Krylov spaces K_k(P^{-1} H, P^{-1} g), where H_model is
@@ -187,7 +188,9 @@ def solve_tr_subproblem(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlo
     The operators and inner products are frozen at the current point; the
     inner products take a block as their first argument (see the module
     docstring) and must be exact duals. g_dual_norm = ||g||_{M^{-1}} may be
-    passed in to save one call.
+    passed in to save one call. project_covector, for representations with
+    redundant components, maps covectors to canonical representatives; it is
+    applied to every Krylov covector (see krylov).
 
     Stops at the first of:
       * ||R||_{M^{-1}} <= resid_tol, with R the (surrogate) KKT residual
@@ -219,7 +222,8 @@ def solve_tr_subproblem(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlo
     trace_negative: list[int] = []
 
     for k in range(1, max_iter + 1):
-        state = lanczos_advance(space, state, hessvec, precond_solve, breakdown_tol)
+        state = lanczos_advance(space, state, hessvec, precond_solve, breakdown_tol,
+                                project_covector=project_covector)
         # W covers the basis V plus the pending covector v_next.
         if state.breakdown:
             W_next = grow_gram(W, np.zeros(k + 1))

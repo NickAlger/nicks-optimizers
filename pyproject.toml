@@ -32,10 +32,10 @@ nicks_optimizers = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["tests"]
+pythonpath = ["tests", "examples"]
 addopts = "-q"
 
 [tool.mypy]
 strict = true
 files = ["src", "tests", "examples"]
-mypy_path = "tests"
+mypy_path = "tests:examples"

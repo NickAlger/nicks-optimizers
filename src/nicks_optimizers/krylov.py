@@ -14,6 +14,18 @@ process knows nothing about inner products or trust regions, so it serves
 any consumer: trust-region and line-search Newton steps, Ritz values and
 low-rank approximations of the pencil (H, P), and so on. CG-type solvers
 belong here as well.
+
+Redundant representations. Sometimes the stored components of a covector
+have more freedom than the covector itself, e.g. tangent vectors of a
+low-rank manifold stored as gauged factor variations: a component that pairs
+to zero with every vector is invisible, the zero functional. Linear
+combinations of canonical covectors stay canonical only up to rounding, and
+the three-term recurrence amplifies the invisible rounding errors (like a
+Lanczos polynomial evaluated at an eigenvalue outside the spectrum), while
+no pairing, and hence no reorthogonalization, can see them. Within tens of
+steps they swamp the visible part, the basis leaves the space and T stops
+being <H Q, Q>. Pass project_covector, the projection onto canonical
+representatives, to remove them at every step.
 """
 
 from dataclasses import dataclass
@@ -68,13 +80,17 @@ def lanczos_step(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlockT, Co
                  precond_solve: Callable[[CovectorT], VectorT],
                  Q: VectorBlockT, V: CovectorBlockT, q: VectorT, v: CovectorT,
                  v_prev: Optional[CovectorT], gamma_prev: float,
-                 reorth_passes: int = 2) -> tuple[float, float, CovectorT, VectorT]:
+                 reorth_passes: int = 2,
+                 project_covector: Optional[Callable[[CovectorT], CovectorT]] = None
+                 ) -> tuple[float, float, CovectorT, VectorT]:
     """One step of P-preconditioned Lanczos with full reorthogonalization.
 
     q, v are the newest pair (the last members of Q, V) and v_prev the one
     before it (None at the first step). Forms the covector
         t = H q - delta v - gamma_prev v_prev,   delta = <H q, q>,
-    reorthogonalizes it, and returns (delta, gamma_next, v_next, q_next) with
+    reorthogonalizes it, maps it to its canonical representative with
+    project_covector if given (see the module docstring), and returns
+    (delta, gamma_next, v_next, q_next) with
     gamma_next = ||t||_{P^{-1}}, v_next = t / gamma_next and
     q_next = P^{-1} t / gamma_next. On exact breakdown the vectors are zero.
     Costs one Hessian-vector product and one preconditioner solve.
@@ -85,6 +101,8 @@ def lanczos_step(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlockT, Co
     if v_prev is not None:
         t = space.axpy_covector(-gamma_prev, v_prev, t)
     t = reorthogonalize(space, t, Q, V, reorth_passes)
+    if project_covector is not None:
+        t = project_covector(t)
     y = precond_solve(t)
     gamma_next = float(np.sqrt(max(space.pair(t, y), 0.0)))
     if gamma_next == 0.0:
@@ -147,7 +165,8 @@ def lanczos_advance(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlockT,
                     state: LanczosState[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
                     hessvec: Callable[[VectorT], CovectorT],
                     precond_solve: Callable[[CovectorT], VectorT],
-                    breakdown_tol: float = 1e-12, reorth_passes: int = 2
+                    breakdown_tol: float = 1e-12, reorth_passes: int = 2,
+                    project_covector: Optional[Callable[[CovectorT], CovectorT]] = None
                     ) -> LanczosState[VectorT, CovectorT, VectorBlockT, CovectorBlockT]:
     """One more Lanczos step.
 
@@ -156,7 +175,9 @@ def lanczos_advance(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlockT,
     reorthogonalized, and the new pending direction is formed. Breakdown is
     declared when gamma_next <= breakdown_tol times the largest entry of T
     seen so far; a broken-down process cannot be advanced. Costs one product
-    with H and one solve with P.
+    with H and one solve with P. project_covector, for redundant
+    representations, is applied to each new covector (see the module
+    docstring).
     """
     if state.breakdown:
         raise ValueError("the Lanczos process has broken down (invariant subspace); it cannot grow")
@@ -170,7 +191,8 @@ def lanczos_advance(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlockT,
         Q, V, gammas, v_prev, q, v = state.Q, state.V, state.gammas, state.v_prev, state.q, state.v
     gamma_prev = gammas[-1] if gammas else 0.0
     delta, gamma_next, v_next, q_next = lanczos_step(
-        space, hessvec, precond_solve, Q, V, q, v, v_prev, gamma_prev, reorth_passes)
+        space, hessvec, precond_solve, Q, V, q, v, v_prev, gamma_prev, reorth_passes,
+        project_covector)
     hscale = max(state.hscale, abs(delta), gamma_prev)
     breakdown = gamma_next <= breakdown_tol * hscale
     return LanczosState(

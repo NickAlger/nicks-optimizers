@@ -56,8 +56,7 @@ def check_problem_operators(rng: Rng) -> bool:
     ok = True
     for name, f, gr, hv in (("Rosenbrock", rosen_fun, rosen_grad, rosen_hessvec),
                             ("double well", well_fun, well_grad, well_hessvec)):
-        fd_g = (f(numpy_space.translate(x, Vector(eps * v)))
-                - f(numpy_space.translate(x, Vector(-eps * v)))) / (2 * eps)
+        fd_g = (f(Point(x + eps * v)) - f(Point(x - eps * v))) / (2 * eps)
         fd_h = (gr(Point(x + eps * v)) - gr(Point(x - eps * v))) / (2 * eps)
         ok &= report(f"{name} gradient", abs(fd_g - numpy_space.pair(gr(x), v)) / abs(fd_g), 1e-6)
         ok &= report(f"{name} Hessian-vector product",
@@ -89,7 +88,7 @@ def reference_iterations(x0: Array, inner: InnerProduct, dual_inner: DualInnerPr
             lambda U, v: inner(x, U, v),
             lambda P_, p: dual_inner(x, P_, p),
             radius, forcing_term(gnorm, gnorm0, 0.5) * gnorm, 50, g_dual_norm=gnorm)
-        x_trial = sp.translate(x, s)
+        x_trial = Point(x + s)
         f_trial = rosen_fun(x_trial)
         rho = reduction_ratio(fx, f_trial, -st.model_value)
         if rho > 1e-4:

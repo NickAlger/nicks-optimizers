@@ -11,7 +11,7 @@ supply their own record:
   numpy_space_with_reductions(allreduce)  one local numpy array per process
                                        (e.g. MPI ranks); only the reductions
                                        change
-  tuple_block_space(...)               any vector type, from six functions;
+  tuple_block_space(...)               any vector type, from five functions;
                                        blocks are tuples of vectors
   dataclasses.replace(space, ...)      override individual entries
 
@@ -23,7 +23,9 @@ nothing about geometry; inner products live in metrics.
 Types
 -----
   Point      an iterate x. Points are never added; a step s moves x to
-             retract(x, s), by default space.translate(x, s) = x + s.
+             retract(x, s). On a flat space the default retraction is
+             space.translate(x, s) = x + s; a manifold has no translate and
+             supplies retract instead.
   Vector     a tangent (primal) vector at x: steps, Krylov vectors q_j.
   Covector   a cotangent (dual) vector at x: gradients, H v, residuals.
   blocks     collections of vectors or covectors (Krylov bases).
@@ -61,7 +63,8 @@ class VectorSpace(Generic[PointT, VectorT, CovectorT, VectorBlockT, CovectorBloc
     A frozen, keyword-only dataclass used purely as a composite value: no
     methods, no inheritance. Build one with a constructor (numpy_space,
     numpy_space_with_reductions, tuple_block_space) and change entries with
-    dataclasses.replace. Every entry is required except dimension.
+    dataclasses.replace. Every entry is required except translate and
+    dimension.
 
       scale_vector(a, v) -> Vector           a v
       scale_covector(a, w) -> Covector       a w
@@ -74,8 +77,9 @@ class VectorSpace(Generic[PointT, VectorT, CovectorT, VectorBlockT, CovectorBloc
       append_covector(C, w) -> CovectorBlock a new block [C, w]
       combine_vectors(B, c) -> Vector        sum_i c_i b_i
       combine_covectors(C, c) -> Covector    sum_i c_i w_i
-      translate(x, s) -> Point               x + s, the flat-space point update
-                                             (the default retraction)
+      translate(x, s) -> Point               optional: x + s, the point update of
+                                             a flat space (the default
+                                             retraction); None on a manifold
       dimension(v) -> int                    optional: the dimension n, used to
                                              cap the number of Lanczos steps
 
@@ -93,7 +97,7 @@ class VectorSpace(Generic[PointT, VectorT, CovectorT, VectorBlockT, CovectorBloc
     append_covector: Callable[[CovectorBlockT, CovectorT], CovectorBlockT]
     combine_vectors: Callable[[VectorBlockT, Coords], VectorT]
     combine_covectors: Callable[[CovectorBlockT, Coords], CovectorT]
-    translate: Callable[[PointT, VectorT], PointT]
+    translate: Optional[Callable[[PointT, VectorT], PointT]] = None
     dimension: Optional[Callable[[VectorT], int]] = None
 
 
@@ -208,11 +212,12 @@ def tuple_block_space(*, scale_vector: Callable[[float, VectorT], VectorT],
                       axpy_vector: Callable[[float, VectorT, VectorT], VectorT],
                       axpy_covector: Callable[[float, CovectorT, CovectorT], CovectorT],
                       pair: Callable[[CovectorT, VectorT], float],
-                      translate: Callable[[PointT, VectorT], PointT],
+                      translate: Optional[Callable[[PointT, VectorT], PointT]] = None,
                       dimension: Optional[Callable[[VectorT], int]] = None
                       ) -> VectorSpace[PointT, VectorT, CovectorT,
                                        tuple[VectorT, ...], tuple[CovectorT, ...]]:
-    """A complete space for any vector type, from six functions.
+    """A complete space for any vector type, from five functions (plus
+    translate for a flat space, and optionally dimension).
 
     Blocks are tuples of vectors (or covectors), and the block entries are
     built from the functions given: pair_block pairs one vector at a time and

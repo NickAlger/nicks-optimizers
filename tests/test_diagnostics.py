@@ -122,7 +122,7 @@ def check_callback() -> bool:
     ok &= report("info.f and info.g are f and g at x", max(f_err, g_err), 0.0)
     prev, step_err = x0, 0.0
     for xk, info in seen:
-        expected = numpy_space.translate(prev, info.step) if info.record.accepted else prev
+        expected = Point(prev + info.step) if info.record.accepted else prev
         step_err = max(step_err, float(np.max(np.abs(xk - expected))))
         prev = xk
     ok &= report("x = retract(previous x, step) when accepted, unchanged when rejected", step_err, 0.0)

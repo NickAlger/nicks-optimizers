@@ -27,6 +27,7 @@ jobs:
           python quickstart.py > /dev/null
           python checkpointing.py
           python matched_vs_mismatched.py
+          python matrix_completion.py | tail -10
 
   types:
     runs-on: ubuntu-latest
