@@ -12,8 +12,16 @@ T = <H Q, Q> (lanczos_tridiagonal), with the Lanczos relation
 where (gamma_next, v_next, q_next) is the pending next basis direction. The
 process knows nothing about inner products or trust regions, so it serves
 any consumer: trust-region and line-search Newton steps, Ritz values and
-low-rank approximations of the pencil (H, P), and so on. CG-type solvers
-belong here as well.
+low-rank approximations of the pencil (H, P), and so on.
+
+Preconditioned conjugate gradients for H s = -g is the same Krylov space
+built with short recurrences: cg_start makes a CGState, cg_curvature
+applies H to the search direction, and cg_advance takes the step. It keeps
+five vectors instead of a basis and does two reductions per step, but without
+reorthogonalization the directions lose conjugacy in floating point (which
+delays convergence, without breaking it). The P-norms of the iterates, which
+Steihaug's trust-region method needs, follow from recurrences without
+products with P (Conn, Gould & Toint, Trust-Region Methods, 2000, Sec. 7.5.1).
 
 Redundant representations. Sometimes the stored components of a covector
 have more freedom than the covector itself, e.g. tangent vectors of a
@@ -46,14 +54,14 @@ from .spaces import (
 
 
 def lanczos_initial_pair(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlockT, CovectorBlockT],
-                  g: CovectorT, precond_solve: Callable[[CovectorT], VectorT]
-                  ) -> tuple[CovectorT, VectorT, float]:
-    """The first Lanczos pair, from g.
+                  g: CovectorT, precond_solve: Callable[[CovectorT], VectorT],
+                  precond_g: Optional[VectorT] = None) -> tuple[CovectorT, VectorT, float]:
+    """The first Lanczos pair, from g (and P^{-1} g, if already computed).
 
     Returns (v0, q0, gamma0) with g = gamma0 v0, q0 = P^{-1} v0 and
     <v0, q0> = <P q0, q0> = 1. gamma0 = ||g||_{P^{-1}}.
     """
-    y = precond_solve(g)
+    y = precond_solve(g) if precond_g is None else precond_g
     gPg = space.pair(g, y)
     if not gPg > 0.0:
         raise ValueError("<g, P^{-1} g> must be positive; is P positive definite and g nonzero?")
@@ -149,11 +157,12 @@ class LanczosState(Generic[VectorT, CovectorT, VectorBlockT, CovectorBlockT]):
 
 
 def lanczos_start(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlockT, CovectorBlockT],
-                  g: CovectorT, precond_solve: Callable[[CovectorT], VectorT]
+                  g: CovectorT, precond_solve: Callable[[CovectorT], VectorT],
+                  precond_g: Optional[VectorT] = None
                   ) -> LanczosState[VectorT, CovectorT, VectorBlockT, CovectorBlockT]:
     """The process before its first step: the basis is q_0 = P^{-1} g / gamma0.
-    Costs one preconditioner solve."""
-    v0, q0, gamma0 = lanczos_initial_pair(space, g, precond_solve)
+    Costs one preconditioner solve, unless precond_g = P^{-1} g is given."""
+    v0, q0, gamma0 = lanczos_initial_pair(space, g, precond_solve, precond_g)
     return LanczosState(
         steps=0, gamma0=gamma0, Q=space.vector_block(q0), V=space.covector_block(v0),
         q=q0, v=v0, deltas=(), gammas=(), gamma_next=0.0,
@@ -205,3 +214,95 @@ def lanczos_advance(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlockT,
 def lanczos_tridiagonal(state: LanczosState[VectorT, CovectorT, VectorBlockT, CovectorBlockT]) -> Coords:
     """T = <H Q, Q> for the current basis (k x k after k steps)."""
     return tridiagonal(np.array(state.deltas, dtype=float), np.array(state.gammas, dtype=float))
+
+
+# --- conjugate gradients ---------------------------------------------------------
+
+
+@dataclass(frozen=True, kw_only=True)
+class CGState(Generic[VectorT, CovectorT]):
+    """Preconditioned conjugate gradients for H s = -g after `steps` steps.
+
+      steps          number of steps taken (= products with H)
+      s              the iterate s_k, starting from s_0 = 0
+      r              the residual covector r_k = g + H s_k (the model gradient)
+      z              P^{-1} r_k
+      p              the search direction p_k
+      rz             <r_k, z_k> = ||r_k||_{P^{-1}}^2
+      s_norm2, sp, p_norm2
+                     ||s_k||_P^2, (s_k, p_k)_P and ||p_k||_P^2, by recurrences
+      model          <g, s_k> + 0.5 <H s_k, s_k>, by recurrence
+
+    In exact arithmetic ||s_k||_P increases with k (Steihaug), which is what
+    makes stopping on the trust-region boundary meaningful. Frozen;
+    cg_advance returns a new state.
+    """
+    steps: int
+    s: VectorT
+    r: CovectorT
+    z: VectorT
+    p: VectorT
+    rz: float
+    s_norm2: float
+    sp: float
+    p_norm2: float
+    model: float
+
+
+def cg_start(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlockT, CovectorBlockT],
+             g: CovectorT, precond_solve: Callable[[CovectorT], VectorT],
+             precond_g: Optional[VectorT] = None) -> CGState[VectorT, CovectorT]:
+    """CG before its first step: s_0 = 0, r_0 = g, p_0 = -P^{-1} g. Costs one
+    preconditioner solve, unless precond_g = P^{-1} g is given."""
+    z = precond_solve(g) if precond_g is None else precond_g
+    rz = space.pair(g, z)
+    if not rz > 0.0:
+        raise ValueError("<g, P^{-1} g> must be positive; is P positive definite and g nonzero?")
+    return CGState(steps=0, s=space.scale_vector(0.0, z), r=g, z=z, p=space.scale_vector(-1.0, z),
+                   rz=rz, s_norm2=0.0, sp=0.0, p_norm2=rz, model=0.0)
+
+
+def cg_curvature(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlockT, CovectorBlockT],
+                 state: CGState[VectorT, CovectorT], hessvec: Callable[[VectorT], CovectorT]
+                 ) -> tuple[CovectorT, float]:
+    """(H p_k, <H p_k, p_k>): the curvature along the search direction, which
+    decides whether (and how far) to step. One product with H."""
+    Hp = hessvec(state.p)
+    return Hp, space.pair(Hp, state.p)
+
+
+def cg_advance(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlockT, CovectorBlockT],
+               state: CGState[VectorT, CovectorT], Hp: CovectorT, curvature: float,
+               precond_solve: Callable[[CovectorT], VectorT],
+               project_covector: Optional[Callable[[CovectorT], CovectorT]] = None
+               ) -> CGState[VectorT, CovectorT]:
+    """The CG step s_{k+1} = s_k + alpha p_k, alpha = rz_k / <H p_k, p_k>, given
+    (H p_k, <H p_k, p_k>) from cg_curvature; the curvature must be positive.
+    One preconditioner solve.
+
+    The P-norm recurrences use <r_{k+1}, p_j> = 0 for j <= k (so
+    (s_{k+1}, P^{-1} r_{k+1}) = 0):
+        ||s_{k+1}||_P^2 = ||s_k||_P^2 + 2 alpha (s_k, p_k)_P + alpha^2 ||p_k||_P^2
+        (s_{k+1}, p_{k+1})_P = beta ((s_k, p_k)_P + alpha ||p_k||_P^2)
+        ||p_{k+1}||_P^2 = rz_{k+1} + beta^2 ||p_k||_P^2
+    and the model decreases by alpha rz_k / 2. project_covector, for
+    redundant representations, is applied to the new residual (see the
+    module docstring).
+    """
+    if not curvature > 0.0:
+        raise ValueError("cg_advance needs positive curvature along p")
+    alpha = state.rz / curvature
+    s = space.axpy_vector(alpha, state.p, state.s)
+    r = space.axpy_covector(alpha, Hp, state.r)
+    if project_covector is not None:
+        r = project_covector(r)
+    z = precond_solve(r)
+    rz = space.pair(r, z)
+    beta = rz / state.rz
+    p = space.axpy_vector(beta, state.p, space.scale_vector(-1.0, z))
+    return CGState(
+        steps=state.steps + 1, s=s, r=r, z=z, p=p, rz=rz,
+        s_norm2=state.s_norm2 + 2.0 * alpha * state.sp + alpha ** 2 * state.p_norm2,
+        sp=beta * (state.sp + alpha * state.p_norm2),
+        p_norm2=rz + beta ** 2 * state.p_norm2,
+        model=state.model - 0.5 * alpha * state.rz)

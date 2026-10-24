@@ -9,6 +9,7 @@ from nicks_optimizers import (
     Covector,
     FrozenDualInnerProduct,
     Point,
+    Vector,
     euclidean_inner,
     numpy_space,
     solve_sphere_trs,
@@ -267,8 +268,80 @@ def test_preconditioner_norm_ball() -> None:
                                             inner, dual, radius, 1e-10, 40, saddle_free=saddle_free)
                 steps.append((s, st))
             (s1, a), (s2, b) = steps
-            assert a.lanczos_steps == b.lanczos_steps and a.stop_reason == b.stop_reason
+            assert a.krylov_steps == b.krylov_steps and a.stop_reason == b.stop_reason
             assert np.linalg.norm(s1 - s2) <= 1e-8 * np.linalg.norm(s1)
             assert abs(a.lam - b.lam) <= 1e-8 * max(1.0, a.lam)
             assert abs(a.model_value - b.model_value) <= 1e-10 * abs(a.model_value)
             assert b.inner_calls == 0 and b.dual_inner_calls == 0
+
+
+def test_steihaug_cg_subproblem() -> None:
+    """Truncated CG for the trust region of the P-norm.
+
+    Inside the ball it computes the same step as the Lanczos solver with
+    M = P (same Krylov space, same stopping test), at tolerances reached
+    before CG's loss of conjugacy matters; to tight tolerances Lanczos needs
+    fewer steps. When the next iterate
+    would leave the ball, it stops on the boundary (||s||_P = radius) with
+    at least the Cauchy decrease. On negative curvature it follows the
+    direction to the boundary. Statistics report the method and calls."""
+    from nicks_optimizers import solve_tr_subproblem_cg
+    rng = np.random.default_rng(13)
+    n = 50
+    P = random_spd(n, 5.0, rng)
+    hessvec_spd = dense_vec_to_covec(matrix_with_spectrum(np.linspace(1.0, 10.0, n), rng))
+    H_ind = matrix_with_spectrum(np.concatenate([[-5.0, -0.5], np.linspace(0.3, 30.0, n - 2)]), rng)
+    g = Covector(rng.standard_normal(n))
+    precond = dense_solve(P)
+
+    def cauchy_model(H: Array, radius: float) -> float:
+        d = -np.linalg.solve(P, g)
+        dnorm = float(np.sqrt(d @ P @ d))
+        curvature, slope = float(d @ H @ d), float(g @ d)
+        t = radius / dnorm if curvature <= 0 else min(-slope / curvature, radius / dnorm)
+        return slope * t + 0.5 * curvature * t ** 2
+
+    # Interior: same step as Lanczos with M = P.
+    tol = 1e-4 * float(np.sqrt(g @ np.linalg.solve(P, g)))
+    s_cg, st_cg = solve_tr_subproblem_cg(numpy_space, g, hessvec_spd, precond, 1e6, tol, 60)
+    s_lz, st_lz = solve_tr_subproblem(numpy_space, g, hessvec_spd, precond, None, None, 1e6, tol, 60)
+    assert st_cg.krylov == "cg" and st_cg.stop_reason == "tol" and st_cg.lam == 0.0
+    assert st_cg.krylov_steps == st_lz.krylov_steps
+    assert np.linalg.norm(s_cg - s_lz) <= 1e-6 * np.linalg.norm(s_lz)
+    assert abs(st_cg.model_value - st_lz.model_value) <= 1e-10 * abs(st_lz.model_value)
+    assert st_cg.inner_calls == 0 and st_cg.dual_inner_calls == 0
+    assert st_cg.precond_calls == st_cg.krylov_steps + 1
+
+    # Boundary and negative curvature.
+    H_spd = np.column_stack([hessvec_spd(Vector(np.eye(n)[:, j])) for j in range(n)])
+    for H, radius, reason in ((H_spd, 0.05, "boundary"), (H_ind, 1e3, "negative")):
+        s, st = solve_tr_subproblem_cg(numpy_space, g, dense_vec_to_covec(H), precond, radius, 1e-12, 60)
+        assert st.stop_reason == reason and np.isnan(st.lam)
+        assert abs(float(np.sqrt(s @ P @ s)) - radius) <= 1e-10 * radius
+        assert abs(st.model_value - float(g @ s + 0.5 * s @ H @ s)) <= 1e-9 * abs(st.model_value)
+        assert st.model_value <= cauchy_model(H, radius) + 1e-12
+        assert st.n_negative == (1 if reason == "negative" else 0)
+
+    # The step cap, and P^{-1} g supplied by the caller.
+    _, st = solve_tr_subproblem_cg(numpy_space, g, hessvec_spd, precond, 1e6, 0.0, 3,
+                                   precond_g=precond(g))
+    assert st.stop_reason == "max" and st.krylov_steps == 3 and st.precond_calls == 3
+
+
+
+def test_lanczos_is_more_robust_than_cg_to_tight_tolerances() -> None:
+    """Why the reorthogonalized Lanczos solver stays available for M = P: on
+    an ill-conditioned pencil (cond(P^{-1} H) about 10^3) and a tight
+    tolerance, Lanczos converges within n steps, while CG loses conjugacy in
+    floating point and needs more."""
+    from nicks_optimizers import solve_tr_subproblem_cg
+    rng = np.random.default_rng(13)
+    n = 50
+    P = random_spd(n, 30.0, rng)
+    hessvec = dense_vec_to_covec(matrix_with_spectrum(np.linspace(0.5, 40.0, n), rng))
+    g = Covector(rng.standard_normal(n))
+    tol = 1e-10 * float(np.sqrt(g @ np.linalg.solve(P, g)))
+    _, lanczos = solve_tr_subproblem(numpy_space, g, hessvec, dense_solve(P), None, None, 1e6, tol, 200)
+    _, cg = solve_tr_subproblem_cg(numpy_space, g, hessvec, dense_solve(P), 1e6, tol, 200)
+    assert lanczos.krylov_steps <= n and lanczos.stop_reason in ("tol", "breakdown")
+    assert cg.stop_reason == "tol" and cg.krylov_steps > lanczos.krylov_steps

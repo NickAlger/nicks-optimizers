@@ -68,6 +68,7 @@ class VectorSpace(Generic[PointT, VectorT, CovectorT, VectorBlockT, CovectorBloc
 
       scale_vector(a, v) -> Vector           a v
       scale_covector(a, w) -> Covector       a w
+      axpy_vector(a, v, z) -> Vector         a v + z
       axpy_covector(a, w, z) -> Covector     a w + z
       pair(w, v) -> float                    the duality pairing <w, v>
       pair_block(B, w) -> Coords             <w, b_i> for each vector b_i in B
@@ -88,6 +89,7 @@ class VectorSpace(Generic[PointT, VectorT, CovectorT, VectorBlockT, CovectorBloc
     """
     scale_vector: Callable[[float, VectorT], VectorT]
     scale_covector: Callable[[float, CovectorT], CovectorT]
+    axpy_vector: Callable[[float, VectorT, VectorT], VectorT]
     axpy_covector: Callable[[float, CovectorT, CovectorT], CovectorT]
     pair: Callable[[CovectorT, VectorT], float]
     pair_block: Callable[[VectorBlockT, CovectorT], Coords]
@@ -130,6 +132,10 @@ def _np_scale_vector(a: float, v: Vector) -> Vector:
 
 def _np_scale_covector(a: float, w: Covector) -> Covector:
     return Covector(a * w)
+
+
+def _np_axpy_vector(a: float, v: Vector, z: Vector) -> Vector:
+    return Vector(a * v + z)
 
 
 def _np_axpy_covector(a: float, w: Covector, z: Covector) -> Covector:
@@ -178,7 +184,8 @@ def _np_dimension(v: Vector) -> int:
 
 numpy_space: NumpySpace = VectorSpace(
     scale_vector=_np_scale_vector, scale_covector=_np_scale_covector,
-    axpy_covector=_np_axpy_covector, pair=_np_pair, pair_block=_np_pair_block,
+    axpy_vector=_np_axpy_vector, axpy_covector=_np_axpy_covector,
+    pair=_np_pair, pair_block=_np_pair_block,
     vector_block=_np_vector_block, covector_block=_np_covector_block,
     append_vector=_np_append_vector, append_covector=_np_append_covector,
     combine_vectors=_np_combine_vectors, combine_covectors=_np_combine_covectors,
@@ -256,7 +263,7 @@ def tuple_block_space(*, scale_vector: Callable[[float, VectorT], VectorT],
 
     return VectorSpace(
         scale_vector=scale_vector, scale_covector=scale_covector,
-        axpy_covector=axpy_covector, pair=pair, pair_block=pair_block,
+        axpy_vector=axpy_vector, axpy_covector=axpy_covector, pair=pair, pair_block=pair_block,
         vector_block=vector_block, covector_block=covector_block,
         append_vector=append_vector, append_covector=append_covector,
         combine_vectors=combine_vectors, combine_covectors=combine_covectors,
@@ -282,6 +289,7 @@ def check_space(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlockT, Cov
         abs(space.pair(w1, space.scale_vector(a, v1)) - a * p11),
         abs(space.pair(space.scale_covector(a, w1), v1) - a * p11),
         abs(space.pair(space.axpy_covector(a, w1, w2), v1) - (a * p11 + p21)),
+        abs(space.pair(w1, space.axpy_vector(a, v1, v2)) - (a * p11 + p12)),
     ]
     scale = max(abs(p11), abs(p12), abs(p21), abs(p22), 1e-300)
     return max(errors) / scale

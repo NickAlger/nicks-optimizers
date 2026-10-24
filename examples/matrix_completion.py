@@ -338,7 +338,7 @@ def derivative_check(samples: Samples, x: LowRank, rng: np.random.Generator,
 
 def complete(samples: Samples, x0: LowRank, saddle_free: bool = False, curvature: bool = True,
              project: bool = True, radius: float = 1.0, display: int = 0,
-             max_iter: int = 200, max_lanczos: int = 50, rtol: float = 1e-10
+             max_iter: int = 200, max_krylov: int = 50, rtol: float = 1e-10
              ) -> tuple[LowRank, RunSummary]:
     """Fit a matrix of the rank of x0 to the samples, starting from x0 with
     the given trust-region radius (a Frobenius norm). curvature=False uses
@@ -352,7 +352,7 @@ def complete(samples: Samples, x0: LowRank, saddle_free: bool = False, curvature
         space=fixed_rank_space(), retract=retract,
         project_covector=gauge_projection if project else None,
         saddle_free=saddle_free, radius=radius, display=display, max_iter=max_iter,
-        max_lanczos=max_lanczos, rtol=rtol)
+        max_krylov=max_krylov, rtol=rtol)
 
 
 def add_zero_component(x: LowRank, rng: np.random.Generator) -> LowRank:
@@ -412,6 +412,6 @@ if __name__ == "__main__":
     stages = complete_by_rank_continuation(samples, r, rng, display=1)
     print("\nrank  iterations  Lanczos steps  ||X - A|| / ||A||  best rank-k error")
     for k, (x, summary) in enumerate(stages, start=1):
-        lanczos = sum(rec.subproblem.lanczos_steps for rec in summary.iterations)
+        lanczos = sum(rec.subproblem.krylov_steps for rec in summary.iterations)
         print(f"{k:4d}  {len(summary.iterations):10d}  {lanczos:13d}  {relative_error(x, a):17.2e}"
               f"  {best_error(k):17.2e}")

@@ -163,7 +163,7 @@ def check_resume() -> bool:
     def run(x_start: Point, max_iter: int = 500,
             callback: Callable[[Point, IterationInfo[Vector, Covector]], bool] | None = None,
             resume: ResumeState | None = None, g0: Covector | None = None) -> tuple[Point, RunSummary]:
-        return trust_region_newton(*args, x_start, saddle_free=True, max_lanczos=100,
+        return trust_region_newton(*args, x_start, saddle_free=True, max_krylov=100,
                                    max_iter=max_iter, callback=callback, resume=resume, g0=g0)
 
     x_full, full = run(x0)

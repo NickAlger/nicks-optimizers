@@ -163,7 +163,7 @@ def run_and_report(label: str, fun: Callable[[Point], float], grad: Callable[[Po
                    x0: Point, saddle_free: bool) -> bool:
     x, summary = trust_region_newton(
         fun, grad, hessvec, precond_solve, inner, dual_inner, x0,
-        saddle_free=saddle_free, gtol=1e-8, max_iter=1000, max_lanczos=100)
+        saddle_free=saddle_free, gtol=1e-8, max_iter=1000, max_krylov=100)
     hist = history_array(summary)
     gfinal = covector_norm(numpy_space, lambda P_, p: dual_inner(x, P_, p), grad(x))
     lam_min = float(np.linalg.eigvalsh(dense_from_operator(lambda v: hessvec(x, v), x.shape[0]))[0])
@@ -258,8 +258,8 @@ def test_operator_arguments_are_checked() -> None:
 def test_trust_region_in_the_preconditioner_norm() -> None:
     """Passing no inner products means M = P. With the diagonal (Jacobi)
     preconditioner of the Rosenbrock problem, (u, v)_P can also be written
-    out explicitly: both runs take the same steps, and the M = P run makes no
-    inner-product calls."""
+    out explicitly: with the Lanczos solver both runs take the same steps,
+    and the M = P run makes no inner-product calls."""
     from problems import rosen_hess_diag
     x0 = Point(np.tile([-1.2, 1.0], 25))
 
@@ -277,11 +277,53 @@ def test_trust_region_in_the_preconditioner_norm() -> None:
     _, explicit = trust_region_newton(rosen_fun, rosen_grad, rosen_hessvec, jacobi_precond_solve,
                                       p_inner, p_dual_inner, x0)
     _, matched = trust_region_newton(rosen_fun, rosen_grad, rosen_hessvec, jacobi_precond_solve,
-                                     None, None, x0)
+                                     None, None, x0, krylov="lanczos")
     a, b = explicit.iterations, matched.iterations
     assert len(a) == len(b) and matched.reason == explicit.reason == "converged"
-    assert [(r.accepted, r.subproblem.lanczos_steps) for r in a] == \
-        [(r.accepted, r.subproblem.lanczos_steps) for r in b]
+    assert [(r.accepted, r.subproblem.krylov_steps) for r in a] == \
+        [(r.accepted, r.subproblem.krylov_steps) for r in b]
     assert max(abs(r.f - s.f) / max(1.0, abs(r.f)) for r, s in zip(a, b)) < 1e-10
     assert max(abs(r.gnorm - s.gnorm) / r.gnorm for r, s in zip(a, b)) < 1e-6
     assert matched.inner_calls == 0 and matched.dual_inner_calls == 0
+
+
+def test_krylov_selection() -> None:
+    """krylov="auto" uses CG for the conventional trust region (no inner
+    products, no saddle_free) and Lanczos otherwise; "cg" refuses the other
+    cases; both solvers converge on Rosenbrock with M = P."""
+    x0 = Point(np.tile([-1.2, 1.0], 25))
+    pieces = (rosen_fun, rosen_grad, rosen_hessvec, jacobi_precond_solve)
+    runs = {
+        "auto, M = P": trust_region_newton(*pieces, None, None, x0),
+        "lanczos, M = P": trust_region_newton(*pieces, None, None, x0, krylov="lanczos"),
+        "auto, saddle-free": trust_region_newton(*pieces, None, None, x0, saddle_free=True),
+        "auto, M = I": trust_region_newton(*pieces, euclidean_inner, euclidean_dual_inner, x0),
+    }
+    expected = {"auto, M = P": "cg", "lanczos, M = P": "lanczos", "auto, saddle-free": "lanczos",
+                "auto, M = I": "lanczos"}
+    for label, (_, summary) in runs.items():
+        assert summary.reason == "converged", label
+        assert {r.subproblem.krylov for r in summary.iterations} == {expected[label]}, label
+    refused = 0
+    try:
+        trust_region_newton(*pieces, None, None, x0, krylov="cg", saddle_free=True)
+    except ValueError:
+        refused += 1
+    try:
+        trust_region_newton(*pieces, euclidean_inner, euclidean_dual_inner, x0, krylov="cg")
+    except ValueError:
+        refused += 1
+    assert refused == 2
+
+
+def test_cg_reuses_the_gradient_solve() -> None:
+    """With M = P the outer loop computes P^{-1} g for the gradient norm, and
+    the CG solve starts from it: one preconditioner solve per Krylov step,
+    plus one per new iterate."""
+    x0 = Point(np.tile([-1.2, 1.0], 25))
+    _, summary = trust_region_newton(rosen_fun, rosen_grad, rosen_hessvec, jacobi_precond_solve,
+                                     None, None, x0)
+    advanced = sum(r.subproblem.krylov_steps - (r.subproblem.stop_reason in ("boundary", "negative"))
+                   for r in summary.iterations)
+    new_points = 1 + summary.accepted_steps
+    assert summary.precond_calls == advanced + new_points

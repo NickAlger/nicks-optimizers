@@ -137,3 +137,21 @@ def test_rank_continuation_on_fast_decay() -> None:
         assert summary.reason == "converged"
         best = float(np.sqrt(np.sum(d[k:] ** 2) / np.sum(d ** 2)))
         assert mc.relative_error(x, a) < 1.3 * best
+
+
+def test_conventional_trust_region_on_the_manifold() -> None:
+    """With P = I and no inner products the trust region is the conventional
+    one (M = P = I, the Frobenius ball here), solved by truncated CG with the
+    gauge projection applied to its residuals; it reaches the same fit as the
+    Lanczos path."""
+    from nicks_optimizers import trust_region_newton
+    a, samples, rng = small_problem(3, (120, 90), 4, 4.0)
+    x, summary = trust_region_newton(
+        lambda x: mc.objective(samples, x), lambda x: mc.gradient(samples, x),
+        lambda x, v: mc.hessian_action(samples, x, v), mc.identity_precond, None, None,
+        mc.zero_point((120, 90), 4, rng), space=mc.fixed_rank_space(), retract=mc.retract,
+        project_covector=mc.gauge_projection, rtol=1e-10)
+    assert summary.reason == "converged"
+    assert {r.subproblem.krylov for r in summary.iterations} == {"cg"}
+    d = a[1]
+    assert mc.relative_error(x, a) < 1.2 * float(np.sqrt(np.sum(d[4:] ** 2) / np.sum(d ** 2)))

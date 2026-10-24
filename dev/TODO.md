@@ -192,7 +192,18 @@ and rtol * gnorm0 stops at L^2 errors of 3e-6 to 3e-5 (versus 1e-9 for the
 L^2 ball). Users would pass gtol or gnorm0, or the test could use a fixed
 norm.
 
+**Conventional path** (2026-10-24): with M = P and no saddle-free model,
+`krylov="auto"` now uses Steihaug-Toint truncated CG
+(`solve_tr_subproblem_cg`): five vectors, two reductions per step, and it
+reuses the `P^{-1} g` of the gradient norm. `krylov="lanczos"` keeps the
+reorthogonalized solver. On the p-Laplacian with M = P, CG took the same or
+fewer Krylov steps and less time; at p = 5 it took about 10-25% more outer
+iterations, since it stops at the first boundary crossing.
+
 ## Communication per Lanczos step
+
+The CG path for M = P needs only two reductions per step (<H p, p> and
+<r, P^{-1} r>). The rest of this entry is about the Lanczos path.
 
 In a distributed run each Lanczos step does six global reductions:
 <Hq, q>, two reorthogonalization passes (one `pair_block` each),

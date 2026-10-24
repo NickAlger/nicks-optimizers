@@ -16,7 +16,7 @@ The optimizer only produces records; formatting and printing are separate.
                     with resume=state (and g0=g to skip one gradient)
 
 Records hold only numbers and tuples, so keeping them all is cheap; vectors
-go only to the callback. format_header, format_row, format_lanczos_trace and
+go only to the callback. format_header, format_row, format_krylov_trace and
 format_summary turn records into text; display_iteration prints them.
 """
 
@@ -160,8 +160,8 @@ def merge_summaries(first: RunSummary, second: RunSummary) -> RunSummary:
 
 def history_array(summary: RunSummary) -> Array:
     """The iterations as a numeric array, one row per iteration, with columns
-    (iteration, f, ||g||, radius, rho, lanczos_steps, accepted, n_negative)."""
-    rows = [(r.iteration, r.f, r.gnorm, r.radius, r.rho, r.subproblem.lanczos_steps,
+    (iteration, f, ||g||, radius, rho, krylov_steps, accepted, n_negative)."""
+    rows = [(r.iteration, r.f, r.gnorm, r.radius, r.rho, r.subproblem.krylov_steps,
              float(r.accepted), r.subproblem.n_negative) for r in summary.iterations]
     history: Array = np.array(rows, dtype=float).reshape(-1, 8)
     return history
@@ -214,19 +214,21 @@ def format_row(record: IterationRecord) -> str:
         gr=f"{record.gnorm_ratio:.1e}", r=f"{record.radius:.2e}",
         sr=f"{s.step_norm / record.radius:.2f}", pred=f"{record.predicted:.2e}",
         ared=f"{record.actual:.2e}", rho=f"{record.rho:+.3f}",
-        acc="yes" if record.accepted else "no", k=s.lanczos_steps, stop=s.stop_reason,
+        acc="yes" if record.accepted else "no", k=s.krylov_steps, stop=s.stop_reason,
         neg=s.n_negative)
 
 
-def format_lanczos_trace(stats: SubproblemStats) -> str:
+def format_krylov_trace(stats: SubproblemStats) -> str:
     """The per-step history of one subproblem solve, indented under its row."""
     pad = " " * 8
     lines = [f"{pad}{'step':>4}  {'model':>11}  {'resid':>9}  {'lam':>9}  {'neg':>3}"]
     for j, (m, r, lam, neg) in enumerate(zip(stats.trace_model, stats.trace_resid,
                                              stats.trace_lam, stats.trace_negative), start=1):
         lines.append(f"{pad}{j:>4}  {m:11.4e}  {r:9.2e}  {lam:9.2e}  {neg:3d}")
-    last = (f"{pad}stop: {stats.stop_reason} (resid tol {stats.resid_tol:.2e}), "
-            f"smallest M-Ritz value {stats.theta_min:.2e}")
+    smallest = ("smallest M-Ritz value" if stats.krylov == "lanczos"
+                else "smallest curvature <Hp, p> / ||p||_P^2")
+    last = (f"{pad}stop: {stats.stop_reason} ({stats.krylov}, resid tol {stats.resid_tol:.2e}), "
+            f"{smallest} {stats.theta_min:.2e}")
     if stats.true_model_value != stats.model_value:
         last += f", true-model value {stats.true_model_value:.4e}"
     lines.append(last)
@@ -256,4 +258,4 @@ def display_iteration(record: IterationRecord, level: int, print_fn: Callable[[s
         print_fn(format_header())
     print_fn(format_row(record))
     if level >= 2:
-        print_fn(format_lanczos_trace(record.subproblem))
+        print_fn(format_krylov_trace(record.subproblem))

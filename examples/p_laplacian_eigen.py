@@ -158,7 +158,7 @@ def starting_point(loc: pl.Local, kind: str, seed: int) -> Point:
 
 
 def solve(loc: pl.Local, e: Eigen, u0: Point, precond: str = "amg", saddle_free: bool = False,
-          display: int = 0, max_iter: int = 300, max_lanczos: int = 100) -> tuple[Point, RunSummary]:
+          display: int = 0, max_iter: int = 300, max_krylov: int = 100) -> tuple[Point, RunSummary]:
     root = loc.comm.Get_rank() == 0
     return trust_region_newton(
         lambda u: objective(loc, e, u),
@@ -168,7 +168,7 @@ def solve(loc: pl.Local, e: Eigen, u0: Point, precond: str = "amg", saddle_free:
         lambda u, Psi, phi: pl.l2_dual_inner(loc, Psi, phi),
         u0, space=pl.distributed_space(loc),
         operators_at=lambda u: operators_at(loc, e, precond, u),
-        saddle_free=saddle_free, rtol=1e-10, max_iter=max_iter, max_lanczos=max_lanczos,
+        saddle_free=saddle_free, rtol=1e-10, max_iter=max_iter, max_krylov=max_krylov,
         display=display, print_fn=print if root else (lambda line: None))
 
 
@@ -194,7 +194,7 @@ def main() -> None:
     if root:
         print(f"mesh: {loc.n_unknowns} unknowns on {comm.Get_size()} ranks; start: {args.start}; "
               f"{'saddle-free' if args.saddle_free else 'plain'} model; preconditioner: {args.precond}\n")
-        print("    p  seed  iterations  Lanczos  lambda_h        lambda (radial)  rel. diff  "
+        print("    p  seed  iterations   Krylov  lambda_h        lambda (radial)  rel. diff  "
               "ground state  time")
     results = []
     for p in args.p:
@@ -206,16 +206,16 @@ def main() -> None:
                                args.saddle_free, args.display)
             elapsed = comm.allreduce(time.perf_counter() - start, op=MPI.MAX)
             lam, ground = eigenvalue(loc, e, u), sign_definite(loc, u)
-            lanczos = sum(r.subproblem.lanczos_steps for r in summary.iterations)
+            krylov_steps = sum(r.subproblem.krylov_steps for r in summary.iterations)
             if root:
-                print(f"{p:5.2f}  {seed:4d}  {len(summary.iterations):10d}  {lanczos:7d}  {lam:.10f}  "
+                print(f"{p:5.2f}  {seed:4d}  {len(summary.iterations):10d}  {krylov_steps:7d}  {lam:.10f}  "
                       f"{reference:.10f}  {abs(lam - reference) / reference:9.1e}  "
                       f"{'yes' if ground else 'no':>12s}  {elapsed:4.1f}s  ({summary.reason})")
             results.append({"p": p, "seed": seed, "lambda": lam, "reference": reference,
                             "ground": ground, "reason": summary.reason,
-                            "iterations": len(summary.iterations), "lanczos": lanczos,
+                            "iterations": len(summary.iterations), "krylov_steps": krylov_steps,
                             "records": [{"f": r.f, "accepted": r.accepted,
-                                         "lanczos": r.subproblem.lanczos_steps,
+                                         "krylov_steps": r.subproblem.krylov_steps,
                                          "negative": r.subproblem.n_negative}
                                         for r in summary.iterations]})
     if root and args.json:

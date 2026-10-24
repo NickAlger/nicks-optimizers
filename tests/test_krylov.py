@@ -105,3 +105,40 @@ def test_redundant_representation_needs_projection() -> None:
     ritz = np.linalg.eigvalsh(lanczos_tridiagonal(projected))
     assert projected.breakdown and projected.steps == n - m
     assert np.max(np.abs(ritz - exact)) <= 1e-9 * exact[-1]
+
+
+def test_cg_process_against_dense_algebra() -> None:
+    """Preconditioned CG on an SPD H: at every step the residual is g + H s,
+    z = P^{-1} r, the recurrences for ||s||_P^2, (s, p)_P, ||p||_P^2 and the
+    model value match direct computation (the (s, p)_P recurrence to the
+    accuracy the boundary test needs), ||s||_P increases (Steihaug), and the
+    process solves H s = -g."""
+    from nicks_optimizers import cg_advance, cg_curvature, cg_start
+    rng = np.random.default_rng(12)
+    n = 40
+    H = matrix_with_spectrum(np.linspace(1.0, 10.0, n), rng)
+    P = random_spd(n, 5.0, rng)
+    g = Covector(rng.standard_normal(n))
+    hessvec, precond = dense_vec_to_covec(H), dense_solve(P)
+    state = cg_start(numpy_space, g, precond)
+    rz0 = state.rz
+    norms = [0.0]
+    while state.rz > 1e-24 * rz0:
+        Hp, curvature = cg_curvature(numpy_space, state, hessvec)
+        state = cg_advance(numpy_space, state, Hp, curvature, precond)
+        s, p = state.s, state.p
+        scale = float(np.linalg.norm(g))
+        assert np.max(np.abs(state.r - (g + H @ s))) < 1e-10 * scale
+        assert np.max(np.abs(P @ state.z - state.r)) < 1e-10 * scale
+        sPs, pPp = float(s @ P @ s), float(p @ P @ p)
+        model = float(g @ s + 0.5 * s @ H @ s)
+        assert abs(state.s_norm2 - sPs) <= 1e-8 * sPs
+        assert abs(state.p_norm2 - pPp) <= 1e-8 * pPp
+        # (s, p)_P only enters ||s + alpha p||_P^2 in the boundary test, so its
+        # drift (it loses relative accuracy as conjugacy degrades) is
+        # measured against ||s||_P^2.
+        assert abs(state.sp - float(s @ P @ p)) <= 1e-10 * sPs
+        assert abs(state.model - model) <= 1e-9 * abs(model)
+        norms.append(state.s_norm2)
+    assert all(b >= a * (1.0 - 1e-14) for a, b in zip(norms, norms[1:]))   # up to rounding
+    assert np.linalg.norm(H @ state.s + g) < 1e-10 * np.linalg.norm(g)

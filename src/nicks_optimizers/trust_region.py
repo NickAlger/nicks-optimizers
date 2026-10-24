@@ -41,25 +41,29 @@ tangent vectors of a low-rank manifold):
                                        the invisible components (see krylov).
 
 Trust region in the preconditioner's norm: pass None for both inner
-products, and the ball is { s : <P(x) s, s> <= radius^2 }. It costs nothing
-extra (the Lanczos basis is P-orthonormal) and suits preconditioners known
-only through P^{-1}, such as multigrid; gradient norms are then
-||g||_{P(x)^{-1}}, one more solve per new iterate.
+products, and the ball is { s : <P(x) s, s> <= radius^2 }, the conventional
+(Steihaug-Toint) trust region. It needs no inner products, so it suits
+preconditioners known only through P^{-1}, such as multigrid; gradient norms
+are then ||g||_{P(x)^{-1}}. Without saddle_free, the subproblem is then
+solved by truncated conjugate gradients (solve_tr_subproblem_cg: five
+vectors, two reductions per step) unless krylov="lanczos" asks for the
+reorthogonalized Lanczos solver (exact subspace solutions on the boundary,
+more robust in floating point).
 
 H and P^{-1} are the only operators the method applies; the geometry enters
 only through the two inner products (see metrics), which must be exact
 duals. The radius carries over from one point to the next, so the theory
 wants M(x) uniformly equivalent to a fixed norm over the iterates.
 
-Each iteration computes a step with solve_tr_subproblem (see
-trust_region_subproblem) and records what happened (see
+Each iteration computes a step with solve_tr_subproblem or
+solve_tr_subproblem_cg (see trust_region_subproblem) and records what happened (see
 trust_region_diagnostics).
 """
 
 import time
 
 import numpy as np
-from typing import Callable, Optional, cast
+from typing import Callable, Literal, Optional, cast
 
 from .criteria import forcing_term, gradient_converged, reduction_ratio
 from .metrics import covector_norm
@@ -83,7 +87,7 @@ from .trust_region_diagnostics import (
     display_iteration,
     format_summary,
 )
-from .trust_region_subproblem import solve_tr_subproblem
+from .trust_region_subproblem import solve_tr_subproblem, solve_tr_subproblem_cg
 
 
 def update_radius(radius: float, rho: float, step_norm: float, radius_max: float) -> float:
@@ -125,13 +129,14 @@ def trust_region_newton(
         radius_min: float = 1e-14, eta: float = 1e-4,
         gtol: float = 1e-8, rtol: float = 0.0,
         gnorm0: Optional[float] = None, forcing_max: float = 0.5,
-        stall_tol: float = 1e-3, max_iter: int = 500, max_lanczos: int = 50,
+        stall_tol: float = 1e-3, max_iter: int = 500, max_krylov: int = 50,
         display: int = 0, print_fn: Callable[[str], None] = print,
         callback: Optional[Callable[[PointT, IterationInfo[VectorT, CovectorT]], Optional[bool]]] = None,
         resume: Optional[ResumeState] = None,
         g0: Optional[CovectorT] = None,
         operators_at: Optional[Callable[[PointT], tuple[Callable[[VectorT], CovectorT],
                                                         Callable[[CovectorT], VectorT]]]] = None,
+        krylov: Literal["auto", "cg", "lanczos"] = "auto",
         ) -> tuple[PointT, RunSummary]:
     """Inexact Newton trust-region method with an ellipsoidal trust region.
 
@@ -165,9 +170,17 @@ def trust_region_newton(
     Hessian is |H|_{M}, approximated through the M-Ritz pairs of the Krylov
     space, so saddle points repel the iterates instead of attracting them.
 
+    Subproblem solver (krylov): "auto" uses truncated CG for the
+    conventional trust region (no inner products, so M = P, and no
+    saddle_free) and Lanczos otherwise; "lanczos" forces Lanczos; "cg"
+    forces CG and requires the conventional trust region. At most
+    max_krylov steps per solve.
+
     The Krylov solve stops when the (surrogate) residual satisfies
-    ||R|| <= forcing * ||g||, with forcing = forcing_term(...), or, while the
-    trust region is active, when the model stops changing (stall_tol).
+    ||R|| <= forcing * ||g||, with forcing = forcing_term(...). Lanczos also
+    stops when the trust region is active and the model stops changing
+    (stall_tol); CG stops when its next iterate would leave the trust region
+    or it meets negative curvature, and then steps to the boundary.
 
     Convergence: stops when ||g|| <= max(gtol, rtol * gnorm0). gnorm0 defaults
     to ||g(x0)|| and can be passed explicitly, e.g. when restarting, so that
@@ -204,6 +217,12 @@ def trust_region_newton(
     if (ball_inner is None) != (ball_dual_inner is None):
         raise ValueError("pass both inner products, or neither (trust region in the P-norm)")
     matched = ball_dual_inner is None
+    if krylov not in ("auto", "cg", "lanczos"):
+        raise ValueError(f"krylov must be 'auto', 'cg' or 'lanczos', not {krylov!r}")
+    if krylov == "cg" and (not matched or saddle_free):
+        raise ValueError("krylov='cg' needs the conventional trust region: no inner products "
+                         "(M = P) and saddle_free=False")
+    use_cg = krylov == "cg" or (krylov == "auto" and matched and not saddle_free)
 
     def frozen_operators(x: PointT) -> tuple[Callable[[VectorT], CovectorT],
                                              Callable[[CovectorT], VectorT]]:
@@ -214,12 +233,15 @@ def trust_region_newton(
 
     def dual_norm(x: PointT, g: CovectorT,
                   operators: Optional[tuple[Callable[[VectorT], CovectorT],
-                                            Callable[[CovectorT], VectorT]]]) -> float:
-        """||g||_{M^{-1}}; with M = P, sqrt(<g, P^{-1} g>)."""
+                                            Callable[[CovectorT], VectorT]]]
+                  ) -> tuple[float, Optional[VectorT]]:
+        """||g||_{M^{-1}}, and P^{-1} g when M = P (the norm is then
+        sqrt(<g, P^{-1} g>), and the subproblem reuses P^{-1} g)."""
         if ball_dual_inner is None:
             assert operators is not None
-            return float(np.sqrt(max(sp.pair(g, operators[1](g)), 0.0)))
-        return covector_norm(sp, lambda Psi, phi: ball_dual_inner(x, Psi, phi), g)
+            Pg = operators[1](g)
+            return float(np.sqrt(max(sp.pair(g, Pg), 0.0))), Pg
+        return covector_norm(sp, lambda Psi, phi: ball_dual_inner(x, Psi, phi), g), None
 
     start = time.perf_counter()
     sp = space if space is not None else cast(
@@ -243,7 +265,7 @@ def trust_region_newton(
         g, grad_calls = canonical(x, grad(x)), 1
     operators: Optional[tuple[Callable[[VectorT], CovectorT], Callable[[CovectorT], VectorT]]] = (
         frozen_operators(x) if matched else None)
-    gnorm = dual_norm(x, g, operators)
+    gnorm, precond_g = dual_norm(x, g, operators)
     outer_precond_calls = 1 if matched else 0
     if gnorm0 is None:
         gnorm0 = gnorm
@@ -261,14 +283,19 @@ def trust_region_newton(
         forcing = forcing_term(gnorm, gnorm0, forcing_max)
         if operators is None:                   # first iteration at this point
             operators = frozen_operators(x)
-        s, stats = solve_tr_subproblem(
-            sp, g, operators[0], operators[1],
-            None if ball_inner is None else (lambda U, v: ball_inner(x, U, v)),
-            None if ball_dual_inner is None else (lambda Psi, phi: ball_dual_inner(x, Psi, phi)),
-            radius, forcing * gnorm, max_lanczos,
-            g_dual_norm=gnorm, stall_tol=stall_tol, saddle_free=saddle_free,
-            project_covector=None if project_covector is None else (
-                lambda w: project_covector(x, w)))
+        project = None if project_covector is None else (lambda w: project_covector(x, w))
+        if use_cg:
+            s, stats = solve_tr_subproblem_cg(
+                sp, g, operators[0], operators[1], radius, forcing * gnorm, max_krylov,
+                project_covector=project, precond_g=precond_g)
+        else:
+            s, stats = solve_tr_subproblem(
+                sp, g, operators[0], operators[1],
+                None if ball_inner is None else (lambda U, v: ball_inner(x, U, v)),
+                None if ball_dual_inner is None else (lambda Psi, phi: ball_dual_inner(x, Psi, phi)),
+                radius, forcing * gnorm, max_krylov,
+                g_dual_norm=gnorm, stall_tol=stall_tol, saddle_free=saddle_free,
+                project_covector=project, precond_g=precond_g)
 
         x_trial = retraction(x, s)
         f_trial = float(fun(x_trial))
@@ -289,7 +316,7 @@ def trust_region_newton(
             operators = frozen_operators(x) if matched else None
             g = canonical(x, grad(x))
             grad_calls += 1
-            gnorm = dual_norm(x, g, operators)
+            gnorm, precond_g = dual_norm(x, g, operators)
             if matched:
                 outer_precond_calls += 1
             else:

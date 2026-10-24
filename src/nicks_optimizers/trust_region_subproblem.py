@@ -1,4 +1,16 @@
-"""The trust-region subproblem, solved over a Lanczos Krylov space.
+"""The trust-region subproblem, solved over a Krylov space.
+
+Two solvers:
+
+  solve_tr_subproblem     Lanczos with full reorthogonalization, for any
+                          ball metric M (including M = P) and the
+                          saddle-free model. Described below.
+  solve_tr_subproblem_cg  Steihaug-Toint truncated conjugate gradients, for
+                          the conventional ball M = P and the plain model:
+                          five vectors, two reductions per step, no inner
+                          products.
+
+Lanczos:
 
     min_s  <g, s> + 0.5 <H_model s, s>    s.t.  ||s||_M <= radius,
 
@@ -32,7 +44,15 @@ from typing import Callable, Literal, Optional
 import numpy as np
 
 from .dense import grow_gram, pencil_ritz, solve_sphere_trs_eig
-from .krylov import lanczos_advance, lanczos_start, lanczos_tridiagonal
+from .krylov import (
+    CGState,
+    cg_advance,
+    cg_curvature,
+    cg_start,
+    lanczos_advance,
+    lanczos_start,
+    lanczos_tridiagonal,
+)
 from .metrics import covector_norm, extend_dual_gram, extend_metric_gram
 from .spaces import (
     Coords,
@@ -45,7 +65,8 @@ from .spaces import (
 )
 
 
-StopReason = Literal["tol", "stall", "breakdown", "max"]
+StopReason = Literal["tol", "stall", "breakdown", "max", "boundary", "negative"]
+KrylovMethod = Literal["lanczos", "cg"]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -53,21 +74,32 @@ class SubproblemStats:
     """Diagnostics of one trust-region subproblem solve: scalars and tuples
     only, so records stay small however long the run.
 
-      lanczos_steps     number of Lanczos steps k
-      stop_reason       "tol" (residual met resid_tol), "stall" (boundary
-                        active and the model stopped changing), "breakdown"
-                        (invariant subspace: the subspace solution is exact) or
-                        "max" (max_lanczos or the dimension)
-      step_norm, lam    ||s||_M and the multiplier (> 0 when the boundary is active)
+      krylov            "lanczos" or "cg", the solver used
+      krylov_steps      number of Krylov steps k (= Hessian-vector products)
+      stop_reason       "tol" (residual met resid_tol), "stall" (Lanczos:
+                        boundary active and the model stopped changing),
+                        "breakdown" (Lanczos: invariant subspace, the subspace
+                        solution is exact), "max" (max_krylov or the
+                        dimension), "boundary" (CG: the next iterate would
+                        leave the trust region; the step stops on it) or
+                        "negative" (CG: negative curvature along the search
+                        direction; the step follows it to the boundary)
+      step_norm, lam    ||s||_M and the multiplier (> 0 when the boundary is
+                        active). CG does not compute the multiplier: lam is 0
+                        for interior steps and nan on the boundary.
       model_value       <g,s> + 0.5 <H_model s, s>, the model that was minimized
       true_model_value  <g,s> + 0.5 <H s, s> (differs only with saddle_free)
-      resid, resid_tol  final ||R||_{M^{-1}} and the tolerance it was tested against
-      n_negative, theta_min  number of negative M-Ritz values, smallest one
+      resid, resid_tol  final ||R||_{M^{-1}} and the tolerance it was tested
+                        against (CG: nan when the step stopped on the boundary)
+      n_negative, theta_min  Lanczos: number of negative M-Ritz values and the
+                        smallest one. CG: 1 if negative curvature was found,
+                        and the smallest <H p, p> / ||p||_P^2 seen.
       *_calls           operator and inner-product calls made by this solve
-      trace_*           per Lanczos step: model value, residual, multiplier,
-                        number of negative M-Ritz values
+      trace_*           per Krylov step: model value, residual, multiplier,
+                        number of negative curvature values
     """
-    lanczos_steps: int
+    krylov: KrylovMethod
+    krylov_steps: int
     stop_reason: StopReason
     step_norm: float
     lam: float
@@ -179,7 +211,8 @@ def solve_tr_subproblem(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlo
                         radius: float, resid_tol: float, max_iter: int,
                         g_dual_norm: Optional[float] = None, stall_tol: float = 1e-3,
                         saddle_free: bool = False, breakdown_tol: float = 1e-12,
-                        project_covector: Optional[Callable[[CovectorT], CovectorT]] = None
+                        project_covector: Optional[Callable[[CovectorT], CovectorT]] = None,
+                        precond_g: Optional[VectorT] = None
                         ) -> tuple[VectorT, SubproblemStats]:
     """Approximately solve  min <g, s> + 0.5 <H_model s, s>  s.t.  ||s||_M <= radius
     over the growing Krylov spaces K_k(P^{-1} H, P^{-1} g), where H_model is
@@ -195,7 +228,8 @@ def solve_tr_subproblem(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlo
     P-orthonormal, so G = I and W = I (with the pending vector), and
     ||g||_{P^{-1}} = gamma0; g_dual_norm is ignored. project_covector, for representations with
     redundant components, maps covectors to canonical representatives; it is
-    applied to every Krylov covector (see krylov).
+    applied to every Krylov covector (see krylov). precond_g = P^{-1} g, if
+    already computed, saves one preconditioner solve.
 
     Stops at the first of:
       * ||R||_{M^{-1}} <= resid_tol, with R the (surrogate) KKT residual
@@ -217,7 +251,7 @@ def solve_tr_subproblem(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlo
     if ball_dual_inner is not None and g_dual_norm is None:
         g_dual_norm = covector_norm(space, ball_dual_inner, g)
         dual_calls += 1
-    state = lanczos_start(space, g, precond_solve)
+    state = lanczos_start(space, g, precond_solve, precond_g)
     if space.dimension is not None:
         max_iter = min(max_iter, space.dimension(state.q))
     if ball_inner is None or g_dual_norm is None:              # M = P
@@ -256,12 +290,12 @@ def solve_tr_subproblem(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlo
             reason: StopReason = ("breakdown" if state.breakdown else "tol" if resid <= resid_tol
                                   else "stall" if stalled else "max")
             stats = SubproblemStats(
-                lanczos_steps=k, stop_reason=reason,
+                krylov="lanczos", krylov_steps=k, stop_reason=reason,
                 step_norm=float(np.sqrt(max(float(y @ G @ y), 0.0))), lam=lam,
                 model_value=model_value, true_model_value=true_model_value,
                 resid=resid, resid_tol=resid_tol, n_negative=n_negative,
                 theta_min=float(theta[0]),
-                hessvec_calls=k, precond_calls=k + 1,
+                hessvec_calls=k, precond_calls=k + (1 if precond_g is None else 0),
                 inner_calls=0 if ball_inner is None else k, dual_inner_calls=dual_calls,
                 trace_model=tuple(trace_model), trace_resid=tuple(trace_resid),
                 trace_lam=tuple(trace_lam), trace_negative=tuple(trace_negative))
@@ -273,3 +307,93 @@ def solve_tr_subproblem(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlo
              else extend_metric_gram(space, G, state.Q, state.q_next, ball_inner))
         W = W_next
     raise AssertionError("unreachable: the loop returns at k == max_iter")
+
+
+def boundary_fraction(s_norm2: float, sp: float, p_norm2: float, radius: float) -> float:
+    """The tau >= 0 with ||s + tau p||_P = radius, from ||s||_P^2, (s, p)_P and
+    ||p||_P^2 (s inside the ball). Written to avoid cancellation."""
+    gap = max(radius ** 2 - s_norm2, 0.0)
+    root = float(np.sqrt(sp ** 2 + p_norm2 * gap))
+    return gap / (sp + root) if sp > 0.0 else (root - sp) / p_norm2
+
+
+def solve_tr_subproblem_cg(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlockT, CovectorBlockT],
+                           g: CovectorT, hessvec: Callable[[VectorT], CovectorT],
+                           precond_solve: Callable[[CovectorT], VectorT],
+                           radius: float, resid_tol: float, max_iter: int,
+                           project_covector: Optional[Callable[[CovectorT], CovectorT]] = None,
+                           precond_g: Optional[VectorT] = None
+                           ) -> tuple[VectorT, SubproblemStats]:
+    """Steihaug-Toint truncated CG for  min <g, s> + 0.5 <H s, s>
+    s.t.  ||s||_P <= radius:  the conventional trust region, whose ball is
+    the preconditioner's norm.
+
+    Runs preconditioned CG on H s = -g from s = 0 and stops at the first of:
+      * ||r||_{P^{-1}} <= resid_tol, r = g + H s the model gradient ("tol");
+      * the next CG iterate would leave the ball: the step stops where the
+        segment to it crosses the boundary ("boundary");
+      * negative curvature, <H p, p> <= 0: the step follows p to the boundary
+        ("negative");
+      * max_iter steps ("max"). Unlike Lanczos, CG is not capped at the
+        dimension: without reorthogonalization it can need more than n steps
+        in floating point.
+    The iterates' P-norms increase (Steihaug), so the first crossing is the
+    right place to stop, and the first step is the Cauchy point along
+    -P^{-1} g: every step gives at least the Cauchy decrease. Unlike the
+    Lanczos solver it does not continue on the boundary, keeps no basis
+    (five vectors), and needs two reductions per step and no inner products.
+
+    project_covector maps each residual to its canonical representative,
+    for redundant representations (see krylov). precond_g = P^{-1} g, if
+    already computed, saves one solve. Returns (s, stats).
+    """
+    state: CGState[VectorT, CovectorT] = cg_start(space, g, precond_solve, precond_g)
+    # No cap at the dimension: without reorthogonalization, CG can need more
+    # than n steps in floating point.
+    trace_model: list[float] = []
+    trace_resid: list[float] = []
+    trace_lam: list[float] = []
+    trace_negative: list[int] = []
+    theta_min = float("inf")
+    s, model = state.s, 0.0
+    reason: StopReason = "max"
+    lam, resid, n_negative = 0.0, float(np.sqrt(state.rz)), 0
+    precond_calls = 0 if precond_g is None else -1
+
+    for k in range(1, max_iter + 1):
+        Hp, curvature = cg_curvature(space, state, hessvec)
+        theta_min = min(theta_min, curvature / state.p_norm2)
+        alpha = state.rz / curvature if curvature > 0.0 else float("inf")
+        if curvature <= 0.0 or (state.s_norm2 + 2.0 * alpha * state.sp
+                                + alpha ** 2 * state.p_norm2 >= radius ** 2):
+            tau = boundary_fraction(state.s_norm2, state.sp, state.p_norm2, radius)
+            s = space.axpy_vector(tau, state.p, state.s)
+            model = state.model - tau * state.rz + 0.5 * tau ** 2 * curvature
+            reason = "negative" if curvature <= 0.0 else "boundary"
+            lam, resid, n_negative = float("nan"), float("nan"), int(curvature <= 0.0)
+            trace_model.append(model)
+            trace_resid.append(resid)
+            trace_lam.append(lam)
+            trace_negative.append(n_negative)
+            break
+        state = cg_advance(space, state, Hp, curvature, precond_solve, project_covector)
+        s, model, resid = state.s, state.model, float(np.sqrt(max(state.rz, 0.0)))
+        trace_model.append(model)
+        trace_resid.append(resid)
+        trace_lam.append(0.0)
+        trace_negative.append(0)
+        if resid <= resid_tol:
+            reason = "tol"
+            break
+    k_done = len(trace_model)
+    on_boundary = reason in ("boundary", "negative")
+    step_norm = radius if on_boundary else float(np.sqrt(max(state.s_norm2, 0.0)))
+    stats = SubproblemStats(
+        krylov="cg", krylov_steps=k_done, stop_reason=reason, step_norm=step_norm, lam=lam,
+        model_value=model, true_model_value=model, resid=resid, resid_tol=resid_tol,
+        n_negative=n_negative, theta_min=theta_min,
+        hessvec_calls=k_done, precond_calls=precond_calls + 1 + state.steps,
+        inner_calls=0, dual_inner_calls=0,
+        trace_model=tuple(trace_model), trace_resid=tuple(trace_resid),
+        trace_lam=tuple(trace_lam), trace_negative=tuple(trace_negative))
+    return s, stats

@@ -54,7 +54,7 @@ def test_runs_follow_the_same_iterates_on_any_number_of_ranks(tmp_path: Path) ->
     for p in one:
         a, b = one[p]["records"], three[p]["records"]
         assert len(a) == len(b)
-        assert [(r["accepted"], r["lanczos"]) for r in a] == [(r["accepted"], r["lanczos"]) for r in b]
+        assert [(r["accepted"], r["krylov_steps"]) for r in a] == [(r["accepted"], r["krylov_steps"]) for r in b]
         assert max(abs(r["f"] - s["f"]) / max(1.0, abs(r["f"])) for r, s in zip(a, b)) < 1e-12
         assert one[p]["error"] < 1e-9 and three[p]["error"] < 1e-9
 

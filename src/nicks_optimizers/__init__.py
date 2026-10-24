@@ -6,7 +6,7 @@ Modules, in dependency order:
                             (VectorSpace records; numpy by default)
   metrics                   inner products and norms (the geometry)
   dense                     small dense linear algebra in coordinates
-  krylov                    Krylov processes (preconditioned Lanczos)
+  krylov                    Krylov processes (preconditioned Lanczos and CG)
   criteria                  tests shared by inexact Newton methods
   trust_region_subproblem   the trust-region subproblem over a Krylov space
   trust_region_diagnostics  records, resumption state and text output
@@ -19,7 +19,16 @@ the public interface; lower-level pieces are available from their modules.
 
 from .criteria import forcing_term, gradient_converged, reduction_ratio
 from .dense import pencil_ritz, solve_sphere_trs, solve_sphere_trs_eig, tridiagonal
-from .krylov import LanczosState, lanczos_advance, lanczos_start, lanczos_tridiagonal
+from .krylov import (
+    CGState,
+    LanczosState,
+    cg_advance,
+    cg_curvature,
+    cg_start,
+    lanczos_advance,
+    lanczos_start,
+    lanczos_tridiagonal,
+)
 from .metrics import (
     DualInnerProduct,
     FrozenDualInnerProduct,
@@ -60,13 +69,19 @@ from .trust_region_diagnostics import (
     RunReason,
     RunSummary,
     format_header,
-    format_lanczos_trace,
+    format_krylov_trace,
     format_row,
     format_summary,
     history_array,
     merge_summaries,
 )
-from .trust_region_subproblem import StopReason, SubproblemStats, solve_tr_subproblem
+from .trust_region_subproblem import (
+    KrylovMethod,
+    StopReason,
+    SubproblemStats,
+    solve_tr_subproblem,
+    solve_tr_subproblem_cg,
+)
 
 __all__ = [
     # spaces
@@ -105,7 +120,11 @@ __all__ = [
     "solve_sphere_trs_eig",
     "tridiagonal",
     # krylov
+    "CGState",
     "LanczosState",
+    "cg_advance",
+    "cg_curvature",
+    "cg_start",
     "lanczos_advance",
     "lanczos_start",
     "lanczos_tridiagonal",
@@ -119,15 +138,17 @@ __all__ = [
     "ResumeState",
     "RunReason",
     "RunSummary",
+    "KrylovMethod",
     "StopReason",
     "SubproblemStats",
     "format_header",
-    "format_lanczos_trace",
+    "format_krylov_trace",
     "format_row",
     "format_summary",
     "history_array",
     "merge_summaries",
     "solve_tr_subproblem",
+    "solve_tr_subproblem_cg",
     "trust_region_newton",
 ]
 

@@ -53,7 +53,7 @@ trust-region boundary. Those iterations grow with refinement because the L^2
 ball admits rough steps, cheap in L^2 but expensive for an energy that grows
 like |grad s|^5. In a serial experiment, an H^1 ball (stiffness matrix, exact
 dual by sparse LU) took 23 / 26 / 42 iterations instead of 62 / 91 / 176.
-Block Jacobi has no coarse space, so Lanczos steps per solve grow with the
+Block Jacobi has no coarse space, so Krylov steps per solve grow with the
 number of ranks.
 
 Run:   mpiexec -n 4 python examples/p_laplacian.py --p 1.5 3 5
@@ -64,7 +64,7 @@ import argparse
 import json
 import time
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, Literal, Optional
 
 import numpy as np
 import numpy.typing as npt
@@ -388,9 +388,11 @@ def l2_error(loc: Local, u: Array, u_star: Array) -> float:
 
 
 def solve(loc: Local, e: Energy, precond: str, ball: str = "l2", display: int = 0,
-          max_iter: int = 200, max_lanczos: int = 100) -> tuple[Point, RunSummary]:
+          max_iter: int = 200, max_krylov: int = 100,
+          krylov: Literal["auto", "cg", "lanczos"] = "auto") -> tuple[Point, RunSummary]:
     """Minimize J from u = 0. ball = "l2" (lumped mass) or "precond" (the
-    preconditioner's norm, M = P)."""
+    preconditioner's norm, M = P, solved by truncated CG unless
+    krylov = "lanczos")."""
     root = loc.comm.Get_rank() == 0
     fixed = laplacian_cycle(loc) if precond == "laplace" else None
     return trust_region_newton(
@@ -402,7 +404,7 @@ def solve(loc: Local, e: Energy, precond: str, ball: str = "l2", display: int = 
         Point(np.zeros(loc.n_owned)),
         space=distributed_space(loc),
         operators_at=lambda u: operators_at(loc, e, precond, u, fixed),
-        rtol=1e-10, max_iter=max_iter, max_lanczos=max_lanczos,
+        rtol=1e-10, max_iter=max_iter, max_krylov=max_krylov, krylov=krylov,
         display=display, print_fn=print if root else (lambda line: None))
 
 
@@ -414,6 +416,8 @@ def main() -> None:
     parser.add_argument("--precond", choices=["amg", "jacobi", "laplace"], default="amg")
     parser.add_argument("--ball", choices=["l2", "precond"], default="l2",
                         help="trust region: L^2 (lumped mass) or the preconditioner's norm")
+    parser.add_argument("--krylov", choices=["auto", "cg", "lanczos"], default="auto",
+                        help="subproblem solver (auto: CG for --ball precond, else Lanczos)")
     parser.add_argument("--display", type=int, default=0)
     parser.add_argument("--json", help="write the iteration histories here (rank 0)")
     args = parser.parse_args()
@@ -431,21 +435,21 @@ def main() -> None:
         print(f"{comm.Get_size()} ranks: owned nodes {counts}, ghost nodes {ghosts}")
         ball = "L^2 (lumped mass)" if args.ball == "l2" else "the preconditioner's norm"
         print(f"ball: {ball}; preconditioner: {args.precond}; eps = {args.eps:g}\n")
-        print("    p  iterations  accepted  Lanczos steps  ||u - u*|| / ||u*||    time")
+        print("    p  iterations  accepted  Krylov steps  ||u - u*|| / ||u*||    time")
     histories = {}
     for p in args.p:
         e, u_star = manufactured_energy(loc, p, args.eps)
         start = time.perf_counter()
-        u, summary = solve(loc, e, args.precond, args.ball, display=args.display)
+        u, summary = solve(loc, e, args.precond, args.ball, display=args.display, krylov=args.krylov)
         elapsed = comm.allreduce(time.perf_counter() - start, op=MPI.MAX)
         error = l2_error(loc, u, u_star)
-        lanczos = sum(r.subproblem.lanczos_steps for r in summary.iterations)
+        krylov_steps = sum(r.subproblem.krylov_steps for r in summary.iterations)
         if root:
             print(f"{p:5.2f}  {len(summary.iterations):10d}  {summary.accepted_steps:8d}  "
-                  f"{lanczos:13d}  {error:20.2e}  {elapsed:6.1f}s  ({summary.reason})")
+                  f"{krylov_steps:12d}  {error:20.2e}  {elapsed:6.1f}s  ({summary.reason})")
         histories[str(p)] = {"error": error, "records": [
             {"f": r.f, "gnorm": r.gnorm, "radius": r.radius, "rho": r.rho, "accepted": r.accepted,
-             "lanczos": r.subproblem.lanczos_steps} for r in summary.iterations]}
+             "krylov_steps": r.subproblem.krylov_steps} for r in summary.iterations]}
     if root and args.json:
         with open(args.json, "w") as fh:
             json.dump(histories, fh)

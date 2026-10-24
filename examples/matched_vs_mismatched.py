@@ -35,7 +35,7 @@ def model_value(H: np.ndarray, P: np.ndarray, M: np.ndarray, g: np.ndarray, radi
     _, stats = solve_tr_subproblem(
         numpy_space, Covector(g), lambda v: Covector(H @ v), lambda w: Vector(np.linalg.solve(P, w)),
         ball_inner, ball_dual_inner, radius, resid_tol, k, stall_tol=stall_tol)
-    return stats.model_value, stats.lanczos_steps
+    return stats.model_value, stats.krylov_steps
 
 
 if __name__ == "__main__":

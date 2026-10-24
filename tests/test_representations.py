@@ -65,11 +65,11 @@ def check_composite_representation() -> bool:
     x0 = np.tile([-1.2, 1.0], 25)
     x_np, s_np = trust_region_newton(
         rosen_fun, rosen_grad, rosen_hessvec, jacobi_precond_solve,
-        smoothing_inner, smoothing_dual_inner, Point(x0), gtol=1e-8, max_iter=1000, max_lanczos=100)
+        smoothing_inner, smoothing_dual_inner, Point(x0), gtol=1e-8, max_iter=1000, max_krylov=100)
     x_pa, s_pa = trust_region_newton(
         pa_rosen_fun, pa_rosen_grad, pa_rosen_hessvec,
         pa_jacobi_precond_solve, pa_smoothing_inner, pa_smoothing_dual_inner, split_pair(x0),
-        space=PAIR_SPACE, gtol=1e-8, max_iter=1000, max_lanczos=100)
+        space=PAIR_SPACE, gtol=1e-8, max_iter=1000, max_krylov=100)
     h_np, h_pa = history_array(s_np), history_array(s_pa)
     print(f"  numpy: {len(h_np)} its, {int(h_np[:, 5].sum())} Hv;  pair of arrays: "
           f"{len(h_pa)} its, {int(h_pa[:, 5].sum())} Hv")

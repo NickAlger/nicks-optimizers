@@ -14,6 +14,10 @@ the **shape of the trust region** are independent choices.
   Lanczos basis; the small trust-region problem is solved exactly in
   M-orthonormal coordinates (including the hard case). No Hessian-vector
   products are spent beyond one per Lanczos step.
+- **Conventional trust region, lean path.** With no inner products the ball
+  is the preconditioner's norm (Steihaug-Toint), solved by truncated
+  conjugate gradients. CG keeps five vectors and needs two reductions per
+  step; the Lanczos solver is still available on request.
 - **Saddle-free option.** `saddle_free=True` replaces the Hessian by its absolute
   value *with respect to M* (generalized eigenvalues of `H u = theta M u`), so
   saddle points repel iterates instead of attracting them.
@@ -99,13 +103,10 @@ operators frozen at `x`, built once per iterate and reused after rejected
 steps, so setup they share (assembling a Hessian, building a multigrid
 hierarchy) happens once per point.
 
-Passing `None` for both inner products makes the trust region the ball of the
-preconditioner's norm, `<P(x) s, s> <= radius^2` (classic Steihaug-Toint). It
-costs nothing extra, since the Krylov basis is P-orthonormal, and works when P
-is known only through `P^{-1}`, such as multigrid.
-
 `H` and `P^{-1}` are the only operators the method applies. The two inner
-products must be **exact duals** of each other: the residual norm on the
+products (or `None` for both, see
+[the conventional trust region](#the-conventional-trust-region-m--p)) must be
+**exact duals** of each other: the residual norm on the
 trust-region boundary relies on `(M u, M v)_{M^{-1}} = (u, v)_M`. For `M = I`
 pass `euclidean_inner` and `euclidean_dual_inner`. Inner products take a block
 first so an implementation can apply `M` once per call, e.g.
@@ -120,6 +121,35 @@ proved unreliable, and the evidence is in [`dev/TODO.md`](dev/TODO.md).
 Gradient norms are dual norms, `||g||_{M^{-1}}`, so the stopping tests are
 invariant under changes of variables. The run stops when
 `||g|| <= max(gtol, rtol * gnorm0)`, where `gnorm0` defaults to `||g(x0)||`.
+
+### The conventional trust region (M = P)
+
+Passing `None` for both inner products makes the trust region the ball of the
+preconditioner's norm, `<P(x) s, s> <= radius^2`, the classic Steihaug-Toint
+trust region. It needs no inner products, so it works when P is known only
+through `P^{-1}`, such as multigrid. Gradient norms are then `||g||_{P^{-1}}`.
+
+`krylov` chooses the subproblem solver:
+
+- `"auto"` (default): truncated CG for the conventional trust region with
+  `saddle_free=False`, and Lanczos otherwise.
+- `"cg"`: Steihaug-Toint truncated CG (`solve_tr_subproblem_cg`). It runs
+  preconditioned CG from `s = 0` and stops on the residual, at the first
+  crossing of the boundary, or on negative curvature (then it follows that
+  direction to the boundary). It keeps five vectors, does two reductions per
+  step, and starts from the `P^{-1} g` already computed for the gradient
+  norm. It requires `None` inner products and `saddle_free=False`.
+- `"lanczos"`: the reorthogonalized Lanczos solver, which is more robust in
+  floating point. To tight tolerances on ill-conditioned problems, CG loses
+  conjugacy and needs more steps; the tests include such a case. Lanczos
+  also solves the trust-region problem exactly on the subspace when the
+  boundary is active, where CG stops at the first crossing. That means
+  fewer outer iterations, at more cost per step.
+
+On the distributed p-Laplacian with M = P (2 ranks, 80 rings), CG took 116
+Krylov steps at p = 3 against 140 for Lanczos, and 1.7 s against 2.7 s. At
+p = 5 it needed 98 outer iterations against 88, with 251 Krylov steps against
+344.
 
 ### Matched and mismatched metrics
 
@@ -254,10 +284,10 @@ quadratically.
 
 `trust_region_newton` returns `(x, summary)`. The `RunSummary` holds the
 stopping reason, one `IterationRecord` per iteration (objective, gradient norm,
-radius, predicted and actual reduction, the Lanczos solve's statistics and
+radius, predicted and actual reduction, the Krylov solve's statistics and
 per-step trace) and the total work. `history_array(summary)` gives a numeric
 array. `display=1` prints a line per iteration and a summary, `display=2` adds
-each Lanczos trace, and `print_fn` redirects the output.
+each Krylov trace, and `print_fn` redirects the output.
 
 `callback(x, info)` is called after every iteration with the current iterate
 and an `IterationInfo` holding the record, `f` and `g` at `x`, the step, and the
@@ -288,9 +318,9 @@ code and are meant to be reused by other optimizers.
 | `spaces` | how points, vectors and covectors are represented: `VectorSpace`, `numpy_space`, `numpy_space_with_reductions`, `tuple_block_space`, `check_space` |
 | `metrics` | inner products and norms: `InnerProduct`, `DualInnerProduct`, `euclidean_inner`, `vector_norm`, `covector_norm`, Gram-matrix growth |
 | `dense` | small dense linear algebra in coordinates: Rayleigh–Ritz for a projected pencil, the trust-region problem on a ball (with the hard case) |
-| `krylov` | preconditioned Lanczos as an immutable process: `lanczos_start`, `lanczos_advance`, `LanczosState`, `lanczos_tridiagonal`; optional covector projection for redundant representations |
+| `krylov` | Krylov processes, immutable: preconditioned Lanczos (`lanczos_start`, `lanczos_advance`, `LanczosState`, `lanczos_tridiagonal`) and conjugate gradients (`cg_start`, `cg_curvature`, `cg_advance`, `CGState`, with recurrences for P-norms); optional covector projection for redundant representations |
 | `criteria` | tests shared by inexact Newton methods: `gradient_converged`, `forcing_term`, `reduction_ratio` |
-| `trust_region_subproblem` | the trust-region subproblem over a Krylov space: `solve_tr_subproblem` |
+| `trust_region_subproblem` | the trust-region subproblem over a Krylov space: `solve_tr_subproblem` (Lanczos, any M, saddle-free) and `solve_tr_subproblem_cg` (Steihaug-Toint, M = P) |
 | `trust_region_diagnostics` | records, `ResumeState`, and text output |
 | `trust_region` | `trust_region_newton` |
 

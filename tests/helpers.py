@@ -19,7 +19,7 @@ from nicks_optimizers import (
     VectorBlock,
     VectorToCovector,
     format_header,
-    format_lanczos_trace,
+    format_krylov_trace,
     format_row,
     format_summary,
     lanczos_advance,
@@ -143,7 +143,7 @@ def run_dense_subproblem(H: Array, P: Array, M: Array, g: Array, radius: float, 
     s, st = solve_tr_subproblem(
         numpy_space, Covector(g), dense_vec_to_covec(H), dense_solve(P), dense_inner(M),
         dense_dual_inner(M), radius, resid_tol, max_iter, stall_tol=stall_tol, saddle_free=saddle_free)
-    return s, st.model_value, st.step_norm, st.lam, st.lanczos_steps, st.resid, st.n_negative
+    return s, st.model_value, st.step_norm, st.lam, st.krylov_steps, st.resid, st.n_negative
 
 
 def dense_from_operator(apply: Callable[[Vector], Covector], n: int) -> Array:
@@ -166,6 +166,6 @@ def expected_display(summary: RunSummary, level: int) -> list[str]:
             lines.append(format_header())
         lines.append(format_row(record))
         if level >= 2:
-            lines.append(format_lanczos_trace(record.subproblem))
+            lines.append(format_krylov_trace(record.subproblem))
     lines.append(format_summary(summary))
     return lines
