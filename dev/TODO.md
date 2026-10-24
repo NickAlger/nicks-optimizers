@@ -246,6 +246,30 @@ The matrix-completion example now uses CG (P = M = I): 122 iterations and
 305 CG steps over the rank continuation, against 93 iterations and 336
 Lanczos steps, same final fit.
 
+## Three separate structures (2026-10-24)
+
+From first principles the optimizer uses three structures, now passed
+separately:
+
+- the vector space (`VectorSpace`): scale and axpy for vectors and
+  covectors, the pairing, and batched block forms of these. Nothing else:
+  `translate`, default metrics and the list-normalization hooks were
+  removed, and points dropped out of its type parameters;
+- the Hilbert structure: `metric_solve` (M^{-1}) and `metric_apply` (M), two
+  independent operators, each needed only where used (M only with a
+  separate preconditioner). Operators rather than inner products, because
+  the method needs vectors out of M^{-1} (preconditioning with P = M) and
+  covectors out of M (the explicit residual);
+- the point structure: `retract`.
+
+Defaults only for plain numpy arrays (no `space`): M = I and x + s. With a
+space, `metric_solve` and `retract` are required. `operators_at` is
+exclusive with the operator keywords. Helpers instead of bundling:
+`euclidean_metric_solve`/`_apply` (arrays and trees of arrays),
+`direct_sum` (a metric per leaf), `flat_retraction(space)`, and the
+`trees` module (`as_tuple_tree`, `tree_map`, ...). Tuple trees are strict:
+a list raises, and `as_tuple_tree` converts.
+
 ## Communication per Lanczos step
 
 The CG path for M = P needs only two reductions per step (<H p, p> and

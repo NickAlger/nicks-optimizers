@@ -1,17 +1,17 @@
 """Lanczos, the small trust-region solvers and the subproblem solver, checked
 against dense linear algebra."""
 
-import dataclasses
-
 import numpy as np
-
 import pytest
 
 from nicks_optimizers import (
     Array,
     Covector,
     Point,
+    PointOperators,
     Vector,
+    euclidean_metric_solve,
+    flat_retraction,
     numpy_space,
     numpy_space_with_reductions,
     solve_sphere_trs,
@@ -274,36 +274,42 @@ def test_metric_requirements() -> None:
     assert check_metric_requirements(np.random.default_rng(4))
 
 
-def test_outer_loop_checks_the_metric_arguments() -> None:
-    """trust_region_newton refuses a user metric_solve with a separate
-    preconditioner but no metric_apply (the space's M is not mixed with a
-    user M^{-1}), metric_apply without metric_solve, a space without a
-    default metric and no metric_solve, krylov='cg' with a separate
-    preconditioner or saddle_free, and unknown options. Without any metric,
-    numpy spaces (also distributed ones) use M = I."""
+def test_outer_loop_checks_the_structure_arguments() -> None:
+    """trust_region_newton takes the vector space, the metric and the
+    retraction separately. With numpy defaults (no space) M = I and x + s,
+    also with a separate preconditioner. It refuses: a space without
+    metric_solve or without retract; metric_apply without metric_solve; a
+    user metric_solve with a separate preconditioner but no metric_apply;
+    operators_at together with operator arguments; krylov='cg' with a
+    separate preconditioner or saddle_free; unknown options."""
     x0 = Point(np.ones(4))
     pieces = (rosen_fun, rosen_grad, rosen_hessvec, x0)
     reductions = numpy_space_with_reductions(lambda c: c)
-    no_metric = dataclasses.replace(numpy_space, metric_solve=None, metric_apply=None)
+    retract = flat_retraction(reductions)
+    with pytest.raises(ValueError):
+        trust_region_newton(*pieces, space=numpy_space, retract=retract)
+    with pytest.raises(ValueError):
+        trust_region_newton(*pieces, space=numpy_space, metric_solve=euclidean_metric_solve)
+    with pytest.raises(ValueError):
+        trust_region_newton(*pieces, metric_apply=lambda x, v: Covector(0.5 * v))
     with pytest.raises(ValueError):
         trust_region_newton(*pieces, metric_solve=lambda x, w: Vector(2.0 * w),
                             precond_solve=jacobi_precond_solve)
     with pytest.raises(ValueError):
-        trust_region_newton(*pieces, metric_apply=lambda x, v: Covector(0.5 * v))
+        trust_region_newton(rosen_fun, rosen_grad, None, x0, precond_solve=jacobi_precond_solve,
+                            operators_at=lambda x: PointOperators(hessvec=lambda v: rosen_hessvec(x, v)))
     with pytest.raises(ValueError):
-        trust_region_newton(*pieces, space=no_metric)
-    with pytest.raises(ValueError):
-        trust_region_newton(*pieces, krylov="cg", precond_solve=jacobi_precond_solve,
-                            metric_apply=lambda x, v: Covector(v))
+        trust_region_newton(*pieces, krylov="cg", precond_solve=jacobi_precond_solve)
     with pytest.raises(ValueError):
         trust_region_newton(*pieces, krylov="cg", saddle_free=True)
     with pytest.raises(ValueError):
         trust_region_newton(*pieces, krylov="steihaug")  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         trust_region_newton(*pieces, convergence_norm="euclidean")  # type: ignore[arg-type]
-    trust_region_newton(*pieces, space=numpy_space, max_iter=2)   # M = I, the space's metric
-    trust_region_newton(*pieces, space=reductions, max_iter=2)
+    trust_region_newton(*pieces, max_iter=2)
     trust_region_newton(*pieces, precond_solve=jacobi_precond_solve, max_iter=2)
+    trust_region_newton(*pieces, space=reductions, retract=retract,
+                        metric_solve=euclidean_metric_solve, max_iter=2)
 
 
 def test_mismatch_example() -> None:

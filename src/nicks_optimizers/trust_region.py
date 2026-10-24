@@ -1,11 +1,19 @@
 """Trust-region Newton method with an ellipsoidal trust region, an optional
 preconditioner and an optional saddle-free model.
 
-The geometry comes first. A symmetric positive definite metric M(x) defines
-the trust region { s : ||s||_M <= radius }, the gradient norm ||g||_{M^{-1}}
-of the stopping test, the M-Ritz values of the saddle-free model and the
-Krylov residual norms. A preconditioner P(x) is secondary: it only shapes
-the Krylov space, and by default P = M.
+Three structures, given separately:
+
+  space     the vector space structure (see spaces): adding, scaling and
+            pairing vectors and covectors.
+  metric    the Hilbert structure (see metrics), a symmetric positive
+            definite M(x). It defines the trust region { s : ||s||_M <=
+            radius }, the gradient norm ||g||_{M^{-1}} of the stopping test,
+            the M-Ritz values of the saddle-free model and the Krylov
+            residual norms.
+  retract   the point structure: a step s moves x to retract(x, s).
+
+A preconditioner P(x) is secondary to the metric: it only shapes the Krylov
+space, and by default P = M.
 
 Problem pieces
 --------------
@@ -15,18 +23,20 @@ Problem pieces
                                        s -> f(retract(x, s)) at s = 0
   x0                                   starting point
 
-Geometry and preconditioning (keyword arguments):
-  metric_solve(x, w) -> Vector         M(x)^{-1} w. Defaults to the space's
-                                       own metric: M = I for numpy arrays,
-                                       the direct sum of the leaves' metrics
-                                       for tuple trees (see spaces).
+Keyword arguments:
+  space                                a VectorSpace (default: numpy arrays)
+  retract(x, s) -> Point               the step update; default x + s for
+                                       numpy arrays, required with a space
+                                       (flat_retraction(space) gives x + s)
+  metric_solve(x, w) -> Vector         M(x)^{-1} w; default M = I for numpy
+                                       arrays, required with a space
+                                       (euclidean_metric_solve gives M = I)
+  metric_apply(x, v) -> Covector       M(x) v; needed only with
+                                       precond_solve, and only with
+                                       metric_solve (it must be its inverse)
   precond_solve(x, w) -> Vector        P(x)^{-1} w, if P should differ from M
                                        (e.g. a Hessian preconditioner inside a
-                                       fixed metric). Optional.
-  metric_apply(x, v) -> Covector       M(x) v; needed only with precond_solve.
-                                       It goes with metric_solve and must be
-                                       its inverse: pass both, or neither to
-                                       use the space's metric.
+                                       fixed metric)
 
 With P = M (no precond_solve) only M^{-1} is ever applied: any symmetric
 positive definite operator passed as metric_solve, a multigrid cycle for
@@ -37,16 +47,17 @@ step) unless krylov="lanczos" asks for the reorthogonalized Lanczos solver
 With a separate P, Lanczos builds the M-Gram matrix with metric_apply and
 measures residuals with metric_solve.
 
-Optional per-point setup:
-  operators_at(x) -> PointOperators    the operators frozen at x (hessvec,
-                                       and optionally metric_solve,
-                                       precond_solve, metric_apply). Called
-                                       once per new iterate, so expensive
-                                       setup (assembling a Hessian, building
-                                       a multigrid hierarchy) happens once per
-                                       point and can be shared. Fields left
-                                       None fall back to the keyword
-                                       arguments. Pass hessvec=None with it.
+Per-point setup, instead of the operator arguments:
+  operators_at(x) -> PointOperators    all the operators at x, frozen
+                                       (hessvec, metric_solve, and optionally
+                                       precond_solve and metric_apply).
+                                       Called once per new iterate, so
+                                       expensive setup (assembling a Hessian,
+                                       building a multigrid hierarchy)
+                                       happens once per point and can be
+                                       shared. Pass hessvec=None and none of
+                                       metric_solve, metric_apply,
+                                       precond_solve with it.
 
 Optional for representations with redundant components (e.g. gauged
 tangent vectors of a low-rank manifold):
@@ -69,7 +80,7 @@ happened (see trust_region_diagnostics).
 
 import time
 from dataclasses import dataclass
-from typing import Callable, Generic, Literal, Optional, ParamSpec, TypeVar, cast
+from typing import Any, Callable, Generic, Literal, Optional, cast
 
 import numpy as np
 
@@ -96,34 +107,17 @@ from .trust_region_diagnostics import (
 from .trust_region_subproblem import solve_tr_subproblem, solve_tr_subproblem_cg
 
 
-ParamsP = ParamSpec("ParamsP")
-ResultT = TypeVar("ResultT")
-
-
-def _normalized(f: Callable[ParamsP, ResultT], normalize: Optional[Callable[[ResultT], ResultT]]
-                ) -> Callable[ParamsP, ResultT]:
-    """f followed by normalize, or f itself when normalize is None: how the
-    results of user functions are put in the space's own form (e.g. lists
-    to tuples for tuple trees)."""
-    if normalize is None:
-        return f
-    norm = normalize
-
-    def normalized(*args: ParamsP.args, **kwargs: ParamsP.kwargs) -> ResultT:
-        return norm(f(*args, **kwargs))
-    return normalized
-
-
 @dataclass(frozen=True, kw_only=True)
 class PointOperators(Generic[VectorT, CovectorT]):
     """The linear operators at one point, frozen: what operators_at(x)
-    returns. Fields left None fall back to the keyword arguments of
-    trust_region_newton (and the metric to the space's default).
+    returns, everything the method uses at that point.
 
       hessvec(v) -> Covector         H v
-      metric_solve(w) -> Vector      M^{-1} w
+      metric_solve(w) -> Vector      M^{-1} w (None: M = I, for numpy arrays
+                                     without a space only)
       precond_solve(w) -> Vector     P^{-1} w (None: P = M)
-      metric_apply(v) -> Covector    M v (needed only with a separate P)
+      metric_apply(v) -> Covector    M v, the inverse of metric_solve (needed
+                                     only with precond_solve)
     """
     hessvec: Callable[[VectorT], CovectorT]
     metric_solve: Optional[Callable[[CovectorT], VectorT]] = None
@@ -160,12 +154,12 @@ def trust_region_newton(
         hessvec: Optional[Callable[[PointT, VectorT], CovectorT]],
         x0: PointT,
         *,
-        metric_solve: Optional[Callable[[PointT, CovectorT], VectorT]] = None,
-        precond_solve: Optional[Callable[[PointT, CovectorT], VectorT]] = None,
-        metric_apply: Optional[Callable[[PointT, VectorT], CovectorT]] = None,
-        operators_at: Optional[Callable[[PointT], PointOperators[VectorT, CovectorT]]] = None,
-        space: Optional[VectorSpace[PointT, VectorT, CovectorT, VectorBlockT, CovectorBlockT]] = None,
+        space: Optional[VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT]] = None,
         retract: Optional[Callable[[PointT, VectorT], PointT]] = None,
+        metric_solve: Optional[Callable[[PointT, CovectorT], VectorT]] = None,
+        metric_apply: Optional[Callable[[PointT, VectorT], CovectorT]] = None,
+        precond_solve: Optional[Callable[[PointT, CovectorT], VectorT]] = None,
+        operators_at: Optional[Callable[[PointT], PointOperators[VectorT, CovectorT]]] = None,
         project_covector: Optional[Callable[[PointT, CovectorT], CovectorT]] = None,
         saddle_free: bool = False,
         krylov: Literal["auto", "cg", "lanczos"] = "auto",
@@ -186,16 +180,15 @@ def trust_region_newton(
     All operators are evaluated at the current iterate, and the radius is
     measured in the M(x)-norm of that iterate.
 
-    space says how points, vectors and covectors are represented (default
-    numpy_space). x0, g0 and the results of the user's functions are taken
-    as they are, except for the space's normalize_* conversions (lists to
-    tuples for tuple_tree_space); nothing is copied. retract defaults to
-    space.translate; a space without one (a manifold) needs retract. On a
-    manifold, hessvec is the Hessian of the pullback s -> f(retract(x, s)),
-    which for a second-order retraction is the Riemannian Hessian. If the
-    representation of vectors
-    and covectors at x is redundant (a subspace or quotient of the stored
-    components), pass project_covector (see the module docstring).
+    Without space, x0 and the vectors are numpy arrays, the metric is M = I
+    unless metric_solve is given, and retract is x + s unless given. With a
+    space, metric_solve and retract must be given (they are separate
+    structures, see the module docstring). Objects are used as they are, not
+    copied or converted. On a manifold, hessvec is the Hessian of the
+    pullback s -> f(retract(x, s)), which for a second-order retraction is
+    the Riemannian Hessian. If the representation of vectors and covectors
+    at x is redundant (a subspace or quotient of the stored components),
+    pass project_covector (see the module docstring).
 
     The initial radius is an absolute length in the M-norm (default 1.0);
     scale it to the problem when a sensible first step size is known, since
@@ -217,8 +210,8 @@ def trust_region_newton(
 
     Convergence: stops when ||g|| <= max(gtol, rtol * gnorm0); with the
     default gtol = 0, when ||g|| <= rtol ||g(x0)||. The norm is
-    ||g||_{M(x)^{-1}} ("metric", the default; the Euclidean norm for numpy
-    arrays without metric_solve) or ||g||_{P(x)^{-1}}
+    ||g||_{M(x)^{-1}} ("metric", the default; the Euclidean norm when M = I)
+    or ||g||_{P(x)^{-1}}
     ("preconditioner"; the same unless precond_solve is given, and then one
     more P solve per new iterate). The recorded and displayed ||g|| is this
     norm. gnorm0 defaults to ||g(x0)|| and can be passed explicitly, e.g.
@@ -247,8 +240,19 @@ def trust_region_newton(
     ResumeState at x. history_array(summary) gives the iterations as a numeric
     array; merge_summaries joins the summaries of a stopped and resumed run.
     """
-    if (hessvec is None) == (operators_at is None):
-        raise ValueError("pass hessvec, or operators_at (with hessvec=None), but not both")
+    if operators_at is not None:
+        if any(f is not None for f in (hessvec, metric_solve, metric_apply, precond_solve)):
+            raise ValueError("operators_at gives all the operators at a point: pass hessvec=None "
+                             "and no metric_solve, metric_apply or precond_solve")
+    elif hessvec is None:
+        raise ValueError("pass hessvec, or operators_at")
+    elif metric_apply is not None and metric_solve is None:
+        raise ValueError("metric_apply needs metric_solve (its inverse)")
+    numpy_default = space is None
+    if not numpy_default and retract is None:
+        raise ValueError("with a space, pass retract (flat_retraction(space) gives x + s)")
+    if not numpy_default and operators_at is None and metric_solve is None:
+        raise ValueError("with a space, pass metric_solve (euclidean_metric_solve gives M = I)")
     if krylov not in ("auto", "cg", "lanczos"):
         raise ValueError(f"krylov must be 'auto', 'cg' or 'lanczos', not {krylov!r}")
     if krylov == "cg" and (saddle_free or precond_solve is not None):
@@ -258,58 +262,41 @@ def trust_region_newton(
                          f"not {convergence_norm!r}")
 
     sp = space if space is not None else cast(
-        VectorSpace[PointT, VectorT, CovectorT, VectorBlockT, CovectorBlockT], numpy_space)
+        VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT], numpy_space)
 
-    # User objects enter in the space's own form (e.g. lists become tuples).
-    to_vector, to_covector = sp.normalize_vector, sp.normalize_covector
-    grad_ = _normalized(grad, to_covector)
-    retract_ = None if retract is None else _normalized(retract, sp.normalize_point)
-    project_ = None if project_covector is None else _normalized(project_covector, to_covector)
-    if sp.normalize_point is not None:
-        x0 = sp.normalize_point(x0)
-    if g0 is not None and to_covector is not None:
-        g0 = to_covector(g0)
+    def identity_solve(w: CovectorT) -> VectorT:
+        """M = I for numpy arrays: the same array, as a vector."""
+        return cast(VectorT, w)
+
+    def identity_apply(v: VectorT) -> CovectorT:
+        return cast(CovectorT, v)
 
     def operators(x: PointT) -> PointOperators[VectorT, CovectorT]:
-        """The operators at x, with fallbacks resolved and checked."""
-        given = operators_at(x) if operators_at is not None else None
-        if given is not None:
-            H = given.hessvec
+        """All the operators at x, from operators_at or the keyword arguments,
+        with the numpy default M = I filled in and the combination checked."""
+        if operators_at is not None:
+            given = operators_at(x)
         else:
             assert hessvec is not None
-            hv = hessvec
-            H = lambda v: hv(x, v)                                      # noqa: E731
-        H = _normalized(H, to_covector)
-        # The metric comes from the user, or as a pair from the space.
-        Ms = given.metric_solve if given is not None else None
-        if Ms is None and metric_solve is not None:
-            ms = metric_solve
-            Ms = lambda w: ms(x, w)                                     # noqa: E731
-        Ma = given.metric_apply if given is not None else None
-        if Ma is None and metric_apply is not None:
-            ma = metric_apply
-            Ma = lambda v: ma(x, v)                                     # noqa: E731
-        if Ms is not None:
-            Ms = _normalized(Ms, to_vector)
-            Ma = None if Ma is None else _normalized(Ma, to_covector)
-        elif Ma is not None:
-            raise ValueError("metric_apply without metric_solve: pass both, or neither "
-                             "to use the space's metric")
-        elif sp.metric_solve is not None:
-            Ms, Ma = sp.metric_solve, sp.metric_apply
-        else:
-            raise ValueError("no metric: pass metric_solve (the space has no default metric)")
-        Ps = given.precond_solve if given is not None else None
-        if Ps is None and precond_solve is not None:
-            ps = precond_solve
-            Ps = lambda w: ps(x, w)                                     # noqa: E731
-        if Ps is not None:
-            Ps = _normalized(Ps, to_vector)
-        if Ps is not None and Ma is None:
+            hv, ms, ma, ps = hessvec, metric_solve, metric_apply, precond_solve
+            given = PointOperators(
+                hessvec=lambda v: hv(x, v),
+                metric_solve=None if ms is None else (lambda w: ms(x, w)),
+                metric_apply=None if ma is None else (lambda v: ma(x, v)),
+                precond_solve=None if ps is None else (lambda w: ps(x, w)))
+        Ms, Ma = given.metric_solve, given.metric_apply
+        if Ms is None:
+            if Ma is not None:
+                raise ValueError("metric_apply needs metric_solve (its inverse)")
+            if not numpy_default:
+                raise ValueError("with a space, give metric_solve")
+            Ms, Ma = identity_solve, identity_apply
+        if given.precond_solve is not None and Ma is None:
             raise ValueError("a separate preconditioner needs metric_apply (M)")
-        if krylov == "cg" and Ps is not None:
+        if krylov == "cg" and given.precond_solve is not None:
             raise ValueError("krylov='cg' needs P = M (no precond_solve)")
-        return PointOperators(hessvec=H, metric_solve=Ms, precond_solve=Ps, metric_apply=Ma)
+        return PointOperators(hessvec=given.hessvec, metric_solve=Ms,
+                              precond_solve=given.precond_solve, metric_apply=Ma)
 
     def gradient_norms(g: CovectorT, ops: PointOperators[VectorT, CovectorT]
                        ) -> tuple[float, float, Optional[VectorT], int, int]:
@@ -327,9 +314,8 @@ def trust_region_newton(
         return m_norm, m_norm, None, 1, 0
 
     start = time.perf_counter()
-    retraction = retract_ if retract_ is not None else sp.translate
-    if retraction is None:
-        raise ValueError("the space has no translate (e.g. a manifold): pass retract")
+    retraction: Callable[[PointT, VectorT], PointT] = (
+        retract if retract is not None else (lambda x, s: cast(PointT, cast(Any, x) + s)))
     x = x0
     fx = float(fun(x))                          # records hold Python floats
     fun_calls = 1
@@ -339,12 +325,12 @@ def trust_region_newton(
         radius, gnorm0, it = resume.radius, resume.gnorm0, resume.next_iteration
 
     def canonical(x: PointT, w: CovectorT) -> CovectorT:
-        return w if project_ is None else project_(x, w)
+        return w if project_covector is None else project_covector(x, w)
 
     if g0 is not None:
         g, grad_calls = canonical(x, g0), 0
     else:
-        g, grad_calls = canonical(x, grad_(x)), 1
+        g, grad_calls = canonical(x, grad(x)), 1
     ops = operators(x)
     gnorm, metric_gnorm, start_vector, metric_solves, precond_solves = gradient_norms(g, ops)
     if gnorm0 is None:
@@ -361,7 +347,7 @@ def trust_region_newton(
             reason = "max_iter"
             break
         forcing = forcing_term(gnorm, gnorm0, forcing_max)
-        project = None if project_ is None else (lambda w: project_(x, w))
+        project = None if project_covector is None else (lambda w: project_covector(x, w))
         assert ops.metric_solve is not None
         use_cg = krylov == "cg" or (krylov == "auto" and ops.precond_solve is None
                                     and not saddle_free)
@@ -392,7 +378,7 @@ def trust_region_newton(
         records.append(record)
         if accepted:
             x, fx = x_trial, f_trial
-            g = canonical(x, grad_(x))
+            g = canonical(x, grad(x))
             grad_calls += 1
             ops = operators(x)
             gnorm, metric_gnorm, start_vector, a, b = gradient_norms(g, ops)

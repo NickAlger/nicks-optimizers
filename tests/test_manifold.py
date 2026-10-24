@@ -6,7 +6,9 @@ from typing import Callable, Literal, Optional
 import numpy as np
 
 import matrix_completion as mc
-from nicks_optimizers import Array, lanczos_advance, lanczos_start, lanczos_tridiagonal
+from nicks_optimizers import (
+    Array, euclidean_metric_solve, lanczos_advance, lanczos_start, lanczos_tridiagonal,
+)
 
 
 def small_problem(seed: int, shape: tuple[int, int], r: int, oversampling: float
@@ -93,8 +95,7 @@ def test_gauge_stays_clean_only_with_projection() -> None:
     x = mc.random_point((80, 60), 3, rng)
     sp = mc.fixed_rank_space()
     hessvec = lambda v: mc.hessian_action(samples, x, v, curvature=False)
-    assert sp.metric_solve is not None
-    precond = sp.metric_solve                       # the Frobenius metric, M = I
+    precond = lambda w: euclidean_metric_solve(x, w)   # the Frobenius metric, M = I
 
     def run(project: Optional[Callable[[mc.Cotangent], mc.Cotangent]]) -> tuple[float, float]:
         state = lanczos_start(sp, mc.gradient(samples, x), precond)

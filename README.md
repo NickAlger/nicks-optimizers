@@ -3,16 +3,17 @@
 Matrix-free optimization methods in Python. The first is `trust_region_newton`:
 an inexact Newton trust-region method built around a **metric** `M`, the
 geometry of the problem, with an optional **preconditioner** `P` as a separate
-accelerant.
+accelerant. It takes three structures separately: the vector space (how
+vectors and covectors are added, scaled and paired), the Hilbert structure
+(the metric) and the point structure (the retraction).
 
 - **The metric comes first.** `M(x)` (symmetric positive definite, possibly
   depending on the iterate) shapes the trust region
   `{s : ||s||_M <= radius}`, measures the gradient in the stopping test
   `||g||_{M^{-1}} <= rtol ||g(x0)||_{M^{-1}}`, and defines the curvature used
-  by the saddle-free model. You give it by operators: `metric_solve`
-  (`M^{-1}`), plus `metric_apply` (`M`) only when a separate preconditioner
-  is used. Without them the space's own metric is used: `M = I` for numpy
-  arrays, the direct sum of the leaves' metrics for tuple trees.
+  by the saddle-free model. You give it by two separate operators:
+  `metric_solve` (`M^{-1}`), plus `metric_apply` (`M`) only when a separate
+  preconditioner is used. For plain numpy arrays the default is `M = I`.
 - **Preconditioning through the metric.** By default `P = M`: the
   conventional (Steihaug-Toint) trust region, where only `M^{-1}` is ever
   applied. Any symmetric positive definite operator passed as `metric_solve`,
@@ -31,10 +32,9 @@ accelerant.
 - **Saddle-free option.** `saddle_free=True` replaces the Hessian by its absolute
   value *with respect to M* (generalized eigenvalues of `H u = theta M u`), so
   saddle points repel iterates instead of attracting them.
-- **Representation-generic.** Points, vectors and covectors can be numpy arrays
-  of any shape (the default), tuple trees of arrays (given as tuples or
-  lists), distributed objects, or anything else, through a `VectorSpace`
-  record of functions.
+- **Representation-generic.** Vectors and covectors can be numpy arrays of
+  any shape (the default), tuple trees of arrays, distributed objects, or
+  anything else, through a `VectorSpace` record of functions.
 - **Distributed.** Every reduction goes through the space, so vectors can
   live on many MPI ranks and the method runs in lockstep.
   [`examples/p_laplacian.py`](examples/p_laplacian.py) minimizes a
@@ -89,8 +89,7 @@ x, summary = trust_region_newton(
 print(summary.reason, summary.f)
 ```
 
-Without `metric_solve` the metric is the space's default, the identity for
-numpy arrays. See
+Without `metric_solve` the metric is the identity (for numpy arrays). See
 [`examples/quickstart.py`](examples/quickstart.py) for a typed, matrix-free
 version on the chained Rosenbrock function, with a separate preconditioner
 as well.
@@ -98,8 +97,9 @@ as well.
 ## The problem pieces
 
 ```python
-trust_region_newton(fun, grad, hessvec, x0, *, metric_solve=None, precond_solve=None,
-                    metric_apply=None, operators_at=None, ...)
+trust_region_newton(fun, grad, hessvec, x0, *, space=None, retract=None,
+                    metric_solve=None, metric_apply=None, precond_solve=None,
+                    operators_at=None, project_covector=None, ...)
 ```
 
 | argument | signature | meaning |
@@ -107,27 +107,27 @@ trust_region_newton(fun, grad, hessvec, x0, *, metric_solve=None, precond_solve=
 | `fun` | `(x) -> float` | objective |
 | `grad` | `(x) -> Covector` | differential `df(x)` |
 | `hessvec` | `(x, v) -> Covector` | `H(x) v` |
-| `x0` | `Point` | starting point, in the representation of `space` |
-| `metric_solve` | `(x, w) -> Vector` | `M(x)^{-1} w`. Default: the space's metric (`M = I` for numpy arrays, a direct sum for tuple trees) |
+| `x0` | `Point` | starting point |
+| `space` | `VectorSpace` | the vector space structure; default numpy arrays (see [Other representations](#other-representations)) |
+| `retract` | `(x, s) -> Point` | the step update; default `x + s` for numpy arrays, required with a `space` |
+| `metric_solve` | `(x, w) -> Vector` | `M(x)^{-1} w`; default `M = I` for numpy arrays, required with a `space` |
+| `metric_apply` | `(x, v) -> Covector` | `M(x) v`; needed only with `precond_solve`, and only with `metric_solve` |
 | `precond_solve` | `(x, w) -> Vector` | `P(x)^{-1} w`, if `P` should differ from `M` |
-| `metric_apply` | `(x, v) -> Covector` | `M(x) v`; needed only with `precond_solve`, and passed together with `metric_solve` |
 
-`M` and `P` are symmetric positive definite. With a separate preconditioner,
-`metric_apply` and `metric_solve` must be inverse to each other: the Lanczos
-solver builds the M-Gram matrix of its basis with `metric_apply` and measures
-residuals with `metric_solve`. So a metric comes as a pair: pass both (or
-`metric_solve` alone when `P = M`), or neither to use the space's metric;
-`metric_apply` alone is refused, and so is a user `metric_solve` with a
-separate preconditioner but no `metric_apply`.
+`M` and `P` are symmetric positive definite. `metric_solve` and
+`metric_apply` are separate: with `P = M` only `M^{-1}` is ever applied, and
+`M` is needed only for a separate preconditioner, where the Lanczos solver
+builds the M-Gram matrix of its basis with `metric_apply` and measures
+residuals with `metric_solve`. When both are given they must be inverse to
+each other.
 
-Optional: `space` (see [Other representations](#other-representations)),
-`retract(x, s) -> Point` and `project_covector(x, w) -> Covector` (see
-[Manifolds](#manifolds)), and `operators_at(x) -> PointOperators` in place of
-`hessvec` (pass `hessvec=None`): the operators frozen at `x`,
-`PointOperators(hessvec=..., metric_solve=..., precond_solve=..., metric_apply=...)`,
-built once per new iterate and reused after rejected steps, so setup they
-share (assembling a Hessian, building a multigrid hierarchy) happens once per
-point. Fields left `None` fall back to the keyword arguments.
+`operators_at(x) -> PointOperators` gives all the operators at a point
+instead, `PointOperators(hessvec=..., metric_solve=..., precond_solve=...,
+metric_apply=...)` (pass `hessvec=None` and none of the operator keywords).
+It is called once per new iterate and the operators are reused after
+rejected steps, so setup they share (assembling a Hessian, building a
+multigrid hierarchy) happens once per point. `project_covector` is for
+redundant representations (see [Manifolds](#manifolds)).
 
 The initial `radius` (default 1.0) is an absolute length in the M-norm, so
 scale it to the problem when you know the size of a sensible first step. The
@@ -206,9 +206,9 @@ See [`dev/TODO.md`](dev/TODO.md).
 ## Other representations
 
 `trust_region_newton(..., space=...)` takes a `VectorSpace`: a frozen record of
-functions (`scale_vector`, `scale_covector`, `axpy_covector`, `pair`, block
-operations, and optionally `translate`, `dimension` and conversions of user
-input). Ready-made spaces:
+functions for the vector space structure only (`scale_vector`,
+`scale_covector`, `axpy_vector`, `axpy_covector`, `pair`, block operations,
+and optionally `dimension`). Ready-made spaces:
 
 - `numpy_space`: the default, one numpy array per vector, of any shape (a
   matrix-valued unknown can stay a matrix).
@@ -220,30 +220,31 @@ input). Ready-made spaces:
   `((a, b), c)` with arrays of different shapes. Every operation works leaf
   by leaf with the leaf space's functions, so trees can hold distributed
   arrays (`numpy_space_with_reductions` leaves) or any other basic vector
-  type. Lists are accepted wherever user objects enter (`x0`, `g0`, the
-  results of your functions) and turned into tuples there, so the method
-  works with, and returns, tuple trees. Leaves must not be tuples or lists.
+  type. Trees are tuples only: a list raises, and `as_tuple_tree` converts
+  one (e.g. `x0 = as_tuple_tree(x0)`). Leaves must not be tuples or lists.
 - `tuple_block_space(...)`: any vector type from five functions; blocks are
   tuples of vectors. Override `pair_block` and `combine_*` with
   `dataclasses.replace` for batched versions.
 
-A space may carry a default metric, the fixed Hilbert structure of its
-representation (`VectorSpace.metric_solve` and `metric_apply`): `M = I` for
-the numpy spaces, and for a tuple tree the direct sum of the leaves' metrics
-(the leaf space's metric on every leaf). Override it leaf by leaf with
-`direct_sum_operator`, a tree of leaf operators applied to the
-corresponding leaves:
+With a space, pass the metric and the retraction too. Helpers for the simple
+cases:
 
-```python
-space = dataclasses.replace(
-    tuple_tree_space(),
-    metric_solve=direct_sum_operator(((lambda w: w / m1, lambda w: w / m2), lambda w: w / m3)),
-    metric_apply=direct_sum_operator(((lambda v: m1 * v, lambda v: m2 * v), lambda v: m3 * v)))
-```
+- `euclidean_metric_solve`, `euclidean_metric_apply`: `M = I`, the identity
+  on components. For a tuple tree of arrays that is the direct sum of the
+  leaves' Euclidean inner products; it also serves distributed arrays.
+- `direct_sum(tree_of_leaf_operators)`: a different metric on each leaf of a
+  tuple tree, for `M^{-1}` and `M` separately:
 
-or replace it as a whole the same way. A metric passed to
-`trust_region_newton` (which may depend on the point) overrides the space's.
-`tuple_block_space` takes a default metric as an option.
+  ```python
+  space = tuple_tree_space()
+  M_inv = direct_sum(((lambda w: w / m1, lambda w: w / m2), lambda w: w / m3))
+  trust_region_newton(..., space=space, retract=flat_retraction(space),
+                      metric_solve=lambda x, w: M_inv(w))
+  ```
+- `flat_retraction(space)`: `x + s` for points stored like vectors, with the
+  space's `axpy_vector`.
+- `tree_map`, `tree_map2`, `tree_leaves`: maps over tuple trees, for writing
+  your own functions.
 
 `check_space(space, v1, v2, w1, w2)` verifies a space's internal consistency on
 sample vectors. The method never modifies objects in place.
@@ -301,7 +302,7 @@ minimization of `f(u) = A(u)/p - log(B(u))/p` with `A = int |grad u|^p` and
 
 Nothing in the method assumes a flat space. On a manifold:
 
-- **Retraction.** Pass `retract(x, s)`; the space needs no `translate`.
+- **Retraction.** Pass `retract(x, s)`, the point structure.
   `hessvec` is the Hessian of the pullback `s -> f(retract(x, s))` at `s = 0`,
   which for a second-order retraction is the Riemannian Hessian.
 - **Tangent and cotangent vectors** are whatever the representation says,
@@ -324,7 +325,7 @@ trust-region Newton on the manifold of rank-r matrices:
 - points as thin SVD factors;
 - tangent vectors as gauged variations `(dU, dV)`, a `tuple_tree_space` of
   matrices, so the Frobenius metric is the identity in the components: the
-  tree's default metric, so none is passed;
+  metric is `euclidean_metric_solve`;
 - the truncated SVD of a rank-2r factorization as the retraction;
 - the exact Riemannian Hessian, curvature term included.
 
@@ -363,13 +364,14 @@ detected and rejected. See [`examples/checkpointing.py`](examples/checkpointing.
 
 ## Package layout
 
-Modules in dependency order. The first five do not depend on the trust-region
+Modules in dependency order. The first six do not depend on the trust-region
 code and are meant to be reused by other optimizers.
 
 | module | contents |
 |---|---|
-| `spaces` | how points, vectors and covectors are represented, with optional default metrics: `VectorSpace`, `numpy_space`, `numpy_space_with_reductions`, `tuple_tree_space` (with `as_tuple_tree`, `direct_sum_operator`), `tuple_block_space`, `check_space` |
-| `metrics` | the metric, given by operators, and norms: `MetricSolve`, `MetricApply`, `euclidean_metric_solve`, `euclidean_metric_apply`, `vector_norm`, `covector_norm`, M-Gram matrix growth |
+| `trees` | tuple trees: `Tree`, `as_tuple_tree`, `tree_map`, `tree_map2`, `tree_leaves` |
+| `spaces` | the vector space structure: `VectorSpace`, `numpy_space`, `numpy_space_with_reductions`, `tuple_tree_space`, `tuple_block_space`, `flat_retraction`, `check_space` |
+| `metrics` | the Hilbert structure, the metric given by operators: `euclidean_metric_solve`, `euclidean_metric_apply`, `direct_sum`, `vector_norm`, `covector_norm`, M-Gram matrix growth |
 | `dense` | small dense linear algebra in coordinates: Rayleigh–Ritz for a projected pencil, the trust-region problem on a ball (with the hard case) |
 | `krylov` | Krylov processes, immutable: preconditioned Lanczos (`lanczos_start`, `lanczos_advance`, `LanczosState`, `lanczos_tridiagonal`) and conjugate gradients (`cg_start`, `cg_curvature`, `cg_advance`, `CGState`, with recurrences for P-norms); optional covector projection for redundant representations |
 | `criteria` | tests shared by inexact Newton methods: `gradient_converged`, `forcing_term`, `reduction_ratio` |

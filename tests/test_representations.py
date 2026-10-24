@@ -1,7 +1,7 @@
 """Vector spaces other than plain 1-D numpy arrays: consistency, arrays of
-any shape, tuple trees (of numpy arrays and of other leaf types, given as
-tuples or lists), a composite representation, and an SPMD run with threads
-standing in for MPI ranks."""
+any shape, tuple trees (of numpy arrays and of other leaf types) with
+Euclidean and direct-sum metrics, a composite representation, and an SPMD
+run with threads standing in for MPI ranks."""
 
 import dataclasses
 import threading
@@ -21,7 +21,10 @@ from nicks_optimizers import (
     VectorSpace,
     as_tuple_tree,
     check_space,
-    direct_sum_operator,
+    direct_sum,
+    euclidean_metric_apply,
+    euclidean_metric_solve,
+    flat_retraction,
     history_array,
     numpy_space,
     numpy_space_with_reductions,
@@ -47,6 +50,7 @@ from problems import (
     pa_rosen_hessvec,
     pa_smoothing_metric_apply,
     pa_smoothing_metric_solve,
+    pa_retract,
     rosen_fun,
     rosen_grad,
     rosen_hessvec,
@@ -85,7 +89,7 @@ BOX_SPACE = tuple_block_space(
     axpy_vector=lambda a, v, z: Box(a * v.data + z.data),
     axpy_covector=lambda a, w, z: Box(a * w.data + z.data),
     pair=lambda w, v: float(w.data.ravel() @ v.data.ravel()),
-    translate=lambda x, s: Box(x.data + s.data), dimension=lambda v: int(v.data.size))
+    dimension=lambda v: int(v.data.size))
 
 
 def random_tree(rng: Rng) -> Tree[Array]:
@@ -113,8 +117,8 @@ def test_tree_spaces_are_consistent() -> None:
 
 
 def test_tree_operations_refuse_lists_and_mismatched_structures() -> None:
-    """Inside the method trees are tuples: a list is an error (user objects are
-    converted on entry), and so is a pairing of trees with different shapes."""
+    """Trees are tuples only: a list is an error (as_tuple_tree converts),
+    and so is combining trees of different structures."""
     sp = tuple_tree_space()
     a, b = np.ones(2), np.ones(3)
     with pytest.raises(TypeError):
@@ -153,13 +157,8 @@ def to_tree(x: Array) -> Tree[Array]:
     return ((x[:10], x[10:30].reshape(4, 5)), x[30:])
 
 
-def to_list_tree(x: Array) -> Any:
-    """The same tree written with lists."""
-    return [[x[:10], x[10:30].reshape(4, 5)], x[30:]]
-
-
 def from_tree(t: Any) -> Array:
-    """Flatten a tree (tuples or lists) of to_tree's structure."""
+    """Flatten a tree of to_tree's structure."""
     return np.concatenate([t[0][0], t[0][1].ravel(), t[1]])
 
 
@@ -170,12 +169,12 @@ def _map_leaves(f: Callable[[Any], Any], t: Any) -> Any:
     return f(t)
 
 
-def tree_run(build: Callable[[Array], Any], boxed: bool = False,
-             saddle_free: bool = False) -> tuple[Any, RunSummary]:
-    """Rosenbrock on trees made by build (to_tree or to_list_tree), with the
-    Jacobi preconditioner as the metric; boxed puts every leaf in a Box."""
+def tree_run(boxed: bool = False, saddle_free: bool = False,
+             x0: Any = None) -> tuple[Any, RunSummary]:
+    """Rosenbrock on to_tree's trees, with the Jacobi preconditioner as the
+    metric and x + s as the retraction; boxed puts every leaf in a Box."""
     def wrap(a: Array) -> Any:
-        return _map_leaves(Box, build(a)) if boxed else build(a)
+        return _map_leaves(Box, to_tree(a)) if boxed else to_tree(a)
 
     def flat(t: Any) -> Array:
         return from_tree(_map_leaves(lambda b: b.data, t) if boxed else t)
@@ -192,43 +191,40 @@ def tree_run(build: Callable[[Array], Any], boxed: bool = False,
     def metric_solve(x: Any, w: Any) -> Any:
         return wrap(jacobi_precond_solve(Point(flat(x)), Covector(flat(w))))
 
-    space: VectorSpace[Any, Any, Any, Any, Any] = \
+    space: VectorSpace[Any, Any, Any, Any] = \
         tuple_tree_space(BOX_SPACE) if boxed else tuple_tree_space()
-    return trust_region_newton(fun, grad, hessvec, wrap(np.tile([-1.2, 1.0], 25)),
-                               metric_solve=metric_solve, space=space, saddle_free=saddle_free)
-
-
-def _is_tuple_tree(t: Any) -> bool:
-    if isinstance(t, list):
-        return False
-    return all(_is_tuple_tree(c) for c in t) if isinstance(t, tuple) else True
+    start = wrap(np.tile([-1.2, 1.0], 25)) if x0 is None else x0
+    return trust_region_newton(fun, grad, hessvec, start, space=space,
+                               retract=flat_retraction(space), metric_solve=metric_solve,
+                               saddle_free=saddle_free)
 
 
 def test_tuple_tree_runs() -> None:
     """Rosenbrock on a nested tuple tree (a 1-D, a 2-D and a 1-D leaf):
     the same path as the flat numpy run, up to rounding (pairings add up the
-    leaves). Given as lists (x0 and every function result), the run is
-    identical and returns tuple trees. Leaves of another type (boxed
-    arrays) give the same path up to rounding. Plain (CG) and saddle-free
-    (Lanczos)."""
+    leaves). Leaves of another type (boxed arrays) give the same path up to
+    rounding. Plain (CG) and saddle-free (Lanczos). A start given with lists
+    is refused; as_tuple_tree makes it a tree."""
     x0 = Point(np.tile([-1.2, 1.0], 25))
     for saddle_free in (False, True):
         _, flat = trust_region_newton(rosen_fun, rosen_grad, rosen_hessvec, x0,
                                       metric_solve=jacobi_precond_solve, saddle_free=saddle_free)
-        x_t, tuples = tree_run(to_tree, saddle_free=saddle_free)
-        x_l, lists = tree_run(to_list_tree, saddle_free=saddle_free)
-        x_b, boxes = tree_run(to_tree, boxed=True, saddle_free=saddle_free)
+        x_t, tuples = tree_run(saddle_free=saddle_free)
+        x_b, boxes = tree_run(boxed=True, saddle_free=saddle_free)
         h_flat, h_t = history_array(flat), history_array(tuples)
         assert tuples.reason == "converged" and len(h_t) == len(h_flat)
         assert np.allclose(h_t[:, 1:4], h_flat[:, 1:4], rtol=1e-8, atol=0.0)
-        assert without_times(lists.iterations) == without_times(tuples.iterations)
-        assert _is_tuple_tree(x_l) and np.array_equal(from_tree(x_l), from_tree(x_t))
         # Boxed leaves come with tuple blocks (tuple_block_space): block products
         # one vector at a time, so Lanczos rounds differently.
         h_b = history_array(boxes)
         assert len(h_b) == len(h_t) and np.allclose(h_b[:, 1:4], h_t[:, 1:4], rtol=1e-8, atol=0.0)
         x_unboxed = from_tree(_map_leaves(lambda b: b.data, x_b))
         assert np.allclose(x_unboxed, from_tree(x_t), rtol=0.0, atol=1e-10)
+    as_lists = [[x0[:10], x0[10:30].reshape(4, 5)], x0[30:]]
+    with pytest.raises(TypeError):
+        tree_run(x0=as_lists)
+    _, converted = tree_run(x0=as_tuple_tree(as_lists))
+    assert without_times(converted.iterations) == without_times(tree_run()[1].iterations)
 
 
 def check_composite_representation() -> bool:
@@ -236,17 +232,17 @@ def check_composite_representation() -> bool:
     x0 = np.tile([-1.2, 1.0], 25)
     ok = True
     for label, separate in (("separate Jacobi P, Lanczos", True), ("P = M, CG", False)):
-        np_ops: dict[str, object] = {"metric_solve": smoothing_metric_solve}
-        pa_ops: dict[str, object] = {"metric_solve": pa_smoothing_metric_solve}
-        if separate:
-            np_ops.update(metric_apply=smoothing_metric_apply, precond_solve=jacobi_precond_solve)
-            pa_ops.update(metric_apply=pa_smoothing_metric_apply, precond_solve=pa_jacobi_precond_solve)
         x_np, s_np = trust_region_newton(
-            rosen_fun, rosen_grad, rosen_hessvec, Point(x0), gtol=1e-8, rtol=0.0, max_iter=1000,
-            max_krylov=100, **np_ops)  # type: ignore[arg-type]
+            rosen_fun, rosen_grad, rosen_hessvec, Point(x0), metric_solve=smoothing_metric_solve,
+            metric_apply=smoothing_metric_apply if separate else None,
+            precond_solve=jacobi_precond_solve if separate else None,
+            gtol=1e-8, rtol=0.0, max_iter=1000, max_krylov=100)
         x_pa, s_pa = trust_region_newton(
             pa_rosen_fun, pa_rosen_grad, pa_rosen_hessvec, split_pair(x0), space=PAIR_SPACE,
-            gtol=1e-8, rtol=0.0, max_iter=1000, max_krylov=100, **pa_ops)  # type: ignore[arg-type]
+            retract=pa_retract, metric_solve=pa_smoothing_metric_solve,
+            metric_apply=pa_smoothing_metric_apply if separate else None,
+            precond_solve=pa_jacobi_precond_solve if separate else None,
+            gtol=1e-8, rtol=0.0, max_iter=1000, max_krylov=100)
         h_np, h_pa = history_array(s_np), history_array(s_pa)
         print(f"  {label}: numpy: {len(h_np)} its, {int(h_np[:, 5].sum())} Hv;  pair of arrays: "
               f"{len(h_pa)} its, {int(h_pa[:, 5].sum())} Hv")
@@ -272,9 +268,10 @@ def check_distributed_lockstep(rng: Rng) -> bool:
 
     def solve(problem: CoupledProblem, x_start: Point, space: NumpySpace) -> tuple[Point, RunSummary]:
         fun, grad, hessvec, precond_solve, metric_solve, metric_apply = problem
-        return trust_region_newton(fun, grad, hessvec, x_start, metric_solve=metric_solve,
+        return trust_region_newton(fun, grad, hessvec, x_start, space=space,
+                                   retract=flat_retraction(space), metric_solve=metric_solve,
                                    metric_apply=metric_apply, precond_solve=precond_solve,
-                                   space=space, gtol=1e-10, rtol=0.0, max_iter=200)
+                                   gtol=1e-10, rtol=0.0, max_iter=200)
 
     serial = coupled_problem(b, d, lambda a: a)
     x_serial, s_serial = solve(serial, Point(x0.copy()), space=numpy_space)
@@ -352,71 +349,54 @@ def same_path(a: RunSummary, b: RunSummary, upto: int = 40) -> bool:
             and bool(np.allclose(ha[:upto, 1:4], hb[:upto, 1:4], rtol=1e-8, atol=0.0)))
 
 
-def test_tree_default_metric_is_the_direct_sum() -> None:
-    """Without a metric, a tree uses the direct sum of its leaves' metrics:
-    M = I for numpy leaves (the same run as passing the identity), with
-    P = M and with a separate preconditioner; and a leaf space with its own
-    metric, here 2 I, gives the run of the flat problem with M = 2 I."""
+def test_euclidean_metric_on_trees() -> None:
+    """euclidean_metric_solve (and _apply) is M = I on a tuple tree of
+    arrays, the direct sum of the leaves' Euclidean inner products: the tree
+    run follows the flat numpy run with M = I, with P = M (CG, only M^{-1}
+    given) and with a separate preconditioner (Lanczos, both given)."""
     fun, grad, hessvec, jacobi, x0 = tree_problem()
-    space: VectorSpace[Any, Any, Any, Any, Any] = tuple_tree_space()
-    ident_solve, ident_apply = (lambda x, w: w), (lambda x, v: v)
-    _, default = trust_region_newton(fun, grad, hessvec, x0, space=space, max_krylov=200)
-    _, explicit = trust_region_newton(fun, grad, hessvec, x0, space=space, max_krylov=200,
-                                      metric_solve=ident_solve)
-    assert default.reason == "converged"
-    assert without_times(default.iterations) == without_times(explicit.iterations)
-    _, default_p = trust_region_newton(fun, grad, hessvec, x0, space=space, precond_solve=jacobi)
-    _, explicit_p = trust_region_newton(fun, grad, hessvec, x0, space=space, precond_solve=jacobi,
-                                        metric_solve=ident_solve, metric_apply=ident_apply)
-    assert default_p.iterations[0].subproblem.krylov == "lanczos"
-    assert without_times(default_p.iterations) == without_times(explicit_p.iterations)
-
-    doubled = dataclasses.replace(numpy_space, metric_solve=lambda w: Vector(0.5 * w),
-                                  metric_apply=lambda v: Covector(2.0 * v))
-    tree_doubled: VectorSpace[Any, Any, Any, Any, Any] = tuple_tree_space(doubled)
-    _, tree_run_2 = trust_region_newton(fun, grad, hessvec, x0, space=tree_doubled,
-                                        precond_solve=jacobi)
-    _, flat_2 = trust_region_newton(rosen_fun, rosen_grad, rosen_hessvec,
-                                    Point(np.tile([-1.2, 1.0], 25)),
-                                    metric_solve=lambda x, w: Vector(0.5 * w),
-                                    metric_apply=lambda x, v: Covector(2.0 * v),
+    space: VectorSpace[Any, Any, Any, Any] = tuple_tree_space()
+    flat_x0 = Point(np.tile([-1.2, 1.0], 25))
+    _, tree_cg = trust_region_newton(fun, grad, hessvec, x0, space=space,
+                                     retract=flat_retraction(space),
+                                     metric_solve=euclidean_metric_solve, max_krylov=200)
+    _, flat_cg = trust_region_newton(rosen_fun, rosen_grad, rosen_hessvec, flat_x0, max_krylov=200)
+    assert same_path(tree_cg, flat_cg)
+    _, tree_p = trust_region_newton(fun, grad, hessvec, x0, space=space,
+                                    retract=flat_retraction(space),
+                                    metric_solve=euclidean_metric_solve,
+                                    metric_apply=euclidean_metric_apply, precond_solve=jacobi)
+    _, flat_p = trust_region_newton(rosen_fun, rosen_grad, rosen_hessvec, flat_x0,
                                     precond_solve=jacobi_precond_solve)
-    assert same_path(tree_run_2, flat_2)
+    assert tree_p.iterations[0].subproblem.krylov == "lanczos" and same_path(tree_p, flat_p)
 
 
-def test_tree_metric_overrides() -> None:
-    """A different metric for each leaf through direct_sum_operator (lists
-    allowed) gives the run of the flat problem with the block-diagonal
-    metric, with P = M (CG) and with a separate preconditioner (Lanczos);
-    passing the metric to the optimizer instead overrides the space's."""
+def test_direct_sum_metric() -> None:
+    """A different metric for each leaf through direct_sum (lists allowed for
+    the tree of operators) gives the run of the flat problem with the
+    block-diagonal metric: with P = M only M^{-1} is given (CG), with a
+    separate preconditioner M as well (Lanczos)."""
     fun, grad, hessvec, jacobi, x0 = tree_problem()
     rng = np.random.default_rng(10)
     m = 0.5 + rng.random(50)
-    m1, m2, m3 = to_tree(m)[0][0], to_tree(m)[0][1], to_tree(m)[1]
-    solves = [[lambda w: w / m1, lambda w: w / m2], lambda w: w / m3]
-    applies = [[lambda v: m1 * v, lambda v: m2 * v], lambda v: m3 * v]
-    weighted: VectorSpace[Any, Any, Any, Any, Any] = dataclasses.replace(
-        tuple_tree_space(), metric_solve=direct_sum_operator(solves),
-        metric_apply=direct_sum_operator(applies))
+    (m1, m2), m3 = to_tree(m)
+    M_inv = direct_sum([[lambda w: w / m1, lambda w: w / m2], lambda w: w / m3])
+    M = direct_sum([[lambda v: m1 * v, lambda v: m2 * v], lambda v: m3 * v])
     v = to_tree(rng.standard_normal(50))
-    assert weighted.metric_solve is not None and weighted.metric_apply is not None
-    assert np.allclose(from_tree(weighted.metric_solve(weighted.metric_apply(v))), from_tree(v))
+    assert np.allclose(from_tree(M_inv(M(v))), from_tree(v))
 
-    flat_solve = lambda x, w: Vector(w / m)                       # noqa: E731
-    flat_apply = lambda x, v: Covector(m * v)                     # noqa: E731
+    space: VectorSpace[Any, Any, Any, Any] = tuple_tree_space()
     flat_x0 = Point(np.tile([-1.2, 1.0], 25))
     for separate in (False, True):
-        precond = jacobi if separate else None
-        _, tree_summary = trust_region_newton(fun, grad, hessvec, x0, space=weighted,
-                                              precond_solve=precond, max_krylov=200)
-        _, flat = trust_region_newton(rosen_fun, rosen_grad, rosen_hessvec, flat_x0,
-                                      metric_solve=flat_solve, metric_apply=flat_apply,
-                                      precond_solve=jacobi_precond_solve if separate else None,
-                                      max_krylov=200)
+        _, tree_summary = trust_region_newton(
+            fun, grad, hessvec, x0, space=space, retract=flat_retraction(space),
+            metric_solve=lambda x, w: M_inv(w),
+            metric_apply=(lambda x, v: M(v)) if separate else None,
+            precond_solve=jacobi if separate else None, max_krylov=200)
+        _, flat = trust_region_newton(
+            rosen_fun, rosen_grad, rosen_hessvec, flat_x0,
+            metric_solve=lambda x, w: Vector(w / m),
+            metric_apply=(lambda x, v: Covector(m * v)) if separate else None,
+            precond_solve=jacobi_precond_solve if separate else None, max_krylov=200)
+        assert tree_summary.iterations[0].subproblem.krylov == ("lanczos" if separate else "cg")
         assert same_path(tree_summary, flat)
-        _, overridden = trust_region_newton(
-            fun, grad, hessvec, x0, space=tuple_tree_space(), precond_solve=precond,
-            metric_solve=lambda x, w: weighted.metric_solve(w),   # type: ignore[misc]
-            metric_apply=lambda x, v: weighted.metric_apply(v),   # type: ignore[misc]
-            max_krylov=200)
-        assert without_times(overridden.iterations) == without_times(tree_summary.iterations)

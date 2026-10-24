@@ -350,16 +350,17 @@ def preconditioner_at(loc: Local, precond: str, g: Array, a: Array, c: Array,
 
 def operators_at(loc: Local, e: Energy, precond: str, u: Point, metric: str = "l2",
                  fixed: Optional[Callable[[Covector], Vector]] = None) -> Operators:
-    """H(u) and P(u)^{-1}, set up once per point: the Hessian's element data,
-    and for block Jacobi the owned block and its multigrid hierarchy. P is
-    returned as the preconditioner (metric "l2": the lumped mass metric comes
-    from the keyword arguments) or as the metric itself (metric "precond",
-    M = P)."""
+    """All the operators at u, set up once per point: H(u) from the Hessian's
+    element data, and P(u)^{-1} (for block Jacobi, the owned block and its
+    multigrid hierarchy). With metric "l2", M is the lumped mass matrix and P
+    is a separate preconditioner; with metric "precond", P is the metric
+    itself (M = P)."""
     hessvec, g, a, c = hessian_at(loc, e, u)
     P_solve = preconditioner_at(loc, precond, g, a, c, fixed)
     if metric == "precond":
         return PointOperators(hessvec=hessvec, metric_solve=P_solve)
-    return PointOperators(hessvec=hessvec, precond_solve=P_solve)
+    return PointOperators(hessvec=hessvec, metric_solve=lambda w: l2_metric_solve(loc, w),
+                          metric_apply=lambda v: l2_metric_apply(loc, v), precond_solve=P_solve)
 
 
 # --- the space and the L^2 metric --------------------------------------------------------
@@ -411,16 +412,13 @@ def solve(loc: Local, e: Energy, precond: str, metric: str = "l2", display: int 
     krylov = "lanczos")."""
     root = loc.comm.Get_rank() == 0
     fixed = laplacian_cycle(loc) if precond == "laplace" else None
-    l2 = metric == "l2"
     return trust_region_newton(
         lambda u: objective(loc, e, u),
         lambda u: gradient(loc, e, u),
         None,
         Point(np.zeros(loc.n_owned)),
+        space=distributed_space(loc), retract=lambda u, s: Point(u + s),
         operators_at=lambda u: operators_at(loc, e, precond, u, metric, fixed),
-        metric_solve=(lambda u, w: l2_metric_solve(loc, w)) if l2 else None,
-        metric_apply=(lambda u, v: l2_metric_apply(loc, v)) if l2 else None,
-        space=distributed_space(loc),
         rtol=1e-10, max_iter=max_iter, max_krylov=max_krylov, krylov=krylov,
         display=display, print_fn=print if root else (lambda line: None))
 

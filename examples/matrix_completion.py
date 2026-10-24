@@ -39,11 +39,11 @@ Covectors. The same pairs (gU, gV), acting on tangent vectors by the same
 dot product. An ambient functional xi -> <Z, xi>_F becomes
 ((I - U U^T) Z V, Z^T U). In these coordinates the Frobenius metric is M = I:
 M^{-1} maps a canonical covector (below) to the tangent vector with the same
-components. That is the default metric of the tuple tree space (the direct
-sum of the leaves' Euclidean metrics), so no metric is passed: the trust
-region is a Frobenius ball of matrix changes, and with P = M the Krylov
-solver is unpreconditioned. (M^{-1} keeps the gauge because the optimizer
-only passes it canonical covectors, through project_covector.)
+components: euclidean_metric_solve, the direct sum of the leaves' Euclidean
+inner products. So the trust region is a Frobenius ball of matrix changes,
+and with P = M the Krylov solver is unpreconditioned. (M^{-1} keeps the
+gauge because the optimizer only passes it canonical covectors, through
+project_covector.)
 
 Redundancy. The components (N r + M r numbers) outnumber the dimension by
 r^2: the block U^T gU of a covector pairs to zero with every tangent vector.
@@ -105,6 +105,7 @@ from nicks_optimizers import (
     LeafBlock,
     VectorBlock,
     VectorSpace,
+    euclidean_metric_solve,
     trust_region_newton,
     tuple_tree_space,
 )
@@ -118,7 +119,7 @@ Tangent = NewType("Tangent", tuple[Array, Array])            # (dU, dV), U^T dU 
 Cotangent = NewType("Cotangent", tuple[Array, Array])        # (gU, gV), canonical if U^T gU = 0
 TangentBlock = tuple[LeafBlock[VectorBlock], LeafBlock[VectorBlock]]          # blocks of dU, dV
 CotangentBlock = tuple[LeafBlock[CovectorBlock], LeafBlock[CovectorBlock]]
-FixedRankSpace = VectorSpace[LowRank, Tangent, Cotangent, TangentBlock, CotangentBlock]
+FixedRankSpace = VectorSpace[Tangent, Cotangent, TangentBlock, CotangentBlock]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -197,12 +198,9 @@ def tangent_dimension(v: Tangent) -> int:
 
 def fixed_rank_space() -> FixedRankSpace:
     """Tangent vectors and covectors as tuple trees (dU, dV) of numpy
-    matrices, with the Frobenius metric (the tree's default, M = I in these
-    coordinates) and two changes to tuple_tree_space: no translate, since
-    points move only through retract, and the dimension of the tangent
-    space."""
+    matrices (tuple_tree_space), with the dimension of the tangent space."""
     space = cast(FixedRankSpace, tuple_tree_space())
-    return dataclasses.replace(space, translate=None, dimension=tangent_dimension)
+    return dataclasses.replace(space, dimension=tangent_dimension)
 
 
 def gauge_projection(x: LowRank, w: Cotangent) -> Cotangent:
@@ -347,7 +345,7 @@ def complete(samples: Samples, x0: LowRank, saddle_free: bool = False, curvature
         lambda x: objective(samples, x),
         lambda x: gradient(samples, x),
         lambda x, v: hessian_action(samples, x, v, curvature),
-        x0, space=fixed_rank_space(), retract=retract,
+        x0, space=fixed_rank_space(), retract=retract, metric_solve=euclidean_metric_solve,
         project_covector=gauge_projection if project else None,
         saddle_free=saddle_free, krylov=krylov, radius=radius, display=display,
         max_iter=max_iter, max_krylov=max_krylov, rtol=rtol)

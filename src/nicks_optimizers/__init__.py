@@ -2,9 +2,11 @@
 
 Modules, in dependency order:
 
-  spaces                    how points, vectors and covectors are represented
-                            (VectorSpace records; numpy by default)
-  metrics                   the metric M, given by operators, and norms
+  trees                     tuple trees (nested tuples) and maps over them
+  spaces                    the vector space structure: how vectors and
+                            covectors are represented (VectorSpace records)
+  metrics                   the Hilbert structure: the metric M, given by
+                            operators, and norms
   dense                     small dense linear algebra in coordinates
   krylov                    Krylov processes (preconditioned Lanczos and CG)
   criteria                  tests shared by inexact Newton methods
@@ -12,7 +14,7 @@ Modules, in dependency order:
   trust_region_diagnostics  records, resumption state and text output
   trust_region              trust_region_newton
 
-spaces, metrics, dense, krylov and criteria do not depend on the trust-region
+trees, spaces, metrics, dense, krylov and criteria do not depend on the trust-region
 modules and are meant to be reused by other optimizers. The names below are
 the public interface; lower-level pieces are available from their modules.
 """
@@ -34,6 +36,7 @@ from .metrics import (
     MetricSolve,
     covector_norm,
     euclidean_metric_apply,
+    direct_sum,
     euclidean_metric_solve,
     extend_metric_gram,
     vector_norm,
@@ -52,20 +55,19 @@ from .spaces import (
     Point,
     PreconditionerSolve,
     Retraction,
-    Tree,
     TreeNumpySpace,
     Vector,
     VectorBlock,
     VectorSpace,
     VectorToCovector,
-    as_tuple_tree,
     check_space,
-    direct_sum_operator,
+    flat_retraction,
     numpy_space,
     numpy_space_with_reductions,
     tuple_block_space,
     tuple_tree_space,
 )
+from .trees import Tree, as_tuple_tree, tree_leaves, tree_map, tree_map2
 from .trust_region import PointOperators, trust_region_newton
 from .trust_region_diagnostics import (
     IterationInfo,
@@ -103,23 +105,28 @@ __all__ = [
     "Point",
     "PreconditionerSolve",
     "Retraction",
-    "Tree",
     "TreeNumpySpace",
     "Vector",
     "VectorBlock",
     "VectorSpace",
     "VectorToCovector",
-    "as_tuple_tree",
     "check_space",
-    "direct_sum_operator",
+    "flat_retraction",
     "numpy_space",
     "numpy_space_with_reductions",
     "tuple_block_space",
     "tuple_tree_space",
+    # trees
+    "Tree",
+    "as_tuple_tree",
+    "tree_leaves",
+    "tree_map",
+    "tree_map2",
     # metrics
     "MetricApply",
     "MetricSolve",
     "covector_norm",
+    "direct_sum",
     "euclidean_metric_apply",
     "euclidean_metric_solve",
     "extend_metric_gram",

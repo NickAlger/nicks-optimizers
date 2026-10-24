@@ -4,6 +4,7 @@ relative convergence test and its norm, and convergence on test problems."""
 from typing import Callable, Literal
 
 import numpy as np
+import pytest
 
 from nicks_optimizers import (
     Array,
@@ -249,7 +250,7 @@ def test_operators_at_matches_and_runs_once_per_point() -> None:
                 return PointOperators(hessvec=H, precond_solve=P_solve)
             return PointOperators(hessvec=H, metric_solve=P_solve)
 
-        # With a separate P, the metric (M = I) is the space's default.
+        # With a separate P and no metric, M = I (the numpy default).
         x, summary = trust_region_newton(rosen_fun, rosen_grad, None, x0, operators_at=operators_at)
         assert without_times(summary.iterations) == without_times(reference.iterations)
         records = summary.iterations
@@ -265,8 +266,7 @@ def test_operator_arguments_are_checked() -> None:
         return PointOperators(hessvec=lambda v: rosen_hessvec(x, v))
 
     def p_ops(x: Point) -> PointOperators[Vector, Covector]:
-        """A user metric and a separate preconditioner, but no metric_apply
-        (the space's M must not be paired with a user M^{-1})."""
+        """A metric and a separate preconditioner, but no metric_apply."""
         return PointOperators(hessvec=lambda v: rosen_hessvec(x, v),
                               metric_solve=lambda w: smoothing_metric_solve(x, w),
                               precond_solve=lambda w: jacobi_precond_solve(x, w))
@@ -281,6 +281,10 @@ def test_operator_arguments_are_checked() -> None:
         except ValueError:
             continue
         raise AssertionError("invalid operator arguments were accepted")
+    # operators_at is exclusive: no operator keyword arguments next to it.
+    with pytest.raises(ValueError):
+        trust_region_newton(rosen_fun, rosen_grad, None, x0, operators_at=hv_ops,
+                            metric_solve=smoothing_metric_solve)
 
 
 def test_matched_path_equals_explicit_metric() -> None:

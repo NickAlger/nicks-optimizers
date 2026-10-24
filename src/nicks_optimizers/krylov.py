@@ -46,14 +46,13 @@ from .spaces import (
     Coords,
     CovectorBlockT,
     CovectorT,
-    PointT,
     VectorBlockT,
     VectorSpace,
     VectorT,
 )
 
 
-def lanczos_initial_pair(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlockT, CovectorBlockT],
+def lanczos_initial_pair(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
                   g: CovectorT, precond_solve: Callable[[CovectorT], VectorT],
                   precond_g: Optional[VectorT] = None) -> tuple[CovectorT, VectorT, float]:
     """The first Lanczos pair, from g (and P^{-1} g, if already computed).
@@ -69,7 +68,7 @@ def lanczos_initial_pair(space: VectorSpace[PointT, VectorT, CovectorT, VectorBl
     return space.scale_covector(1.0 / gamma0, g), space.scale_vector(1.0 / gamma0, y), gamma0
 
 
-def reorthogonalize(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlockT, CovectorBlockT],
+def reorthogonalize(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
                     t: CovectorT, Q: VectorBlockT, V: CovectorBlockT, passes: int = 2) -> CovectorT:
     """Make P^{-1} t P-orthogonal to the vectors in Q.
 
@@ -83,7 +82,7 @@ def reorthogonalize(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlockT,
     return t
 
 
-def lanczos_step(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlockT, CovectorBlockT],
+def lanczos_step(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
                  hessvec: Callable[[VectorT], CovectorT],
                  precond_solve: Callable[[CovectorT], VectorT],
                  Q: VectorBlockT, V: CovectorBlockT, q: VectorT, v: CovectorT,
@@ -156,7 +155,7 @@ class LanczosState(Generic[VectorT, CovectorT, VectorBlockT, CovectorBlockT]):
     hscale: float
 
 
-def lanczos_start(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlockT, CovectorBlockT],
+def lanczos_start(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
                   g: CovectorT, precond_solve: Callable[[CovectorT], VectorT],
                   precond_g: Optional[VectorT] = None
                   ) -> LanczosState[VectorT, CovectorT, VectorBlockT, CovectorBlockT]:
@@ -170,7 +169,7 @@ def lanczos_start(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlockT, C
         breakdown=False, v_prev=None, hscale=0.0)
 
 
-def lanczos_advance(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlockT, CovectorBlockT],
+def lanczos_advance(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
                     state: LanczosState[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
                     hessvec: Callable[[VectorT], CovectorT],
                     precond_solve: Callable[[CovectorT], VectorT],
@@ -249,7 +248,7 @@ class CGState(Generic[VectorT, CovectorT]):
     model: float
 
 
-def cg_start(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlockT, CovectorBlockT],
+def cg_start(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
              g: CovectorT, precond_solve: Callable[[CovectorT], VectorT],
              precond_g: Optional[VectorT] = None) -> CGState[VectorT, CovectorT]:
     """CG before its first step: s_0 = 0, r_0 = g, p_0 = -P^{-1} g. Costs one
@@ -262,7 +261,7 @@ def cg_start(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlockT, Covect
                    rz=rz, s_norm2=0.0, sp=0.0, p_norm2=rz, model=0.0)
 
 
-def cg_curvature(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlockT, CovectorBlockT],
+def cg_curvature(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
                  state: CGState[VectorT, CovectorT], hessvec: Callable[[VectorT], CovectorT]
                  ) -> tuple[CovectorT, float]:
     """(H p_k, <H p_k, p_k>): the curvature along the search direction, which
@@ -271,7 +270,7 @@ def cg_curvature(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlockT, Co
     return Hp, space.pair(Hp, state.p)
 
 
-def cg_advance(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlockT, CovectorBlockT],
+def cg_advance(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
                state: CGState[VectorT, CovectorT], Hp: CovectorT, curvature: float,
                precond_solve: Callable[[CovectorT], VectorT],
                project_covector: Optional[Callable[[CovectorT], CovectorT]] = None

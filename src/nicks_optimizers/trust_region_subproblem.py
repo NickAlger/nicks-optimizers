@@ -59,7 +59,6 @@ from .spaces import (
     Coords,
     CovectorBlockT,
     CovectorT,
-    PointT,
     VectorBlockT,
     VectorSpace,
     VectorT,
@@ -162,7 +161,7 @@ def solve_projected_trs(T: Coords, G: Coords, gamma0: float, radius: float,
     return y, y_flip, lam, model_value, true_model_value, theta
 
 
-def krylov_residual_norm(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlockT, CovectorBlockT],
+def krylov_residual_norm(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
                          state: LanczosState[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
                          y: Coords, y_flip_last: float, lam: float, G: Coords,
                          metric_apply: Optional[Callable[[VectorT], CovectorT]],
@@ -211,7 +210,7 @@ def boundary_stalled(lam: float, model_value: float, prev_model_value: Optional[
     return abs(prev_model_value - model_value) <= stall_tol * abs(model_value)
 
 
-def solve_tr_subproblem(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlockT, CovectorBlockT],
+def solve_tr_subproblem(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
                         g: CovectorT, hessvec: Callable[[VectorT], CovectorT],
                         metric_solve: Callable[[CovectorT], VectorT],
                         radius: float, resid_tol: float, max_iter: int, *,
@@ -316,7 +315,7 @@ def boundary_fraction(s_norm2: float, sp: float, p_norm2: float, radius: float) 
     return gap / (sp + root) if sp > 0.0 else (root - sp) / p_norm2
 
 
-def solve_tr_subproblem_cg(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlockT, CovectorBlockT],
+def solve_tr_subproblem_cg(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
                            g: CovectorT, hessvec: Callable[[VectorT], CovectorT],
                            metric_solve: Callable[[CovectorT], VectorT],
                            radius: float, resid_tol: float, max_iter: int, *,

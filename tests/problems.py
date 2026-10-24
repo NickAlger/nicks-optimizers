@@ -165,13 +165,13 @@ def pa_dimension(v: PairArray) -> int:
     return int(v[0].shape[0] + v[1].shape[0])
 
 
-def pa_translate(x: PairArray, s: PairArray) -> PairArray:
+def pa_retract(x: PairArray, s: PairArray) -> PairArray:
     return (x[0] + s[0], x[1] + s[1])
 
 
 PAIR_SPACE = tuple_block_space(
     scale_vector=pa_scale, scale_covector=pa_scale, axpy_vector=pa_axpy,
-    axpy_covector=pa_axpy, pair=pa_pair, translate=pa_translate, dimension=pa_dimension)
+    axpy_covector=pa_axpy, pair=pa_pair, dimension=pa_dimension)
 
 
 def pa_rosen_fun(x: PairArray) -> float:
