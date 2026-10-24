@@ -19,6 +19,17 @@ Problem pieces
                                        (psi_i, phi)_{M^{-1}} = <psi_i, B(x) phi>;
                                        used for dual norms (stopping tests).
 
+Optional per-point setup, in place of hessvec and precond_solve (pass None
+for both):
+  operators_at(x) -> (hessvec_x, precond_solve_x)
+                                       the operators frozen at x, v -> H(x) v
+                                       and w -> P(x)^{-1} w. Called once per
+                                       new iterate, and reused after rejected
+                                       steps, so expensive setup (assembling a
+                                       Hessian, building a multigrid
+                                       hierarchy) happens once per point and
+                                       can be shared by both operators.
+
 Optional for representations with redundant components (e.g. gauged
 tangent vectors of a low-rank manifold):
   project_covector(x, w) -> Covector   the canonical representative of w,
@@ -93,8 +104,8 @@ def check_resume_matches(state: ResumeState, f_x0: float, rtol: float = 1e-10) -
 def trust_region_newton(
         fun: Callable[[PointT], float],
         grad: Callable[[PointT], CovectorT],
-        hessvec: Callable[[PointT, VectorT], CovectorT],
-        precond_solve: Callable[[PointT, CovectorT], VectorT],
+        hessvec: Optional[Callable[[PointT, VectorT], CovectorT]],
+        precond_solve: Optional[Callable[[PointT, CovectorT], VectorT]],
         ball_inner: Callable[[PointT, VectorBlockT, VectorT], Coords],
         ball_dual_inner: Callable[[PointT, CovectorBlockT, CovectorT], Coords],
         x0: PointT,
@@ -111,6 +122,8 @@ def trust_region_newton(
         callback: Optional[Callable[[PointT, IterationInfo[VectorT, CovectorT]], Optional[bool]]] = None,
         resume: Optional[ResumeState] = None,
         g0: Optional[CovectorT] = None,
+        operators_at: Optional[Callable[[PointT], tuple[Callable[[VectorT], CovectorT],
+                                                        Callable[[CovectorT], VectorT]]]] = None,
         ) -> tuple[PointT, RunSummary]:
     """Inexact Newton trust-region method with an ellipsoidal trust region.
 
@@ -120,6 +133,12 @@ def trust_region_newton(
     inner products: they must be exact duals, and a default dual that ignored
     ball_inner would silently break that. For numpy_space and M = I, pass
     euclidean_inner and euclidean_dual_inner.
+
+    Operators: either hessvec(x, v) and precond_solve(x, w), or
+    operators_at(x) returning both frozen at x (then pass None for
+    hessvec and precond_solve). operators_at is called once per iterate at
+    which a subproblem is solved: setup shared by H(x) and P(x) happens once
+    per point, and rejected steps reuse it.
 
     space says how points, vectors and covectors are represented (default
     numpy_space), and x0 must already be a point in that representation; it
@@ -165,6 +184,18 @@ def trust_region_newton(
     ResumeState at x. history_array(summary) gives the iterations as a numeric
     array; merge_summaries joins the summaries of a stopped and resumed run.
     """
+    if operators_at is None and (hessvec is None or precond_solve is None):
+        raise ValueError("pass hessvec and precond_solve, or operators_at")
+    if operators_at is not None and (hessvec is not None or precond_solve is not None):
+        raise ValueError("pass either hessvec and precond_solve, or operators_at, not both")
+
+    def frozen_operators(x: PointT) -> tuple[Callable[[VectorT], CovectorT],
+                                             Callable[[CovectorT], VectorT]]:
+        if operators_at is not None:
+            return operators_at(x)
+        assert hessvec is not None and precond_solve is not None
+        return (lambda v: hessvec(x, v)), (lambda w: precond_solve(x, w))
+
     start = time.perf_counter()
     sp = space if space is not None else cast(
         VectorSpace[PointT, VectorT, CovectorT, VectorBlockT, CovectorBlockT], numpy_space)
@@ -189,6 +220,7 @@ def trust_region_newton(
     if gnorm0 is None:
         gnorm0 = gnorm
     records: list[IterationRecord] = []
+    operators: Optional[tuple[Callable[[VectorT], CovectorT], Callable[[CovectorT], VectorT]]] = None
     while True:
         if gradient_converged(gnorm, gnorm0, gtol, rtol):
             reason: RunReason = "converged"
@@ -200,10 +232,10 @@ def trust_region_newton(
             reason = "max_iter"
             break
         forcing = forcing_term(gnorm, gnorm0, forcing_max)
+        if operators is None:                   # first iteration at this point
+            operators = frozen_operators(x)
         s, stats = solve_tr_subproblem(
-            sp, g,
-            lambda v: hessvec(x, v),
-            lambda w: precond_solve(x, w),
+            sp, g, operators[0], operators[1],
             lambda U, v: ball_inner(x, U, v),
             lambda Psi, phi: ball_dual_inner(x, Psi, phi),
             radius, forcing * gnorm, max_lanczos,
@@ -227,6 +259,7 @@ def trust_region_newton(
         records.append(record)
         if accepted:
             x, fx = x_trial, f_trial
+            operators = None
             g = canonical(x, grad(x))
             grad_calls += 1
             gnorm = covector_norm(sp, lambda Psi, phi: ball_dual_inner(x, Psi, phi), g)

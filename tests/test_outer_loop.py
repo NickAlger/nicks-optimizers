@@ -29,6 +29,7 @@ from helpers import (
     Rng,
     dense_from_operator,
     report,
+    without_times,
 )
 from problems import (
     METRICS,
@@ -216,3 +217,39 @@ def test_rosenbrock_converges() -> None:
 
 def test_double_well_converges() -> None:
     assert demo_double_well(np.random.default_rng(6))
+
+
+def test_operators_at_matches_and_runs_once_per_point() -> None:
+    """operators_at(x) gives the same run as hessvec/precond_solve, and is
+    called exactly once per iterate at which a subproblem is solved (rejected
+    steps reuse the operators)."""
+    x0 = Point(np.tile([-1.2, 1.0], 25))
+    _, reference = trust_region_newton(rosen_fun, rosen_grad, rosen_hessvec, jacobi_precond_solve,
+                                       euclidean_inner, euclidean_dual_inner, x0)
+    points: list[Point] = []
+
+    def operators_at(x: Point) -> tuple[Callable[[Vector], Covector], Callable[[Covector], Vector]]:
+        points.append(x)
+        return (lambda v: rosen_hessvec(x, v)), (lambda w: jacobi_precond_solve(x, w))
+
+    x, summary = trust_region_newton(rosen_fun, rosen_grad, None, None, euclidean_inner,
+                                     euclidean_dual_inner, x0, operators_at=operators_at)
+    assert without_times(summary.iterations) == without_times(reference.iterations)
+    records = summary.iterations
+    new_points = 1 + sum(records[i - 1].accepted for i in range(1, len(records)))
+    assert any(not r.accepted for r in records)             # rejections did happen
+    assert len(points) == new_points
+    assert len({id(p) for p in points}) == len(points)
+
+
+def test_operator_arguments_are_checked() -> None:
+    x0 = Point(np.zeros(4))
+    for hv, ps, ops in ((None, jacobi_precond_solve, None), (rosen_hessvec, None, None),
+                        (rosen_hessvec, jacobi_precond_solve,
+                         lambda x: ((lambda v: rosen_hessvec(x, v)), (lambda w: w)))):
+        try:
+            trust_region_newton(rosen_fun, rosen_grad, hv, ps, euclidean_inner,
+                                euclidean_dual_inner, x0, operators_at=ops)
+        except ValueError:
+            continue
+        raise AssertionError("invalid operator arguments were accepted")

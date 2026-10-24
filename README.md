@@ -20,6 +20,10 @@ the **shape of the trust region** are independent choices.
 - **Representation-generic.** Points, vectors and covectors can be numpy arrays
   (the default), distributed objects, collections of arrays, or anything else,
   through a `VectorSpace` record of functions.
+- **Distributed.** Every reduction goes through the space or the inner
+  products, so vectors can live on many MPI ranks and the method runs in
+  lockstep. [`examples/p_laplacian.py`](examples/p_laplacian.py) minimizes a
+  p-Laplacian energy with mpi4py and a multigrid preconditioner.
 - **Manifolds.** Points move only through a retraction, and tangent vectors may
   be stored redundantly (e.g. gauged factor variations), with an optional
   covector projection that keeps the Krylov process inside the tangent space.
@@ -37,7 +41,9 @@ the **shape of the trust region** are independent choices.
 pip install git+https://github.com/NickAlger/nicks-optimizers
 ```
 
-Requires Python 3.10+ and numpy. For development:
+Requires Python 3.10+ and numpy. The distributed example also needs
+`pip install -e ".[examples]"` and an MPI library (e.g. `pip install mpich`).
+For development:
 
 ```bash
 git clone https://github.com/NickAlger/nicks-optimizers
@@ -87,7 +93,11 @@ version on the chained Rosenbrock function.
 
 Optional: `space` (see [Other representations](#other-representations)),
 `retract(x, s) -> Point` and `project_covector(x, w) -> Covector` (see
-[Manifolds](#manifolds)).
+[Manifolds](#manifolds)), and `operators_at(x) -> (hessvec_x, precond_solve_x)`
+in place of `hessvec` and `precond_solve` (pass `None` for both): the two
+operators frozen at `x`, built once per iterate and reused after rejected
+steps, so setup they share (assembling a Hessian, building a multigrid
+hierarchy) happens once per point.
 
 `H` and `P^{-1}` are the only operators the method applies. The two inner
 products must be **exact duals** of each other: the residual norm on the
@@ -136,6 +146,36 @@ operations, and optionally `translate` and `dimension`). Ready-made spaces:
 
 `check_space(space, v1, v2, w1, w2)` verifies a space's internal consistency on
 sample vectors. The method never modifies objects in place.
+
+## Distributed vectors: the p-Laplacian
+
+[`examples/p_laplacian.py`](examples/p_laplacian.py) solves
+`-div(|grad u|^{p-2} grad u) = f` on the unit disk by minimizing the
+regularized energy with linear finite elements, with the unknowns split
+across MPI ranks:
+
+```bash
+pip install -e ".[examples]" mpich        # mpi4py, pyamg, scipy, and an MPI
+mpiexec -n 4 python examples/p_laplacian.py --p 1.5 3 5
+```
+
+- **Mesh:** coarse at the center and finer toward the circle, so the lumped
+  mass matrix varies 16-fold across the mesh.
+- **Trust region:** the L^2 ball of the lumped mass matrix.
+- **Preconditioner:** different from the ball. It is block Jacobi over the
+  ranks, each block being the rank's part of the current Hessian, applied by
+  one pyamg V-cycle. It is built once per iterate through `operators_at`.
+- **Distribution:** vectors are `numpy_space_with_reductions` arrays of each
+  rank's nodal values. Ghost values come in by halo exchange, and reductions
+  use MPI Allreduce.
+- **Right-hand side:** chosen so that the exact discrete solution is known.
+  Every run reaches it to 1e-9 or better.
+- **Rank count:** with `--precond jacobi` (partition-independent) the
+  iterates are the same on any number of ranks, and the tests check this.
+
+p is a dial: p = 1.5 takes 9 Newton iterations on every mesh, while p = 5 takes
+50 to 130 and grows with refinement. The example's docstring explains why (the
+L^2 ball admits rough steps) and compares an H^1 ball.
 
 ## Manifolds
 

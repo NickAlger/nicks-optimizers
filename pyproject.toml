@@ -20,6 +20,8 @@ classifiers = [
 
 [project.optional-dependencies]
 test = ["pytest>=7", "mypy>=1.8"]
+# examples/p_laplacian.py; mpi4py also needs an MPI library (e.g. pip install mpich).
+examples = ["mpi4py>=4", "pyamg>=5", "scipy>=1.10"]
 
 [project.urls]
 Repository = "https://github.com/NickAlger/nicks-optimizers"
@@ -39,3 +41,8 @@ addopts = "-q"
 strict = true
 files = ["src", "tests", "examples"]
 mypy_path = "tests:examples"
+
+[[tool.mypy.overrides]]
+# Untyped dependencies of examples/p_laplacian.py.
+module = ["pyamg", "pyamg.*", "scipy", "scipy.*"]
+ignore_missing_imports = true

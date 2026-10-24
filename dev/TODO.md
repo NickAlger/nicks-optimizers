@@ -78,3 +78,32 @@ first iterations were rejections that shrank it by 4x each. The example now
 passes the smallest singular value found so far. Library options: a radius
 derived from the problem when none is given (e.g. the length of the Cauchy
 step, or ||g||_{M^-1} / ||H||), or documenting the choice prominently.
+
+## Trust region in the preconditioner's norm (M = P)
+
+The classic Steihaug-Toint choice, and the natural one when P is spectrally
+equivalent to the Hessian (multigrid): mesh-independent and free. It cannot
+be expressed today, since `ball_inner` needs (u, v)_P and multigrid only gives
+P^{-1}. In the matched case nothing has to be computed: the Lanczos basis is
+P-orthonormal, so G = I and W = I (including the pending vector), and
+||g||_{P^{-1}} = gamma0; the residual norm reduces to
+gamma_next |y_flip[-1]|. Proposal: omitting both inner products means M = P.
+The outer loop still needs ||g||_{P^{-1}} = sqrt(<g, P^{-1} g>) before the
+subproblem (one extra solve per iteration, or share it with the first
+Lanczos vector).
+
+Evidence (2026-10-24, `examples/p_laplacian.py`, serial, p = 5, eps = 1e-3,
+20/40/80 rings): the L^2 ball needed 58 / 99 / 156 iterations and 298 / 542 / 1127
+Lanczos steps; an H^1 ball (stiffness matrix, exact dual by sparse LU)
+needed 22 / 27 / 40 and 78 / 125 / 163. At p = 3: 11 / 13 / 16 against 8 / 9 / 10. The
+L^2 ball admits rough steps that a gradient-dependent energy punishes, and
+more of them as the mesh is refined.
+
+## Communication per Lanczos step
+
+In a distributed run each Lanczos step does six global reductions:
+<Hq, q>, two reorthogonalization passes (one `pair_block` each),
+<t, P^{-1} t>, and one call to each inner product (Gram matrices). Fusing
+them (delta is the newest coefficient of the first reorthogonalization pass;
+the two Gram rows could go in one reduction) would cut latency for small
+local problems. Not urgent: with multigrid the local work dominates.
