@@ -125,6 +125,30 @@ passes the smallest singular value found so far. Library options: a radius
 derived from the problem when none is given (e.g. the length of the Cauchy
 step, or ||g||_{M^-1} / ||H||), or documenting the choice prominently.
 
+**Experiments (2026-10-24), no library change made.** Iterations /
+rejections on every example problem:
+
+| problem | radius 1 | Cauchy-step radius | shrink x1/16 when rho < 0 |
+|---|---|---|---|
+| Rosenbrock, identity ball | 119 / 19 | 91 / 4 | 109 / 3 |
+| Rosenbrock, smoothing ball | 171 / 47 | - | 229 / 42 |
+| Rosenbrock, x-dependent ball | 118 / 9 | - | 229 / 42 |
+| double well | 16 / 1 | 17 / 2 (fallback) | 18 / 1 |
+| matrix completion from X = 0 | 41 / 7 | 42 / 8 | 38 / 5 |
+| p-Laplacian p = 3 from 0 | 12 / 1 | 18 / 7 (radius 1.6e3) | 12 / 1 |
+| p-Laplacian p = 5 from 0 | 62 / 16 | 64 / 27 (radius 7e9) | 61 / 10 |
+| eigenproblem p = 2, random start | 8 / 1 | 8 / 1 | 11 / 1 |
+
+Cauchy-step radius: the M-norm length of the unconstrained Cauchy step
+along -P^{-1} g at x0, falling back to ||P^{-1} g||_M when the curvature
+is not positive. Neither change is a clear win. The Cauchy length is
+absurd exactly where the Hessian at x0 is degenerate (the p-Laplacian at
+u = 0, curvature ~ eps^{p-2}), which is where a good guess would matter.
+Faster shrinking helps some problems and hurts others. Recommendation: keep
+the defaults, say plainly in the docs that the radius is an absolute
+M-norm length, and choose it from the problem's scale when one is known (as
+the matrix-completion continuation does).
+
 ## Trust region in the preconditioner's norm (M = P)
 
 The classic Steihaug-Toint choice, and the natural one when P is spectrally
