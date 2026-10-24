@@ -8,6 +8,10 @@ on:
 jobs:
   tests:
     runs-on: ubuntu-latest
+    env:
+      # Single-machine MPI runs: keep MPICH's UCX transport off the VM's
+      # network devices, which some runners expose but cannot use.
+      UCX_TLS: self,sm,tcp
     strategy:
       fail-fast: false
       matrix:

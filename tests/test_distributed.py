@@ -22,11 +22,14 @@ pytestmark = pytest.mark.skipif(bool(MISSING) or shutil.which("mpiexec") is None
 
 
 def mpirun(ranks: int, script: Path, *args: str) -> str:
+    """Run a script under mpiexec on this machine. UCX (MPICH's transport) is
+    limited to shared memory and TCP unless UCX_TLS is set: on some cloud VMs
+    it otherwise picks a network device it cannot use and aborts."""
+    env = {**os.environ, "PYTHONPATH": f"{ROOT / 'tests'}:{ROOT / 'examples'}:{ROOT / 'src'}"}
+    env.setdefault("UCX_TLS", "self,sm,tcp")
     result = subprocess.run(
         ["mpiexec", "-n", str(ranks), sys.executable, str(script), *args],
-        capture_output=True, text=True, timeout=600,
-        env={**os.environ,
-             "PYTHONPATH": f"{ROOT / 'tests'}:{ROOT / 'examples'}:{ROOT / 'src'}"})
+        capture_output=True, text=True, timeout=600, env=env)
     assert result.returncode == 0, result.stdout + result.stderr
     return result.stdout
 
