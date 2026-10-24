@@ -1,7 +1,7 @@
 """The trust-region method on a manifold: rank-r matrix completion, from
 examples/matrix_completion.py."""
 
-from typing import Callable, Optional
+from typing import Callable, Literal, Optional
 
 import numpy as np
 
@@ -93,7 +93,7 @@ def test_gauge_stays_clean_only_with_projection() -> None:
     x = mc.random_point((80, 60), 3, rng)
     sp = mc.fixed_rank_space()
     hessvec = lambda v: mc.hessian_action(samples, x, v, curvature=False)
-    precond = lambda w: mc.identity_precond(x, w)
+    precond = lambda w: mc.frobenius_metric_solve(x, w)
 
     def run(project: Optional[Callable[[mc.Cotangent], mc.Cotangent]]) -> tuple[float, float]:
         state = lanczos_start(sp, mc.gradient(samples, x), precond)
@@ -139,19 +139,21 @@ def test_rank_continuation_on_fast_decay() -> None:
         assert mc.relative_error(x, a) < 1.3 * best
 
 
-def test_conventional_trust_region_on_the_manifold() -> None:
-    """With P = I and no inner products the trust region is the conventional
-    one (M = P = I, the Frobenius ball here), solved by truncated CG with the
-    gauge projection applied to its residuals; it reaches the same fit as the
-    Lanczos path."""
-    from nicks_optimizers import trust_region_newton
+def test_cg_and_lanczos_on_the_manifold() -> None:
+    """With M = P = I (the Frobenius metric) the default solver is truncated
+    CG, with the gauge projection applied to its residuals; it reaches the
+    same fit as the reorthogonalized Lanczos solver."""
     a, samples, rng = small_problem(3, (120, 90), 4, 4.0)
-    x, summary = trust_region_newton(
-        lambda x: mc.objective(samples, x), lambda x: mc.gradient(samples, x),
-        lambda x, v: mc.hessian_action(samples, x, v), mc.identity_precond, None, None,
-        mc.zero_point((120, 90), 4, rng), space=mc.fixed_rank_space(), retract=mc.retract,
-        project_covector=mc.gauge_projection, rtol=1e-10)
-    assert summary.reason == "converged"
-    assert {r.subproblem.krylov for r in summary.iterations} == {"cg"}
+    x0 = mc.zero_point((120, 90), 4, rng)
     d = a[1]
-    assert mc.relative_error(x, a) < 1.2 * float(np.sqrt(np.sum(d[4:] ** 2) / np.sum(d ** 2)))
+    best = float(np.sqrt(np.sum(d[4:] ** 2) / np.sum(d ** 2)))
+    fits = {}
+    krylov: Literal["auto", "lanczos"]
+    for krylov in ("auto", "lanczos"):
+        x, summary = mc.complete(samples, x0, krylov=krylov)
+        assert summary.reason == "converged"
+        assert {r.subproblem.krylov for r in summary.iterations} == \
+            {"cg" if krylov == "auto" else "lanczos"}
+        assert mc.relative_error(x, a) < 1.2 * best
+        fits[krylov] = mc.relative_error(x, a)
+    assert abs(fits["auto"] - fits["lanczos"]) < 1e-6 * fits["lanczos"]

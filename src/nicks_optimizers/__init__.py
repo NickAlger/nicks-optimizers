@@ -4,7 +4,7 @@ Modules, in dependency order:
 
   spaces                    how points, vectors and covectors are represented
                             (VectorSpace records; numpy by default)
-  metrics                   inner products and norms (the geometry)
+  metrics                   the metric M, given by operators, and norms
   dense                     small dense linear algebra in coordinates
   krylov                    Krylov processes (preconditioned Lanczos and CG)
   criteria                  tests shared by inexact Newton methods
@@ -30,13 +30,12 @@ from .krylov import (
     lanczos_tridiagonal,
 )
 from .metrics import (
-    DualInnerProduct,
-    FrozenDualInnerProduct,
-    FrozenInnerProduct,
-    InnerProduct,
+    MetricApply,
+    MetricSolve,
     covector_norm,
-    euclidean_dual_inner,
-    euclidean_inner,
+    euclidean_metric_apply,
+    euclidean_metric_solve,
+    extend_metric_gram,
     vector_norm,
 )
 from .spaces import (
@@ -61,7 +60,7 @@ from .spaces import (
     numpy_space_with_reductions,
     tuple_block_space,
 )
-from .trust_region import trust_region_newton
+from .trust_region import PointOperators, trust_region_newton
 from .trust_region_diagnostics import (
     IterationInfo,
     IterationRecord,
@@ -106,13 +105,12 @@ __all__ = [
     "numpy_space_with_reductions",
     "tuple_block_space",
     # metrics
-    "DualInnerProduct",
-    "FrozenDualInnerProduct",
-    "FrozenInnerProduct",
-    "InnerProduct",
+    "MetricApply",
+    "MetricSolve",
     "covector_norm",
-    "euclidean_dual_inner",
-    "euclidean_inner",
+    "euclidean_metric_apply",
+    "euclidean_metric_solve",
+    "extend_metric_gram",
     "vector_norm",
     # dense
     "pencil_ritz",
@@ -139,6 +137,7 @@ __all__ = [
     "RunReason",
     "RunSummary",
     "KrylovMethod",
+    "PointOperators",
     "StopReason",
     "SubproblemStats",
     "format_header",

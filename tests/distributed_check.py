@@ -2,8 +2,9 @@
 
 Checks that the distributed p-Laplacian operators of examples/p_laplacian.py
 (energy, gradient, Hessian action, Jacobi preconditioner, load) agree with
-the same operators on one rank, and that the L^2 inner products are exact
-duals. Exits with status 1 on failure.
+the same operators on one rank, and that the L^2 metric operators are
+inverse to each other and symmetric across ranks. Exits with status 1 on
+failure.
 """
 
 import sys
@@ -12,7 +13,7 @@ import numpy as np
 from mpi4py import MPI
 
 import p_laplacian as pl
-from nicks_optimizers import Covector, CovectorBlock, Point, Vector, VectorBlock
+from nicks_optimizers import Covector, Point, Vector
 
 
 def main() -> int:
@@ -27,11 +28,12 @@ def main() -> int:
         e, _ = pl.manufactured_energy(loc, p, 1e-2)
         e_serial, _ = pl.manufactured_energy(serial, p, 1e-2)
         u, v = Point(u_all[loc.owned]), Vector(v_all[loc.owned])
-        hessvec, precond = pl.operators_at(loc, e, "jacobi", u)
-        parts = (pl.gradient(loc, e, u), hessvec(v), precond(Covector(np.asarray(v))), e.b)
-        hessvec_s, precond_s = pl.operators_at(serial, e_serial, "jacobi", Point(u_all))
-        references = (pl.gradient(serial, e_serial, Point(u_all)), hessvec_s(Vector(v_all)),
-                      precond_s(Covector(v_all)), e_serial.b)
+        ops = pl.operators_at(loc, e, "jacobi", u)
+        ops_s = pl.operators_at(serial, e_serial, "jacobi", Point(u_all))
+        assert ops.precond_solve is not None and ops_s.precond_solve is not None
+        parts = (pl.gradient(loc, e, u), ops.hessvec(v), ops.precond_solve(Covector(np.asarray(v))), e.b)
+        references = (pl.gradient(serial, e_serial, Point(u_all)), ops_s.hessvec(Vector(v_all)),
+                      ops_s.precond_solve(Covector(v_all)), e_serial.b)
         for part, reference in zip(parts, references):
             gathered = np.zeros(loc.n_unknowns)
             gathered[loc.owned] = part
@@ -40,12 +42,14 @@ def main() -> int:
         f, f_serial = pl.objective(loc, e, u), pl.objective(serial, e_serial, Point(u_all))
         worst = max(worst, abs(f - f_serial) / abs(f_serial))
 
-    # Exact duality of the L^2 pair: (M u, M v)_{M^{-1}} = (u, v)_M.
+    # The L^2 metric: M^{-1} M = I, and <M s, t> = <M t, s> = <M s, M^{-1} M t> across ranks.
+    space = pl.distributed_space(loc)
     s, t = Vector(u_all[loc.owned]), Vector(v_all[loc.owned])
-    Ms, Mt = Covector(loc.mass * s), Covector(loc.mass * t)
-    primal = float(pl.l2_inner(loc, VectorBlock(s[:, None]), t)[0])
-    dual = float(pl.l2_dual_inner(loc, CovectorBlock(Ms[:, None]), Mt)[0])
-    worst = max(worst, abs(primal - dual) / abs(primal))
+    Ms, Mt = pl.l2_metric_apply(loc, s), pl.l2_metric_apply(loc, t)
+    worst = max(worst, float(np.max(np.abs(pl.l2_metric_solve(loc, Ms) - s))) / float(np.max(np.abs(s))))
+    primal = space.pair(Ms, t)
+    worst = max(worst, abs(primal - space.pair(Mt, s)) / abs(primal))
+    worst = max(worst, abs(primal - space.pair(Ms, pl.l2_metric_solve(loc, Mt))) / abs(primal))
 
     ok = worst < 1e-12
     if comm.Get_rank() == 0:

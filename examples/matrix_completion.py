@@ -37,17 +37,18 @@ of the components. Each pair with U^T dU = 0 is exactly one tangent vector.
 
 Covectors. The same pairs (gU, gV), acting on tangent vectors by the same
 dot product. An ambient functional xi -> <Z, xi>_F becomes
-((I - U U^T) Z V, Z^T U). In these coordinates the Frobenius metric is M = I
-and its dual is the dot product again, so the trust region is a Frobenius
-ball of matrix changes, and P = I gives unpreconditioned Lanczos.
+((I - U U^T) Z V, Z^T U). In these coordinates the Frobenius metric is M = I:
+M^{-1} maps a canonical covector (below) to the tangent vector with the same
+components (frobenius_metric_solve). So the trust region is a Frobenius ball
+of matrix changes, and with P = M the Krylov solver is unpreconditioned.
 
 Redundancy. The components (N r + M r numbers) outnumber the dimension by
 r^2: the block U^T gU of a covector pairs to zero with every tangent vector.
 Canonical covectors have U^T gU = 0, and gauge_projection restores that. It
-is passed to the solver as project_covector, because the Lanczos recurrence
-amplifies rounding errors in the invisible block exponentially; within a few
-dozen steps they swamp the covectors and the Krylov basis leaves the tangent
-space (see nicks_optimizers.krylov). Any representation of the tangent space
+is passed to the solver as project_covector, because the Krylov recurrences
+amplify rounding errors in the invisible block (exponentially, for Lanczos);
+within a few dozen steps they swamp the covectors and the Krylov basis leaves
+the tangent space (see nicks_optimizers.krylov). Any representation of the tangent space
 with O((N + M) r) numbers is redundant in this way.
 
 Retraction. X + xi = [U, dU] [[diag(s), I], [I, 0]] [V, dV]^T has rank at
@@ -78,7 +79,9 @@ from the previous fit plus a component of size zero, avoids the second
 per degree of freedom), direct rank-8 fits from a random start or from
 X = 0 had not converged after 150 iterations and some 6000 Lanczos steps,
 with errors 20 to 40 times the best rank-8 error; rank continuation needs
-about 100 iterations and 300 Lanczos steps and comes within 15% of it.
+about 120 iterations and 300 CG steps and comes within 15% of it. (The
+Lanczos solver, krylov="lanczos", takes about 90 iterations for a similar
+number of Krylov steps and reaches the same fit.)
 
 Run:  python examples/matrix_completion.py
 """
@@ -89,9 +92,10 @@ from typing import NewType
 import numpy as np
 import numpy.typing as npt
 
+from typing import Literal
+
 from nicks_optimizers import (
     Array,
-    Coords,
     RunSummary,
     VectorSpace,
     trust_region_newton,
@@ -191,20 +195,11 @@ def fixed_rank_space() -> FixedRankSpace:
         dimension=lambda v: (v[0].shape[0] + v[1].shape[0] - v[0].shape[1]) * v[0].shape[1])
 
 
-def frobenius_inner(x: LowRank, B: TangentBlock, v: Tangent) -> Coords:
-    """<b_i, v>_F of the ambient matrices: the dot product of the components."""
-    return np.array([np.vdot(b[0], v[0]) + np.vdot(b[1], v[1]) for b in B])
-
-
-def frobenius_dual_inner(x: LowRank, B: CotangentBlock, w: Cotangent) -> Coords:
-    """The exact dual of frobenius_inner on canonical covectors (the metric is
-    the identity in these coordinates)."""
-    return np.array([np.vdot(b[0], w[0]) + np.vdot(b[1], w[1]) for b in B])
-
-
-def identity_precond(x: LowRank, w: Cotangent) -> Tangent:
-    """P = M = I: a canonical covector's components are already the tangent
-    vector it represents."""
+def frobenius_metric_solve(x: LowRank, w: Cotangent) -> Tangent:
+    """M^{-1} w for the Frobenius metric, which is the identity in these
+    coordinates: a canonical covector's components are already the tangent
+    vector it represents (U^T gU = 0 is the gauge). The optimizer passes only
+    canonical covectors, through project_covector."""
     return Tangent(w)
 
 
@@ -338,21 +333,23 @@ def derivative_check(samples: Samples, x: LowRank, rng: np.random.Generator,
 
 def complete(samples: Samples, x0: LowRank, saddle_free: bool = False, curvature: bool = True,
              project: bool = True, radius: float = 1.0, display: int = 0,
-             max_iter: int = 200, max_krylov: int = 50, rtol: float = 1e-10
-             ) -> tuple[LowRank, RunSummary]:
+             max_iter: int = 200, max_krylov: int = 50, rtol: float = 1e-10,
+             krylov: Literal["auto", "cg", "lanczos"] = "auto") -> tuple[LowRank, RunSummary]:
     """Fit a matrix of the rank of x0 to the samples, starting from x0 with
     the given trust-region radius (a Frobenius norm). curvature=False uses
     the Gauss-Newton Hessian; project=False omits project_covector (to see
-    what goes wrong without it)."""
+    what goes wrong without it). With the defaults the subproblems are
+    solved by truncated CG (P = M = I); krylov="lanczos" uses the
+    reorthogonalized Lanczos solver instead."""
     return trust_region_newton(
         lambda x: objective(samples, x),
         lambda x: gradient(samples, x),
         lambda x, v: hessian_action(samples, x, v, curvature),
-        identity_precond, frobenius_inner, frobenius_dual_inner, x0,
+        x0, metric_solve=frobenius_metric_solve,
         space=fixed_rank_space(), retract=retract,
         project_covector=gauge_projection if project else None,
-        saddle_free=saddle_free, radius=radius, display=display, max_iter=max_iter,
-        max_krylov=max_krylov, rtol=rtol)
+        saddle_free=saddle_free, krylov=krylov, radius=radius, display=display,
+        max_iter=max_iter, max_krylov=max_krylov, rtol=rtol)
 
 
 def add_zero_component(x: LowRank, rng: np.random.Generator) -> LowRank:
@@ -410,8 +407,8 @@ if __name__ == "__main__":
 
     print(f"\n=== rank continuation from X = 0 up to rank {r}; the last stage in full ===")
     stages = complete_by_rank_continuation(samples, r, rng, display=1)
-    print("\nrank  iterations  Lanczos steps  ||X - A|| / ||A||  best rank-k error")
+    print("\nrank  iterations  Krylov steps  ||X - A|| / ||A||  best rank-k error")
     for k, (x, summary) in enumerate(stages, start=1):
-        lanczos = sum(rec.subproblem.krylov_steps for rec in summary.iterations)
-        print(f"{k:4d}  {len(summary.iterations):10d}  {lanczos:13d}  {relative_error(x, a):17.2e}"
+        steps = sum(rec.subproblem.krylov_steps for rec in summary.iterations)
+        print(f"{k:4d}  {len(summary.iterations):10d}  {steps:12d}  {relative_error(x, a):17.2e}"
               f"  {best_error(k):17.2e}")

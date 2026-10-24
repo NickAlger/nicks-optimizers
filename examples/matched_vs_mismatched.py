@@ -14,9 +14,7 @@ Run:  python examples/matched_vs_mismatched.py
 
 import numpy as np
 
-from nicks_optimizers import (
-    Coords, Covector, CovectorBlock, Vector, VectorBlock, solve_tr_subproblem, numpy_space,
-)
+from nicks_optimizers import Covector, Vector, numpy_space, solve_tr_subproblem
 
 
 def random_spd(n: int, cond: float, rng: np.random.Generator) -> np.ndarray:
@@ -26,15 +24,14 @@ def random_spd(n: int, cond: float, rng: np.random.Generator) -> np.ndarray:
 
 def model_value(H: np.ndarray, P: np.ndarray, M: np.ndarray, g: np.ndarray, radius: float,
                 k: int, resid_tol: float = 0.0, stall_tol: float = 0.0) -> tuple[float, int]:
-    def ball_inner(U: VectorBlock, v: Vector) -> Coords:
-        return U.T @ (M @ v)
-
-    def ball_dual_inner(Psi: CovectorBlock, phi: Covector) -> Coords:
-        return Psi.T @ np.linalg.solve(M, phi)
-
+    """Lanczos model value and step count. With M = P only M^{-1} is passed
+    (the matched path); otherwise P^{-1} as the preconditioner and M too."""
+    separate = {} if M is P else {
+        "precond_solve": lambda w: Vector(np.linalg.solve(P, w)),
+        "metric_apply": lambda v: Covector(M @ v)}
     _, stats = solve_tr_subproblem(
-        numpy_space, Covector(g), lambda v: Covector(H @ v), lambda w: Vector(np.linalg.solve(P, w)),
-        ball_inner, ball_dual_inner, radius, resid_tol, k, stall_tol=stall_tol)
+        numpy_space, Covector(g), lambda v: Covector(H @ v), lambda w: Vector(np.linalg.solve(M, w)),
+        radius, resid_tol, k, stall_tol=stall_tol, **separate)  # type: ignore[arg-type]
     return stats.model_value, stats.krylov_steps
 
 

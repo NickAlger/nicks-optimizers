@@ -20,7 +20,7 @@ this a test problem for escaping saddles, with or without the saddle-free
 model.
 
 Discretization and distribution are those of p_laplacian.py: linear finite
-elements on the graded disk mesh, slabs of nodes per rank, the L^2 ball of
+elements on the graded disk mesh, slabs of nodes per rank, the L^2 metric of
 the lumped mass matrix, and block Jacobi multigrid on the gradient part of
 the Hessian (A is regularized with a small eps, which also keeps that part
 positive definite). B uses the lumped mass, B(u) = sum_i m_i |u_i|^p, and
@@ -43,7 +43,6 @@ import argparse
 import json
 import time
 from dataclasses import dataclass
-from typing import Callable
 
 import numpy as np
 from mpi4py import MPI
@@ -51,7 +50,7 @@ from scipy.integrate import solve_ivp
 from scipy.optimize import brentq
 
 import p_laplacian as pl
-from nicks_optimizers import Array, Covector, Point, RunSummary, Vector, trust_region_newton
+from nicks_optimizers import Array, Covector, Point, PointOperators, RunSummary, Vector, trust_region_newton
 
 
 # --- the reference value ------------------------------------------------------------
@@ -108,10 +107,11 @@ def gradient(loc: pl.Local, e: Eigen, u: Point) -> Covector:
 
 
 def operators_at(loc: pl.Local, e: Eigen, precond: str, u: Point
-                 ) -> tuple[Callable[[Vector], Covector], Callable[[Covector], Vector]]:
+                 ) -> PointOperators[Vector, Covector]:
     """H(u) (see the module docstring) and P(u)^{-1}: block Jacobi multigrid
     (or the diagonal) of the gradient part H_A / p, which is positive
-    definite."""
+    definite. The metric (lumped mass) is passed to trust_region_newton
+    separately."""
     hess_A, g, a, c = pl.hessian_at(loc, gradient_energy(e), u)
     B, z = mass_power(loc, e, u)
     diag = (e.p - 1.0) * loc.mass * np.abs(u) ** (e.p - 2.0) / B
@@ -120,11 +120,7 @@ def operators_at(loc: pl.Local, e: Eigen, precond: str, u: Point
         zv = float(pl.allreduce(loc, np.array([z @ v]))[0])
         return Covector(hess_A(v) - diag * v + (e.p * zv / B ** 2) * z)
 
-    block = pl.owned_block(loc, g, a, c)
-    if precond == "jacobi":
-        d = block.diagonal()
-        return hessvec, lambda w: Vector(w / d)
-    return hessvec, pl.multigrid_cycle(block)
+    return PointOperators(hessvec=hessvec, precond_solve=pl.preconditioner_at(loc, precond, g, a, c))
 
 
 def eigenvalue(loc: pl.Local, e: Eigen, u: Array) -> float:
@@ -163,11 +159,11 @@ def solve(loc: pl.Local, e: Eigen, u0: Point, precond: str = "amg", saddle_free:
     return trust_region_newton(
         lambda u: objective(loc, e, u),
         lambda u: gradient(loc, e, u),
-        None, None,
-        lambda u, U, v: pl.l2_inner(loc, U, v),
-        lambda u, Psi, phi: pl.l2_dual_inner(loc, Psi, phi),
-        u0, space=pl.distributed_space(loc),
+        None, u0,
         operators_at=lambda u: operators_at(loc, e, precond, u),
+        metric_solve=lambda u, w: pl.l2_metric_solve(loc, w),
+        metric_apply=lambda u, v: pl.l2_metric_apply(loc, v),
+        space=pl.distributed_space(loc),
         saddle_free=saddle_free, rtol=1e-10, max_iter=max_iter, max_krylov=max_krylov,
         display=display, print_fn=print if root else (lambda line: None))
 

@@ -3,24 +3,18 @@ display output, and exact continuation from a ResumeState."""
 
 import dataclasses
 import json
-from typing import Callable, cast
+from typing import Callable, Literal, cast
 
 import numpy as np
 
 from nicks_optimizers import (
-    Coords,
     Covector,
-    CovectorBlock,
     IterationInfo,
     Point,
     ResumeState,
     RunSummary,
     Vector,
-    VectorBlock,
-    euclidean_dual_inner,
-    euclidean_inner,
     merge_summaries,
-    numpy_space,
     trust_region_newton,
 )
 from helpers import (
@@ -33,51 +27,64 @@ from problems import (
     rosen_fun,
     rosen_grad,
     rosen_hessvec,
-    smoothing_dual_inner,
-    smoothing_inner,
-    weighted_dual_inner,
-    weighted_inner,
+    smoothing_metric_apply,
+    smoothing_metric_solve,
+    weighted_metric_apply,
+    weighted_metric_solve,
 )
 
 
 def check_work_counts() -> bool:
-    print("RunSummary work counts equal the calls actually made (counting wrappers), saddle-free run")
-    counts = {"fun": 0, "grad": 0, "hessvec": 0, "precond": 0, "inner": 0, "dual": 0}
+    print("RunSummary work counts equal the calls actually made (counting wrappers)")
+    ok = True
+    # (label, krylov, saddle_free, separate preconditioner, convergence norm)
+    configurations: list[tuple[str, Literal["auto", "lanczos"], bool, bool,
+                               Literal["metric", "preconditioner"]]] = [
+        ("P = M, CG", "auto", False, False, "metric"),
+        ("P = M, Lanczos", "lanczos", False, False, "metric"),
+        ("separate P, saddle-free", "auto", True, True, "metric"),
+        ("separate P, preconditioner norm", "auto", False, True, "preconditioner"),
+    ]
+    for label, krylov, saddle_free, separate, convergence_norm in configurations:
+        counts = {"fun": 0, "grad": 0, "hessvec": 0, "metric_solve": 0, "precond": 0, "metric_apply": 0}
 
-    def fun(x: Point) -> float:
-        counts["fun"] += 1
-        return rosen_fun(x)
+        def fun(x: Point) -> float:
+            counts["fun"] += 1
+            return rosen_fun(x)
 
-    def grad(x: Point) -> Covector:
-        counts["grad"] += 1
-        return rosen_grad(x)
+        def grad(x: Point) -> Covector:
+            counts["grad"] += 1
+            return rosen_grad(x)
 
-    def hessvec(x: Point, v: Vector) -> Covector:
-        counts["hessvec"] += 1
-        return rosen_hessvec(x, v)
+        def hessvec(x: Point, v: Vector) -> Covector:
+            counts["hessvec"] += 1
+            return rosen_hessvec(x, v)
 
-    def precond_solve(x: Point, w: Covector) -> Vector:
-        counts["precond"] += 1
-        return jacobi_precond_solve(x, w)
+        def metric_solve(x: Point, w: Covector) -> Vector:
+            counts["metric_solve"] += 1
+            return smoothing_metric_solve(x, w)
 
-    def inner(x: Point, U: VectorBlock, v: Vector) -> Coords:
-        counts["inner"] += 1
-        return smoothing_inner(x, U, v)
+        def precond_solve(x: Point, w: Covector) -> Vector:
+            counts["precond"] += 1
+            return jacobi_precond_solve(x, w)
 
-    def dual_inner(x: Point, Psi: CovectorBlock, phi: Covector) -> Coords:
-        counts["dual"] += 1
-        return smoothing_dual_inner(x, Psi, phi)
+        def metric_apply(x: Point, v: Vector) -> Covector:
+            counts["metric_apply"] += 1
+            return smoothing_metric_apply(x, v)
 
-    x, summary = trust_region_newton(fun, grad, hessvec, precond_solve, inner, dual_inner,
-                                     Point(np.tile([-1.2, 1.0], 10)), saddle_free=True, max_iter=1000)
-    reported = {"fun": summary.fun_calls, "grad": summary.grad_calls, "hessvec": summary.hessvec_calls,
-                "precond": summary.precond_calls, "inner": summary.inner_calls,
-                "dual": summary.dual_inner_calls}
-    print(f"  actual calls:   {counts}")
-    print(f"  reported calls: {reported}")
-    ok = report("counters that disagree", float(sum(reported[key] != counts[key] for key in counts)), 0.0)
-    ok &= report("accepted_steps agrees with the records",
-                 float(abs(summary.accepted_steps - sum(r.accepted for r in summary.iterations))), 0.0)
+        x, summary = trust_region_newton(
+            fun, grad, hessvec, Point(np.tile([-1.2, 1.0], 10)), metric_solve=metric_solve,
+            precond_solve=precond_solve if separate else None,
+            metric_apply=metric_apply if separate else None, krylov=krylov,
+            saddle_free=saddle_free, convergence_norm=convergence_norm, max_iter=1000)
+        reported = {"fun": summary.fun_calls, "grad": summary.grad_calls,
+                    "hessvec": summary.hessvec_calls, "metric_solve": summary.metric_solve_calls,
+                    "precond": summary.precond_solve_calls, "metric_apply": summary.metric_apply_calls}
+        print(f"  {label}: {summary.reason}, actual calls {counts}")
+        ok &= report(f"{label}: counters that disagree",
+                     float(sum(reported[key] != counts[key] for key in counts)), 0.0)
+        ok &= report(f"{label}: accepted_steps agrees with the records",
+                     float(abs(summary.accepted_steps - sum(r.accepted for r in summary.iterations))), 0.0)
     return ok
 
 
@@ -86,8 +93,8 @@ def check_stopping_reasons() -> bool:
     x0 = Point(np.tile([-1.2, 1.0], 10))
 
     def run(max_iter: int = 500, radius_min: float = 1e-14) -> RunSummary:
-        return trust_region_newton(rosen_fun, rosen_grad, rosen_hessvec, jacobi_precond_solve,
-                                   euclidean_inner, euclidean_dual_inner, x0,
+        return trust_region_newton(rosen_fun, rosen_grad, rosen_hessvec, x0,
+                                   metric_solve=jacobi_precond_solve,
                                    max_iter=max_iter, radius_min=radius_min)[1]
 
     cases = [("converged", run(), None), ("max_iter", run(max_iter=3), 3),
@@ -109,8 +116,8 @@ def check_callback() -> bool:
     def keep(x: Point, info: IterationInfo[Vector, Covector]) -> None:
         seen.append((x, info))
 
-    x, summary = trust_region_newton(rosen_fun, rosen_grad, rosen_hessvec, jacobi_precond_solve,
-                                     euclidean_inner, euclidean_dual_inner, x0, callback=keep)
+    x, summary = trust_region_newton(rosen_fun, rosen_grad, rosen_hessvec, x0,
+                                     metric_solve=jacobi_precond_solve, callback=keep)
     ok = report("one call per iteration (count difference)",
                 float(abs(len(seen) - len(summary.iterations))), 0.0)
     ok &= report("last x passed is the returned x (0 if identical object)",
@@ -127,8 +134,8 @@ def check_callback() -> bool:
         prev = xk
     ok &= report("x = retract(previous x, step) when accepted, unchanged when rejected", step_err, 0.0)
 
-    _, stopped = trust_region_newton(rosen_fun, rosen_grad, rosen_hessvec, jacobi_precond_solve,
-                                     euclidean_inner, euclidean_dual_inner, x0,
+    _, stopped = trust_region_newton(rosen_fun, rosen_grad, rosen_hessvec, x0,
+                                     metric_solve=jacobi_precond_solve,
                                      callback=lambda x, info: info.record.iteration >= 3)
     early = stopped.reason == "callback" and len(stopped.iterations) == 4
     print(f"  [{'PASS' if early else 'FAIL'}] returning True stops the run: reason = "
@@ -142,8 +149,8 @@ def check_display_output() -> bool:
     ok = True
     for level in (0, 1, 2):
         lines: list[str] = []
-        _, summary = trust_region_newton(rosen_fun, rosen_grad, rosen_hessvec, jacobi_precond_solve,
-                                         euclidean_inner, euclidean_dual_inner, x0, display=level,
+        _, summary = trust_region_newton(rosen_fun, rosen_grad, rosen_hessvec, x0,
+                                         metric_solve=jacobi_precond_solve, display=level,
                                          print_fn=lines.append, max_iter=45)
         expected = expected_display(summary, level) if level > 0 else []
         same = lines == expected
@@ -155,16 +162,18 @@ def check_display_output() -> bool:
 
 def check_resume() -> bool:
     print("Resuming: a run stopped mid-way and resumed from x + ResumeState (+ g0) continues exactly")
-    print("  (saddle-free, x-dependent ball; comparison is exact, every record field but the wall clock)")
-    args = (rosen_fun, rosen_grad, rosen_hessvec, jacobi_precond_solve,
-            weighted_inner, weighted_dual_inner)
+    print("  (saddle-free, x-dependent metric; comparison is exact, every record field but the wall clock)")
     x0 = Point(np.tile([-1.2, 1.0], 25))
 
     def run(x_start: Point, max_iter: int = 500,
             callback: Callable[[Point, IterationInfo[Vector, Covector]], bool] | None = None,
             resume: ResumeState | None = None, g0: Covector | None = None) -> tuple[Point, RunSummary]:
-        return trust_region_newton(*args, x_start, saddle_free=True, max_krylov=100,
-                                   max_iter=max_iter, callback=callback, resume=resume, g0=g0)
+        return trust_region_newton(rosen_fun, rosen_grad, rosen_hessvec, x_start,
+                                   metric_solve=weighted_metric_solve,
+                                   metric_apply=weighted_metric_apply,
+                                   precond_solve=jacobi_precond_solve, saddle_free=True,
+                                   max_krylov=100, max_iter=max_iter, callback=callback,
+                                   resume=resume, g0=g0)
 
     x_full, full = run(x0)
 
@@ -234,8 +243,7 @@ def test_records_hold_python_scalars() -> None:
     floats and bools (so they serialize, e.g. to JSON)."""
     x0 = Point(np.tile([-1.2, 1.0], 5))
     _, summary = trust_region_newton(lambda x: np.float64(rosen_fun(x)), rosen_grad, rosen_hessvec,
-                                     jacobi_precond_solve, euclidean_inner, euclidean_dual_inner, x0,
-                                     max_iter=5)
+                                     x0, metric_solve=jacobi_precond_solve, max_iter=5)
     for record in summary.iterations:
         assert type(record.accepted) is bool
         assert all(type(getattr(record, name)) is float

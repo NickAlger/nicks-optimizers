@@ -37,10 +37,12 @@ class IterationRecord:
     """What happened in one outer iteration, which started from the iterate x_k.
 
       iteration          k
-      f, gnorm           f(x_k) and ||g(x_k)||_{M^{-1}}
+      f, gnorm           f(x_k) and ||g(x_k)|| in the convergence norm
+                         (||g||_{M^{-1}} by default, see trust_region_newton)
       gnorm_ratio        ||g(x_k)|| / gnorm0
       radius, new_radius trust-region radius used for this step, and after the update
-      forcing            relative Krylov tolerance used (resid_tol = forcing * gnorm)
+      forcing            relative Krylov tolerance used
+                         (resid_tol = forcing * ||g(x_k)||_{M^{-1}})
       predicted          model decrease m(0) - m(s) for the model that was minimized
       actual             f(x_k) - f(retract(x_k, s))
       rho                reduction ratio (with the rounding safeguard)
@@ -119,7 +121,9 @@ class RunSummary:
       iterations    one IterationRecord per iteration
       f, gnorm      at the returned point; gnorm0 is the reference norm
       accepted_steps
-      *_calls       work done over the whole run
+      *_calls       work done over the whole run: calls of fun, grad, and of
+                    each linear operator (metric_solve also counts its use as
+                    the preconditioner when P = M)
       elapsed       seconds
       resume        the ResumeState at the returned point, for continuing the
                     run (e.g. after max_iter) with resume=summary.resume
@@ -133,9 +137,9 @@ class RunSummary:
     fun_calls: int
     grad_calls: int
     hessvec_calls: int
-    precond_calls: int
-    inner_calls: int
-    dual_inner_calls: int
+    metric_solve_calls: int
+    precond_solve_calls: int
+    metric_apply_calls: int
     elapsed: float
     resume: ResumeState
 
@@ -152,9 +156,9 @@ def merge_summaries(first: RunSummary, second: RunSummary) -> RunSummary:
         fun_calls=first.fun_calls + second.fun_calls,
         grad_calls=first.grad_calls + second.grad_calls,
         hessvec_calls=first.hessvec_calls + second.hessvec_calls,
-        precond_calls=first.precond_calls + second.precond_calls,
-        inner_calls=first.inner_calls + second.inner_calls,
-        dual_inner_calls=first.dual_inner_calls + second.dual_inner_calls,
+        metric_solve_calls=first.metric_solve_calls + second.metric_solve_calls,
+        precond_solve_calls=first.precond_solve_calls + second.precond_solve_calls,
+        metric_apply_calls=first.metric_apply_calls + second.metric_apply_calls,
         elapsed=first.elapsed + second.elapsed, resume=second.resume)
 
 
@@ -168,10 +172,10 @@ def history_array(summary: RunSummary) -> Array:
 
 
 def build_summary(reason: RunReason, records: list[IterationRecord], f: float, gnorm: float,
-                  gnorm0: float, fun_calls: int, grad_calls: int, outer_dual_calls: int,
-                  elapsed: float, resume: ResumeState, outer_precond_calls: int = 0) -> RunSummary:
+                  gnorm0: float, fun_calls: int, grad_calls: int, outer_metric_solve_calls: int,
+                  outer_precond_solve_calls: int, elapsed: float, resume: ResumeState) -> RunSummary:
     """Assemble the RunSummary, adding up the work recorded per iteration.
-    The outer_* counts are calls made outside the subproblems (gradient
+    The outer_* counts are solves made outside the subproblems (gradient
     norms)."""
     subs = [r.subproblem for r in records]
     return RunSummary(
@@ -179,9 +183,9 @@ def build_summary(reason: RunReason, records: list[IterationRecord], f: float, g
         accepted_steps=sum(r.accepted for r in records),
         fun_calls=fun_calls, grad_calls=grad_calls,
         hessvec_calls=sum(s.hessvec_calls for s in subs),
-        precond_calls=outer_precond_calls + sum(s.precond_calls for s in subs),
-        inner_calls=sum(s.inner_calls for s in subs),
-        dual_inner_calls=outer_dual_calls + sum(s.dual_inner_calls for s in subs),
+        metric_solve_calls=outer_metric_solve_calls + sum(s.metric_solve_calls for s in subs),
+        precond_solve_calls=outer_precond_solve_calls + sum(s.precond_solve_calls for s in subs),
+        metric_apply_calls=sum(s.metric_apply_calls for s in subs),
         elapsed=elapsed, resume=resume)
 
 
@@ -207,7 +211,7 @@ def format_header() -> str:
 def format_row(record: IterationRecord) -> str:
     """One line per iteration. |s|/r = 1.00 means the step reached the
     trust-region boundary; pred and actual are the model and true decreases;
-    k and stop describe the Lanczos solve; neg counts negative M-Ritz values."""
+    k and stop describe the Krylov solve; neg counts negative curvature values."""
     s = record.subproblem
     return _ROW.format(
         it=record.iteration, f=f"{record.f:.6e}", g=f"{record.gnorm:.1e}",
@@ -226,7 +230,7 @@ def format_krylov_trace(stats: SubproblemStats) -> str:
                                              stats.trace_lam, stats.trace_negative), start=1):
         lines.append(f"{pad}{j:>4}  {m:11.4e}  {r:9.2e}  {lam:9.2e}  {neg:3d}")
     smallest = ("smallest M-Ritz value" if stats.krylov == "lanczos"
-                else "smallest curvature <Hp, p> / ||p||_P^2")
+                else "smallest curvature <Hp, p> / ||p||_M^2")
     last = (f"{pad}stop: {stats.stop_reason} ({stats.krylov}, resid tol {stats.resid_tol:.2e}), "
             f"{smallest} {stats.theta_min:.2e}")
     if stats.true_model_value != stats.model_value:
@@ -244,9 +248,9 @@ def format_summary(summary: RunSummary) -> str:
         f"{summary.elapsed:.2f} s",
         f"  f = {summary.f:.6e}   |g| = {summary.gnorm:.2e}   |g|/|g0| = {ratio:.2e}",
         f"  work: {summary.hessvec_calls} Hessian-vector products, "
-        f"{summary.precond_calls} preconditioner solves, {summary.inner_calls} ball_inner "
-        f"and {summary.dual_inner_calls} ball_dual_inner calls, {summary.fun_calls} objective "
-        f"and {summary.grad_calls} gradient evaluations",
+        f"{summary.metric_solve_calls} metric solves, {summary.precond_solve_calls} "
+        f"preconditioner solves, {summary.metric_apply_calls} metric products, "
+        f"{summary.fun_calls} objective and {summary.grad_calls} gradient evaluations",
     ])
 
 

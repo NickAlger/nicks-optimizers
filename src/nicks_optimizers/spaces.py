@@ -18,7 +18,7 @@ supply their own record:
 check_space(space, ...) verifies a record's internal consistency on sample
 vectors. Vector and covector operations are separate fields on purpose, so a
 space spells out which kind of object every function acts on. A space says
-nothing about geometry; inner products live in metrics.
+nothing about geometry: the metric is given by operators (see metrics).
 
 Types
 -----
@@ -200,7 +200,9 @@ def numpy_space_with_reductions(allreduce: Callable[[Coords], Coords]) -> NumpyS
     are completed with allreduce, which must return the elementwise sum of its
     argument over all processes, identical on every process. Every decision
     the method makes comes from reduced numbers, so the processes stay in
-    lockstep. Your inner products must do their own reduction.
+    lockstep. Operators (metric_solve, precond_solve, hessvec) act on the
+    local arrays, with whatever neighbor communication they need; the
+    pairings that turn their results into numbers are reduced here.
     """
     def pair(w: Covector, v: Vector) -> float:
         return float(allreduce(np.array([float(w @ v)]))[0])
@@ -231,8 +233,7 @@ def tuple_block_space(*, scale_vector: Callable[[float, VectorT], VectorT],
     combine_* accumulate with scale and axpy. That is correct for any
     representation; for distributed objects it costs one reduction per block
     member, so override pair_block (and combine_*) with dataclasses.replace
-    when a batched version is available. Your inner products then receive
-    tuples as their block argument.
+    when a batched version is available.
     """
     def pair_block(B: tuple[VectorT, ...], w: CovectorT) -> Coords:
         return np.array([pair(w, b) for b in B], dtype=float)

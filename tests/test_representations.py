@@ -8,6 +8,7 @@ import numpy as np
 
 from nicks_optimizers import (
     Covector,
+    NumpySpace,
     Point,
     RunSummary,
     Vector,
@@ -23,6 +24,7 @@ from helpers import (
 )
 from problems import (
     PAIR_SPACE,
+    CoupledProblem,
     coupled_problem,
     jacobi_precond_solve,
     join_pair,
@@ -31,13 +33,13 @@ from problems import (
     pa_rosen_fun,
     pa_rosen_grad,
     pa_rosen_hessvec,
-    pa_smoothing_dual_inner,
-    pa_smoothing_inner,
+    pa_smoothing_metric_apply,
+    pa_smoothing_metric_solve,
     rosen_fun,
     rosen_grad,
     rosen_hessvec,
-    smoothing_dual_inner,
-    smoothing_inner,
+    smoothing_metric_apply,
+    smoothing_metric_solve,
     split_pair,
 )
 
@@ -61,23 +63,35 @@ def check_space_consistency(rng: Rng) -> bool:
 
 
 def check_composite_representation() -> bool:
-    print("Composite representation (each vector a pair of arrays) vs numpy, Rosenbrock n=50, smoothing ball")
+    print("Composite representation (each vector a pair of arrays) vs numpy, Rosenbrock n=50, smoothing metric")
     x0 = np.tile([-1.2, 1.0], 25)
-    x_np, s_np = trust_region_newton(
-        rosen_fun, rosen_grad, rosen_hessvec, jacobi_precond_solve,
-        smoothing_inner, smoothing_dual_inner, Point(x0), gtol=1e-8, max_iter=1000, max_krylov=100)
-    x_pa, s_pa = trust_region_newton(
-        pa_rosen_fun, pa_rosen_grad, pa_rosen_hessvec,
-        pa_jacobi_precond_solve, pa_smoothing_inner, pa_smoothing_dual_inner, split_pair(x0),
-        space=PAIR_SPACE, gtol=1e-8, max_iter=1000, max_krylov=100)
-    h_np, h_pa = history_array(s_np), history_array(s_pa)
-    print(f"  numpy: {len(h_np)} its, {int(h_np[:, 5].sum())} Hv;  pair of arrays: "
-          f"{len(h_pa)} its, {int(h_pa[:, 5].sum())} Hv")
-    same_path = len(h_np) == len(h_pa) and np.allclose(h_np[:, 1:4], h_pa[:, 1:4], rtol=1e-8, atol=0.0)
-    print(f"  [{'PASS' if same_path else 'FAIL'}] same iteration path (f, |g|, radius per iteration "
-          f"agree to 1e-8)")
-    ok = report("same final point", float(np.max(np.abs(join_pair(x_pa) - x_np))), 1e-10)
-    return ok and same_path
+    ok = True
+    for label, separate in (("separate Jacobi P, Lanczos", True), ("P = M, CG", False)):
+        np_ops: dict[str, object] = {"metric_solve": smoothing_metric_solve}
+        pa_ops: dict[str, object] = {"metric_solve": pa_smoothing_metric_solve}
+        if separate:
+            np_ops.update(metric_apply=smoothing_metric_apply, precond_solve=jacobi_precond_solve)
+            pa_ops.update(metric_apply=pa_smoothing_metric_apply, precond_solve=pa_jacobi_precond_solve)
+        x_np, s_np = trust_region_newton(
+            rosen_fun, rosen_grad, rosen_hessvec, Point(x0), gtol=1e-8, rtol=0.0, max_iter=1000,
+            max_krylov=100, **np_ops)  # type: ignore[arg-type]
+        x_pa, s_pa = trust_region_newton(
+            pa_rosen_fun, pa_rosen_grad, pa_rosen_hessvec, split_pair(x0), space=PAIR_SPACE,
+            gtol=1e-8, rtol=0.0, max_iter=1000, max_krylov=100, **pa_ops)  # type: ignore[arg-type]
+        h_np, h_pa = history_array(s_np), history_array(s_pa)
+        print(f"  {label}: numpy: {len(h_np)} its, {int(h_np[:, 5].sum())} Hv;  pair of arrays: "
+              f"{len(h_pa)} its, {int(h_pa[:, 5].sum())} Hv")
+        # Pairings of pairs add two partial sums, so rounding differs from numpy. Lanczos (with
+        # reorthogonalization) keeps the paths together; along CG's path the differences grow,
+        # so only its first 60 iterations are compared.
+        m = len(h_np) if separate else 60
+        same_path = (len(h_np) == len(h_pa) or not separate) and \
+            np.allclose(h_np[:m, 1:4], h_pa[:m, 1:4], rtol=1e-8, atol=0.0)
+        print(f"  [{'PASS' if same_path else 'FAIL'}] {label}: same iteration path (f, |g|, radius "
+              f"agree to 1e-8 for {m} iterations)")
+        ok &= same_path and s_np.reason == "converged"
+        ok &= report(f"{label}: same final point", float(np.max(np.abs(join_pair(x_pa) - x_np))), 1e-10)
+    return ok
 
 
 def check_distributed_lockstep(rng: Rng) -> bool:
@@ -87,8 +101,14 @@ def check_distributed_lockstep(rng: Rng) -> bool:
     x0 = 0.1 * rng.standard_normal(n)
     pieces = np.array_split(np.arange(n), n_ranks)          # uneven: 14, 13, 13
 
+    def solve(problem: CoupledProblem, x_start: Point, space: NumpySpace) -> tuple[Point, RunSummary]:
+        fun, grad, hessvec, precond_solve, metric_solve, metric_apply = problem
+        return trust_region_newton(fun, grad, hessvec, x_start, metric_solve=metric_solve,
+                                   metric_apply=metric_apply, precond_solve=precond_solve,
+                                   space=space, gtol=1e-10, rtol=0.0, max_iter=200)
+
     serial = coupled_problem(b, d, lambda a: a)
-    x_serial, s_serial = trust_region_newton(*serial, Point(x0.copy()), gtol=1e-10, max_iter=200)
+    x_serial, s_serial = solve(serial, Point(x0.copy()), space=numpy_space)
     h_serial = history_array(s_serial)
 
     for_rank = make_thread_allreduce(n_ranks)
@@ -100,9 +120,8 @@ def check_distributed_lockstep(rng: Rng) -> bool:
             allreduce = for_rank(rank)
             idx = pieces[rank]
             local = coupled_problem(b[idx], d[idx], allreduce)
-            results[rank] = trust_region_newton(
-                *local, Point(x0[idx].copy()), space=numpy_space_with_reductions(allreduce),
-                gtol=1e-10, max_iter=200)
+            results[rank] = solve(local, Point(x0[idx].copy()),
+                                  space=numpy_space_with_reductions(allreduce))
         except BaseException as exc:      # surfaced below, so a failure cannot hang the test
             errors.append(exc)
 

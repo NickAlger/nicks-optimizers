@@ -19,32 +19,37 @@ gradient part of J and u* a smooth function vanishing on the circle. Then the
 nodal values of u* minimize the discrete J exactly, and the error of the
 optimizer can be measured down to rounding, free of discretization error.
 
-Trust region and preconditioner. The ball is the L^2 ball of the lumped mass
-matrix M, (u, v)_M = sum_i m_i u_i v_i, mesh-independent in L^2. The
-preconditioner P is different: block Jacobi over the MPI ranks, each block
-being the rank's diagonal block of the Hessian at the current point, applied
-by one algebraic multigrid V-cycle (pyamg). The Hessian and the multigrid
-hierarchy are built once per iterate through operators_at. With
---precond jacobi, P is the diagonal of the Hessian instead, which does not
-depend on the partition, so runs on any number of ranks follow the same
-iterates (up to the order of floating-point sums).
+Metric and preconditioner. The metric M, which shapes the trust region and
+measures the gradient in the stopping test, is the lumped mass matrix,
+||u||_M^2 = sum_i m_i u_i^2: the L^2 norm, mesh-independent. It is given by
+metric_solve (w / m) and metric_apply (m v). The preconditioner P is
+different: block Jacobi over the MPI ranks, each block being the rank's
+diagonal block of the Hessian at the current point, applied by one algebraic
+multigrid V-cycle (pyamg). The Hessian and the multigrid hierarchy are built
+once per iterate through operators_at. With --precond jacobi, P is the
+diagonal of the Hessian instead, which does not depend on the partition, so
+runs on any number of ranks follow the same iterates (up to the order of
+floating-point sums). With --metric precond, the preconditioner is the
+metric (M = P): the conventional trust region, solved by truncated CG, where
+only P^{-1} is ever applied. --precond laplace takes a fixed P, multigrid for
+the stiffness matrix.
 
 Distribution. The unknowns are the interior nodes, split into vertical slabs
 by x coordinate, one slab per rank; a vector is the array of a rank's own
 nodal values. Each rank evaluates every element touching its nodes, so it
 needs the values of a layer of ghost nodes owned by its neighbors, received
 by a halo exchange, and it computes complete gradient and Hessian rows for
-its own nodes without sending anything back. Reductions (pairings, inner
-products, the energy) are completed with MPI Allreduce, so all ranks see the
+its own nodes without sending anything back. Reductions (pairings and the
+energy) are completed with MPI Allreduce, so all ranks see the
 same numbers and the optimizer runs in lockstep. For simplicity every rank
 builds the whole mesh before keeping its part.
 
 What to expect (from u = 0, eps = 1e-3, 2 ranks, 20/40/80 rings, i.e. about
-2k/8k/32k unknowns). Every run reaches the exact discrete solution to 1e-9
-or better.
+2k/8k/32k unknowns, stopping at ||g||_{M^{-1}} <= 1e-10 ||g(0)||_{M^{-1}}).
+Every run reaches the exact discrete solution to 3e-9 or better.
 
   p = 1.5   9 / 9 / 9 Newton iterations
-  p = 3     16 / 17 / 23
+  p = 3     16 / 18 / 23
   p = 5     43 / 89 / 120
 
 Near u = 0 the Hessian of the p = 5 energy is eps^3 times a Laplacian, so
@@ -75,14 +80,12 @@ from scipy.spatial import Delaunay
 
 from nicks_optimizers import (
     Array,
-    Coords,
     Covector,
-    CovectorBlock,
     NumpySpace,
     Point,
+    PointOperators,
     RunSummary,
     Vector,
-    VectorBlock,
     numpy_space_with_reductions,
     trust_region_newton,
 )
@@ -90,7 +93,7 @@ from nicks_optimizers import (
 
 IntArray = npt.NDArray[np.intp]
 BoolArray = npt.NDArray[np.bool_]
-Operators = tuple[Callable[[Vector], Covector], Callable[[Covector], Vector]]
+Operators = PointOperators[Vector, Covector]
 
 
 # --- mesh --------------------------------------------------------------------
@@ -330,37 +333,50 @@ def laplacian_cycle(loc: Local) -> Callable[[Covector], Vector]:
     return multigrid_cycle(owned_block(loc, np.zeros((n, 2)), np.ones(n), np.zeros(n)))
 
 
-def operators_at(loc: Local, e: Energy, precond: str, u: Point,
-                 fixed: Optional[Callable[[Covector], Vector]] = None) -> Operators:
-    """H(u) and P(u)^{-1}, set up once per point: the Hessian's element data,
-    and for block Jacobi the owned block and its multigrid hierarchy. With
-    precond == "laplace", P is the fixed operator passed in."""
-    hessvec, g, a, c = hessian_at(loc, e, u)
+def preconditioner_at(loc: Local, precond: str, g: Array, a: Array, c: Array,
+                      fixed: Optional[Callable[[Covector], Vector]] = None
+                      ) -> Callable[[Covector], Vector]:
+    """P^{-1}: block Jacobi multigrid of the Hessian with element data
+    (g, a, c), its diagonal ("jacobi"), or the fixed operator ("laplace")."""
     if precond == "laplace":
         assert fixed is not None
-        return hessvec, fixed
+        return fixed
     A = owned_block(loc, g, a, c)
     if precond == "jacobi":
         diagonal = A.diagonal()
-        return hessvec, lambda w: Vector(w / diagonal)
-    return hessvec, multigrid_cycle(A)
+        return lambda w: Vector(w / diagonal)
+    return multigrid_cycle(A)
 
 
-# --- the space and the L^2 ball --------------------------------------------------------
+def operators_at(loc: Local, e: Energy, precond: str, u: Point, metric: str = "l2",
+                 fixed: Optional[Callable[[Covector], Vector]] = None) -> Operators:
+    """H(u) and P(u)^{-1}, set up once per point: the Hessian's element data,
+    and for block Jacobi the owned block and its multigrid hierarchy. P is
+    returned as the preconditioner (metric "l2": the lumped mass metric comes
+    from the keyword arguments) or as the metric itself (metric "precond",
+    M = P)."""
+    hessvec, g, a, c = hessian_at(loc, e, u)
+    P_solve = preconditioner_at(loc, precond, g, a, c, fixed)
+    if metric == "precond":
+        return PointOperators(hessvec=hessvec, metric_solve=P_solve)
+    return PointOperators(hessvec=hessvec, precond_solve=P_solve)
+
+
+# --- the space and the L^2 metric --------------------------------------------------------
 
 
 def distributed_space(loc: Local) -> NumpySpace:
     return numpy_space_with_reductions(lambda a: allreduce(loc, a))
 
 
-def l2_inner(loc: Local, U: VectorBlock, v: Vector) -> Coords:
-    """(u_i, v)_M = sum_j m_j u_ij v_j, M the lumped mass matrix."""
-    return allreduce(loc, U.T @ (loc.mass * v))
+def l2_metric_solve(loc: Local, w: Covector) -> Vector:
+    """M^{-1} w with M the lumped mass matrix: local, the pairing reduces."""
+    return Vector(w / loc.mass)
 
 
-def l2_dual_inner(loc: Local, Psi: CovectorBlock, phi: Covector) -> Coords:
-    """(psi_i, phi)_{M^{-1}}, the exact dual of l2_inner."""
-    return allreduce(loc, Psi.T @ (phi / loc.mass))
+def l2_metric_apply(loc: Local, v: Vector) -> Covector:
+    """M v with M the lumped mass matrix."""
+    return Covector(loc.mass * v)
 
 
 # --- the exact solution ----------------------------------------------------------------
@@ -387,23 +403,24 @@ def l2_error(loc: Local, u: Array, u_star: Array) -> float:
 # --- driver ------------------------------------------------------------------------
 
 
-def solve(loc: Local, e: Energy, precond: str, ball: str = "l2", display: int = 0,
+def solve(loc: Local, e: Energy, precond: str, metric: str = "l2", display: int = 0,
           max_iter: int = 200, max_krylov: int = 100,
           krylov: Literal["auto", "cg", "lanczos"] = "auto") -> tuple[Point, RunSummary]:
-    """Minimize J from u = 0. ball = "l2" (lumped mass) or "precond" (the
-    preconditioner's norm, M = P, solved by truncated CG unless
+    """Minimize J from u = 0. metric = "l2" (lumped mass, with P separate:
+    Lanczos) or "precond" (M = P, solved by truncated CG unless
     krylov = "lanczos")."""
     root = loc.comm.Get_rank() == 0
     fixed = laplacian_cycle(loc) if precond == "laplace" else None
+    l2 = metric == "l2"
     return trust_region_newton(
         lambda u: objective(loc, e, u),
         lambda u: gradient(loc, e, u),
-        None, None,
-        (lambda u, U, v: l2_inner(loc, U, v)) if ball == "l2" else None,
-        (lambda u, Psi, phi: l2_dual_inner(loc, Psi, phi)) if ball == "l2" else None,
+        None,
         Point(np.zeros(loc.n_owned)),
+        operators_at=lambda u: operators_at(loc, e, precond, u, metric, fixed),
+        metric_solve=(lambda u, w: l2_metric_solve(loc, w)) if l2 else None,
+        metric_apply=(lambda u, v: l2_metric_apply(loc, v)) if l2 else None,
         space=distributed_space(loc),
-        operators_at=lambda u: operators_at(loc, e, precond, u, fixed),
         rtol=1e-10, max_iter=max_iter, max_krylov=max_krylov, krylov=krylov,
         display=display, print_fn=print if root else (lambda line: None))
 
@@ -414,10 +431,10 @@ def main() -> None:
     parser.add_argument("--eps", type=float, default=1e-3)
     parser.add_argument("--rings", type=int, default=40, help="mesh resolution")
     parser.add_argument("--precond", choices=["amg", "jacobi", "laplace"], default="amg")
-    parser.add_argument("--ball", choices=["l2", "precond"], default="l2",
-                        help="trust region: L^2 (lumped mass) or the preconditioner's norm")
+    parser.add_argument("--metric", choices=["l2", "precond"], default="l2",
+                        help="L^2 (lumped mass), or the preconditioner itself (M = P)")
     parser.add_argument("--krylov", choices=["auto", "cg", "lanczos"], default="auto",
-                        help="subproblem solver (auto: CG for --ball precond, else Lanczos)")
+                        help="subproblem solver (auto: CG for --metric precond, else Lanczos)")
     parser.add_argument("--display", type=int, default=0)
     parser.add_argument("--json", help="write the iteration histories here (rank 0)")
     args = parser.parse_args()
@@ -433,14 +450,14 @@ def main() -> None:
         print(f"mesh: {mesh.points.shape[0]} nodes, {mesh.triangles.shape[0]} triangles, "
               f"element areas {area.min():.1e} to {area.max():.1e}; {loc.n_unknowns} unknowns")
         print(f"{comm.Get_size()} ranks: owned nodes {counts}, ghost nodes {ghosts}")
-        ball = "L^2 (lumped mass)" if args.ball == "l2" else "the preconditioner's norm"
-        print(f"ball: {ball}; preconditioner: {args.precond}; eps = {args.eps:g}\n")
+        metric = "L^2 (lumped mass)" if args.metric == "l2" else "the preconditioner (M = P)"
+        print(f"metric: {metric}; preconditioner: {args.precond}; eps = {args.eps:g}\n")
         print("    p  iterations  accepted  Krylov steps  ||u - u*|| / ||u*||    time")
     histories = {}
     for p in args.p:
         e, u_star = manufactured_energy(loc, p, args.eps)
         start = time.perf_counter()
-        u, summary = solve(loc, e, args.precond, args.ball, display=args.display, krylov=args.krylov)
+        u, summary = solve(loc, e, args.precond, args.metric, display=args.display, krylov=args.krylov)
         elapsed = comm.allreduce(time.perf_counter() - start, op=MPI.MAX)
         error = l2_error(loc, u, u_star)
         krylov_steps = sum(r.subproblem.krylov_steps for r in summary.iterations)

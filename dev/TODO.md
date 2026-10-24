@@ -169,7 +169,8 @@ needed 23 / 26 / 42 and 78 / 108 / 212. At p = 3: 12 / 14 / 17 against 8 / 9 / 1
 L^2 ball admits rough steps that a gradient-dependent energy punishes, and
 more of them as the mesh is refined.
 
-**Implemented** (PR #1, merged 2026-10-24): passing `None` for both inner
+**Implemented** (PR #1, merged 2026-10-24; since superseded by the
+metric-first API below, where P = M is the default): passing `None` for both inner
 products means M = P, in `solve_tr_subproblem` and `trust_region_newton`. It agrees with explicit (u, v)_P inner products step
 for step (Jacobi on Rosenbrock; dense tests at all radii, plain and
 saddle-free) and makes no inner-product calls. `p_laplacian.py` gains
@@ -186,11 +187,11 @@ Fewer Lanczos steps (the matched solves stop on the residual, not the stall
 test), and milder mesh dependence at p = 5. Not the serial H^1 ball's
 23/26/42: block Jacobi breaks the H^1 norm at rank interfaces.
 
-Still open: with an x-dependent P, gradient norms change meaning between
-iterates. At u = 0, p = 5, P(0) is about eps^3 K, so ||g0||_{P^{-1}} is huge,
-and rtol * gnorm0 stops at L^2 errors of 3e-6 to 3e-5 (versus 1e-9 for the
-L^2 ball). Users would pass gtol or gnorm0, or the test could use a fixed
-norm.
+Still open: with an x-dependent metric (here M = P(x), `--metric precond`),
+gradient norms change meaning between iterates. At u = 0, p = 5, P(0) is
+about eps^3 K, so ||g0||_{P^{-1}} is huge, and rtol * gnorm0 stops at L^2
+errors of 1e-5 to 3e-5 (versus 3e-9 or better for the L^2 metric). Users
+would pass gtol or gnorm0, or a fixed metric with P separate.
 
 **Conventional path** (2026-10-24): with M = P and no saddle-free model,
 `krylov="auto"` now uses Steihaug-Toint truncated CG
@@ -200,14 +201,61 @@ reorthogonalized solver. On the p-Laplacian with M = P, CG took the same or
 fewer Krylov steps and less time; at p = 5 it took about 10-25% more outer
 iterations, since it stops at the first boundary crossing.
 
+## Metric-first API (2026-10-24)
+
+The inner products `ball_inner` / `ball_dual_inner` were replaced by metric
+operators, with M primary and P secondary:
+
+- `metric_solve` (M^{-1}) is the one operator the geometry needs: it is the
+  preconditioner when P = M (the default), the gradient norm, and the
+  residual norm. `metric_apply` (M) is needed only with a separate
+  `precond_solve`, to grow the M-Gram matrix of the Lanczos basis. For
+  plain numpy arrays M defaults to I.
+- Stopping test: ||g||_{M^{-1}} <= max(gtol, rtol gnorm0) with rtol = 1e-8,
+  gtol = 0 by default; `convergence_norm="preconditioner"` uses
+  ||g||_{P^{-1}} (one more P solve per new iterate, reused as the Krylov
+  start vector). This avoided adding a Euclidean norm to VectorSpace: the
+  "Euclidean" default is just M = I.
+- With P != M the Lanczos residual is formed explicitly,
+  R = lam (M Q y - V G y) + gamma_next y_flip[-1] v_next, and measured as
+  sqrt(<R, M^{-1} R>): one M^{-1} solve per step, plus one M product when
+  lam > 0. It replaces the dual Gram matrix W = V^T M^{-1} V, whose
+  quadratic form lost about half the digits on the boundary (the dense
+  tests now agree to 1e-10 there, against a 1e-6 floor before). With
+  P = M the norm is gamma_next |y_flip[-1]| exactly and nothing is applied.
+- `trust_region_newton(fun, grad, hessvec, x0, *, metric_solve, precond_solve,
+  metric_apply, operators_at, ...)`; `operators_at(x)` returns
+  `PointOperators`, whose `None` fields fall back to the keywords.
+
+Behavior against the previous API (same problems, same options): the
+iterates are the same. On the p-Laplacian at p = 1.5 the detailed logs agree
+digit for digit up to the iteration where the old run stopped. The only
+differences come from the stopping defaults (gtol 0 instead of 1e-8, rtol
+1e-8 instead of 0):
+
+- runs that used to stop on the absolute test go on to the relative one:
+  p-Laplacian p = 1.5 on 25 rings, 10 iterations instead of 9 (error 1e-16
+  instead of 3e-12); the eigenproblem at p = 2, 9 instead of 8; the last
+  matrix-completion stage with Lanczos, 14 instead of 12;
+- quickstart's ellipsoid runs stop one iteration earlier (164 / 122
+  instead of 165 / 123), on the relative test;
+- unchanged: matched_vs_mismatched, the p-Laplacian at p = 3 and 5, and all
+  M = P runs.
+
+The matrix-completion example now uses CG (P = M = I): 122 iterations and
+305 CG steps over the rank continuation, against 93 iterations and 336
+Lanczos steps, same final fit.
+
 ## Communication per Lanczos step
 
 The CG path for M = P needs only two reductions per step (<H p, p> and
 <r, P^{-1} r>). The rest of this entry is about the Lanczos path.
 
-In a distributed run each Lanczos step does six global reductions:
-<Hq, q>, two reorthogonalization passes (one `pair_block` each),
-<t, P^{-1} t>, and one call to each inner product (Gram matrices). Fusing
-them (delta is the newest coefficient of the first reorthogonalization pass;
-the two Gram rows could go in one reduction) would cut latency for small
-local problems. Not urgent: with multigrid the local work dominates.
+In a distributed run each Lanczos step with P = M does four global
+reductions: <Hq, q>, two reorthogonalization passes (one `pair_block` each)
+and <t, M^{-1} t>; the residual norm is free. With a separate P it adds two:
+the new M-Gram row (one `pair_block`) and the residual norm
+<R, M^{-1} R>. Fusing them (delta is the newest coefficient of the first
+reorthogonalization pass; the Gram row could ride along with the second
+pass) would cut latency for small local problems. Not urgent: with
+multigrid the local work dominates.

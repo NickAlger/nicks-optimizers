@@ -10,7 +10,7 @@ T = <H Q, Q> (lanczos_tridiagonal), with the Lanczos relation
     H Q = V T + gamma_next v_next e_k^T,
 
 where (gamma_next, v_next, q_next) is the pending next basis direction. The
-process knows nothing about inner products or trust regions, so it serves
+process knows nothing about the metric or trust regions, so it serves
 any consumer: trust-region and line-search Newton steps, Ritz values and
 low-rank approximations of the pencil (H, P), and so on.
 

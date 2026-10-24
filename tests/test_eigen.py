@@ -38,7 +38,9 @@ def test_derivatives_of_the_eigen_functional() -> None:
         u = Point(rng.standard_normal(loc.n_owned))
         v, w = (Vector(rng.standard_normal(loc.n_owned)) for _ in range(2))
         g = pe.gradient(loc, e, u)
-        hessvec, precond = pe.operators_at(loc, e, "amg", u)
+        ops = pe.operators_at(loc, e, "amg", u)
+        hessvec, precond = ops.hessvec, ops.precond_solve
+        assert precond is not None
         Hv = np.asarray(hessvec(v))
         errors: list[tuple[float, float]] = []
         for t in (1e-3, 1e-4):

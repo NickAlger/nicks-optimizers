@@ -1,22 +1,21 @@
 """The outer trust-region loop: operators, point-dependent metrics, the
-relative convergence test, and convergence on test problems."""
+relative convergence test and its norm, and convergence on test problems."""
 
-from typing import Callable
+from typing import Callable, Literal
 
 import numpy as np
 
 from nicks_optimizers import (
     Array,
     Covector,
-    CovectorBlock,
-    DualInnerProduct,
-    InnerProduct,
+    IterationInfo,
+    MetricApply,
+    MetricSolve,
     Point,
+    PointOperators,
     Vector,
-    VectorBlock,
     covector_norm,
-    euclidean_dual_inner,
-    euclidean_inner,
+    euclidean_metric_apply,
     forcing_term,
     history_array,
     numpy_space,
@@ -36,11 +35,12 @@ from problems import (
     jacobi_precond_solve,
     rosen_fun,
     rosen_grad,
+    rosen_hess_diag,
     rosen_hessvec,
-    smoothing_dual_inner,
-    smoothing_inner,
-    weighted_dual_inner,
-    weighted_inner,
+    smoothing_metric_apply,
+    smoothing_metric_solve,
+    weighted_metric_apply,
+    weighted_metric_solve,
     well_fun,
     well_grad,
     well_hessvec,
@@ -49,7 +49,7 @@ from problems import (
 
 
 def check_problem_operators(rng: Rng) -> bool:
-    print("Problem operators: finite differences, and duality of the inner-product pairs")
+    print("Problem operators: finite differences, and consistency of the metric pairs")
     n = 30
     x = Point(rng.standard_normal(n))
     v = Vector(rng.standard_normal(n))
@@ -62,56 +62,55 @@ def check_problem_operators(rng: Rng) -> bool:
         ok &= report(f"{name} gradient", abs(fd_g - numpy_space.pair(gr(x), v)) / abs(fd_g), 1e-6)
         ok &= report(f"{name} Hessian-vector product",
                      float(np.linalg.norm(fd_h - hv(x, v)) / np.linalg.norm(fd_h)), 1e-6)
-    # The two inner products of each metric must be exact duals: their Gram
-    # matrices on the coordinate basis are M and M^{-1}, so they multiply to I.
+    # metric_apply and metric_solve of each metric must be inverse to each other.
     I = np.eye(n)
-    for name, inner, dual_inner in METRICS:
-        GM = np.column_stack([inner(x, VectorBlock(I), Vector(I[:, j])) for j in range(n)])
-        GD = np.column_stack([dual_inner(x, CovectorBlock(I), Covector(I[:, j])) for j in range(n)])
-        ok &= report(f"{name}: inner products are exact duals (Gram_M Gram_M^-1 = I)",
-                     float(np.linalg.norm(GM @ GD - I)), 1e-12)
+    for name, metric_solve, metric_apply in METRICS:
+        Mdense = dense_from_operator(lambda v: metric_apply(x, v), n)
+        Minv = np.column_stack([metric_solve(x, Covector(I[:, j])) for j in range(n)])
+        ok &= report(f"{name}: metric_apply and metric_solve are inverses",
+                     float(np.linalg.norm(Mdense @ Minv - I)), 1e-12)
+        ok &= report(f"{name}: M symmetric", float(np.linalg.norm(Mdense - Mdense.T)), 1e-12)
     return ok
 
 
-def reference_iterations(x0: Array, inner: InnerProduct, dual_inner: DualInnerProduct,
+def reference_iterations(x0: Array, metric_solve: MetricSolve, metric_apply: MetricApply,
                          n_iter: int, radius: float = 1.0) -> Point:
-    """Outer iterations written out by hand, with every operator and inner
-    product evaluated at the current point; same defaults as trust_region_newton."""
+    """Outer iterations written out by hand, with every operator evaluated at
+    the current point and the Jacobi preconditioner separate from M; same
+    defaults as trust_region_newton."""
     sp = numpy_space
     x = Point(np.array(x0, dtype=float))
     fx, g = rosen_fun(x), rosen_grad(x)
-    gnorm = gnorm0 = covector_norm(sp, lambda P_, p: dual_inner(x, P_, p), g)
+    gnorm = gnorm0 = covector_norm(sp, lambda w: metric_solve(x, w), g)
     for _ in range(n_iter):
         s, st = solve_tr_subproblem(
-            sp, g,
-            lambda v: rosen_hessvec(x, v),
-            lambda w: jacobi_precond_solve(x, w),
-            lambda U, v: inner(x, U, v),
-            lambda P_, p: dual_inner(x, P_, p),
-            radius, forcing_term(gnorm, gnorm0, 0.5) * gnorm, 50, g_dual_norm=gnorm)
+            sp, g, lambda v: rosen_hessvec(x, v), lambda w: metric_solve(x, w),
+            radius, forcing_term(gnorm, gnorm0, 0.5) * gnorm, 50,
+            precond_solve=lambda w: jacobi_precond_solve(x, w),
+            metric_apply=lambda v: metric_apply(x, v))
         x_trial = Point(x + s)
         f_trial = rosen_fun(x_trial)
         rho = reduction_ratio(fx, f_trial, -st.model_value)
         if rho > 1e-4:
             x, fx, g = x_trial, f_trial, rosen_grad(x_trial)
-            gnorm = covector_norm(sp, lambda P_, p: dual_inner(x, P_, p), g)
+            gnorm = covector_norm(sp, lambda w: metric_solve(x, w), g)
         radius = update_radius(radius, rho, st.step_norm, 1e4)
     return x
 
 
 def check_metric_uses_current_point() -> bool:
-    print("Point-dependent inner products are evaluated at the current iterate")
+    print("A point-dependent metric is evaluated at the current iterate")
     n, n_iter = 20, 8
     x0 = Point(np.tile([-1.2, 1.0], n // 2))
     x_method, _ = trust_region_newton(
-        rosen_fun, rosen_grad, rosen_hessvec, jacobi_precond_solve,
-        weighted_inner, weighted_dual_inner, x0, gtol=0.0, max_iter=n_iter)
-    x_ref = reference_iterations(x0, weighted_inner, weighted_dual_inner, n_iter)
+        rosen_fun, rosen_grad, rosen_hessvec, x0, metric_solve=weighted_metric_solve,
+        metric_apply=weighted_metric_apply, precond_solve=jacobi_precond_solve, max_iter=n_iter)
+    x_ref = reference_iterations(x0, weighted_metric_solve, weighted_metric_apply, n_iter)
     x_frozen, _ = trust_region_newton(
-        rosen_fun, rosen_grad, rosen_hessvec, jacobi_precond_solve,
-        lambda x, U, v: weighted_inner(x0, U, v),
-        lambda x, P_, p: weighted_dual_inner(x0, P_, p),
-        x0, gtol=0.0, max_iter=n_iter)
+        rosen_fun, rosen_grad, rosen_hessvec, x0,
+        metric_solve=lambda x, w: weighted_metric_solve(x0, w),
+        metric_apply=lambda x, v: weighted_metric_apply(x0, v),
+        precond_solve=jacobi_precond_solve, max_iter=n_iter)
     ok = report("matches hand-written loop with M(x_k)", float(np.max(np.abs(x_method - x_ref))), 1e-12)
     diff = float(np.max(np.abs(x_method - x_frozen)))
     differs = diff > 1e-6
@@ -121,7 +120,7 @@ def check_metric_uses_current_point() -> bool:
 
 
 def check_gnorm0_and_rtol() -> bool:
-    print("Relative convergence test ||g|| <= max(gtol, rtol * gnorm0)  (identity metric)")
+    print("Relative convergence test ||g|| <= max(gtol, rtol * gnorm0)  (default metric M = I)")
     n, rtol = 20, 1e-4
     x0 = Point(np.tile([-1.2, 1.0], n // 2))
     g0 = float(np.linalg.norm(rosen_grad(x0)))
@@ -129,9 +128,8 @@ def check_gnorm0_and_rtol() -> bool:
 
     def run(x_start: Point, gnorm0: float | None = None) -> tuple[Point, Array]:
         x, summary = trust_region_newton(
-            rosen_fun, rosen_grad, rosen_hessvec, jacobi_precond_solve,
-            euclidean_inner, euclidean_dual_inner,
-            x_start, gtol=0.0, rtol=rtol, gnorm0=gnorm0, max_iter=1000)
+            rosen_fun, rosen_grad, rosen_hessvec, x_start, precond_solve=jacobi_precond_solve,
+            metric_apply=euclidean_metric_apply, rtol=rtol, gnorm0=gnorm0, max_iter=1000)
         return x, history_array(summary)
 
     def stopped_at_first_below(x: Point, hist: Array) -> bool:
@@ -144,8 +142,8 @@ def check_gnorm0_and_rtol() -> bool:
     ok &= report("explicit gnorm0 = ||g(x0)|| reproduces the default run",
                  float(np.max(np.abs(x_def - x_exp))), 0.0)
     x_mid, _ = trust_region_newton(
-        rosen_fun, rosen_grad, rosen_hessvec, jacobi_precond_solve,
-        euclidean_inner, euclidean_dual_inner, x0, gtol=0.0, max_iter=40)
+        rosen_fun, rosen_grad, rosen_hessvec, x0, precond_solve=jacobi_precond_solve,
+        metric_apply=euclidean_metric_apply, max_iter=40)
     x_restart, h_restart = run(x_mid, gnorm0=g0)
     _, h_naive = run(x_mid)
     ok &= report("restart with gnorm0 = ||g(x0)|| stops at the original threshold",
@@ -159,13 +157,14 @@ def check_gnorm0_and_rtol() -> bool:
 def run_and_report(label: str, fun: Callable[[Point], float], grad: Callable[[Point], Covector],
                    hessvec: Callable[[Point, Vector], Covector],
                    precond_solve: Callable[[Point, Covector], Vector],
-                   inner: InnerProduct, dual_inner: DualInnerProduct,
+                   metric_solve: MetricSolve, metric_apply: MetricApply,
                    x0: Point, saddle_free: bool) -> bool:
     x, summary = trust_region_newton(
-        fun, grad, hessvec, precond_solve, inner, dual_inner, x0,
-        saddle_free=saddle_free, gtol=1e-8, max_iter=1000, max_krylov=100)
+        fun, grad, hessvec, x0, metric_solve=metric_solve, metric_apply=metric_apply,
+        precond_solve=precond_solve, saddle_free=saddle_free, gtol=1e-8, rtol=0.0,
+        max_iter=1000, max_krylov=100)
     hist = history_array(summary)
-    gfinal = covector_norm(numpy_space, lambda P_, p: dual_inner(x, P_, p), grad(x))
+    gfinal = covector_norm(numpy_space, lambda w: metric_solve(x, w), grad(x))
     lam_min = float(np.linalg.eigvalsh(dense_from_operator(lambda v: hessvec(x, v), x.shape[0]))[0])
     tail = ", ".join(f"{gn:.0e}" for gn in hist[-4:, 2])
     print(f"  {label}: {len(hist)} its, {int(hist[:, 5].sum())} Hv, f = {fun(x):.4f}, "
@@ -180,11 +179,11 @@ def demo_rosenbrock() -> bool:
     print("  (converges to the known local minimizer near x = (-0.99, 1, ...), f = 3.99)")
     x0 = Point(np.tile([-1.2, 1.0], 25))
     ok = True
-    for name, inner, dual_inner in METRICS:
+    for name, metric_solve, metric_apply in METRICS:
         for saddle_free in (False, True):
             label = f"{name}, {'saddle-free' if saddle_free else 'plain'}"
             ok &= run_and_report(label, rosen_fun, rosen_grad, rosen_hessvec, jacobi_precond_solve,
-                                 inner, dual_inner, x0, saddle_free)
+                                 metric_solve, metric_apply, x0, saddle_free)
     return ok
 
 
@@ -195,7 +194,7 @@ def demo_double_well(rng: Rng) -> bool:
     for saddle_free in (False, True):
         label = "saddle-free" if saddle_free else "plain"
         ok &= run_and_report(label, well_fun, well_grad, well_hessvec, well_precond_solve,
-                             smoothing_inner, smoothing_dual_inner, x0, saddle_free)
+                             smoothing_metric_solve, smoothing_metric_apply, x0, saddle_free)
     return ok
 
 
@@ -219,111 +218,162 @@ def test_double_well_converges() -> None:
     assert demo_double_well(np.random.default_rng(6))
 
 
+def jacobi_diagonal(x: Point) -> Array:
+    """The P(x) of jacobi_precond_solve, also used as a metric below."""
+    diagonal: Array = np.maximum(np.abs(rosen_hess_diag(x)), 1.0)
+    return diagonal
+
+
+def jacobi_metric_apply(x: Point, v: Vector) -> Covector:
+    return Covector(jacobi_diagonal(x) * v)
+
+
 def test_operators_at_matches_and_runs_once_per_point() -> None:
-    """operators_at(x) gives the same run as hessvec/precond_solve, and is
-    called exactly once per iterate at which a subproblem is solved (rejected
-    steps reuse the operators)."""
+    """operators_at(x) gives the same run as the keyword operators, and is
+    called exactly once per new iterate (rejected steps reuse the
+    operators), for P = M and for a separate preconditioner."""
     x0 = Point(np.tile([-1.2, 1.0], 25))
-    _, reference = trust_region_newton(rosen_fun, rosen_grad, rosen_hessvec, jacobi_precond_solve,
-                                       euclidean_inner, euclidean_dual_inner, x0)
-    points: list[Point] = []
+    for separate in (False, True):
+        if separate:
+            _, reference = trust_region_newton(rosen_fun, rosen_grad, rosen_hessvec, x0,
+                                               precond_solve=jacobi_precond_solve,
+                                               metric_apply=euclidean_metric_apply)
+        else:
+            _, reference = trust_region_newton(rosen_fun, rosen_grad, rosen_hessvec, x0,
+                                               metric_solve=jacobi_precond_solve)
+        points: list[Point] = []
 
-    def operators_at(x: Point) -> tuple[Callable[[Vector], Covector], Callable[[Covector], Vector]]:
-        points.append(x)
-        return (lambda v: rosen_hessvec(x, v)), (lambda w: jacobi_precond_solve(x, w))
+        def operators_at(x: Point) -> PointOperators[Vector, Covector]:
+            points.append(x)
+            P_solve: Callable[[Covector], Vector] = lambda w: jacobi_precond_solve(x, w)  # noqa: E731
+            H: Callable[[Vector], Covector] = lambda v: rosen_hessvec(x, v)               # noqa: E731
+            if separate:
+                return PointOperators(hessvec=H, precond_solve=P_solve)
+            return PointOperators(hessvec=H, metric_solve=P_solve)
 
-    x, summary = trust_region_newton(rosen_fun, rosen_grad, None, None, euclidean_inner,
-                                     euclidean_dual_inner, x0, operators_at=operators_at)
-    assert without_times(summary.iterations) == without_times(reference.iterations)
-    records = summary.iterations
-    new_points = 1 + sum(records[i - 1].accepted for i in range(1, len(records)))
-    assert any(not r.accepted for r in records)             # rejections did happen
-    assert len(points) == new_points
-    assert len({id(p) for p in points}) == len(points)
+        # With a separate P, M = I comes from the default, and M itself from the keyword.
+        x, summary = trust_region_newton(rosen_fun, rosen_grad, None, x0, operators_at=operators_at,
+                                         metric_apply=euclidean_metric_apply if separate else None)
+        assert without_times(summary.iterations) == without_times(reference.iterations)
+        records = summary.iterations
+        assert any(not r.accepted for r in records)             # rejections did happen
+        assert len(points) == 1 + summary.accepted_steps
+        assert len({id(p) for p in points}) == len(points)
 
 
 def test_operator_arguments_are_checked() -> None:
     x0 = Point(np.zeros(4))
-    for hv, ps, ops in ((None, jacobi_precond_solve, None), (rosen_hessvec, None, None),
-                        (rosen_hessvec, jacobi_precond_solve,
-                         lambda x: ((lambda v: rosen_hessvec(x, v)), (lambda w: w)))):
+
+    def hv_ops(x: Point) -> PointOperators[Vector, Covector]:
+        return PointOperators(hessvec=lambda v: rosen_hessvec(x, v))
+
+    def p_ops(x: Point) -> PointOperators[Vector, Covector]:
+        """A separate preconditioner, but no metric_apply anywhere."""
+        return PointOperators(hessvec=lambda v: rosen_hessvec(x, v),
+                              precond_solve=lambda w: jacobi_precond_solve(x, w))
+    for hv, ops in ((None, None), (rosen_hessvec, hv_ops), (None, p_ops)):
         try:
-            trust_region_newton(rosen_fun, rosen_grad, hv, ps, euclidean_inner,
-                                euclidean_dual_inner, x0, operators_at=ops)
+            trust_region_newton(rosen_fun, rosen_grad, hv, x0, operators_at=ops)
         except ValueError:
             continue
         raise AssertionError("invalid operator arguments were accepted")
 
 
-def test_trust_region_in_the_preconditioner_norm() -> None:
-    """Passing no inner products means M = P. With the diagonal (Jacobi)
-    preconditioner of the Rosenbrock problem, (u, v)_P can also be written
-    out explicitly: with the Lanczos solver both runs take the same steps,
-    and the M = P run makes no inner-product calls."""
-    from problems import rosen_hess_diag
+def test_matched_path_equals_explicit_metric() -> None:
+    """With P = M (no precond_solve) only M^{-1} is applied. Passing the same
+    M as a separate preconditioner, with metric_apply, takes the same
+    steps with the Lanczos solver; the P = M run applies neither M nor a
+    separate preconditioner."""
     x0 = Point(np.tile([-1.2, 1.0], 25))
-
-    def jacobi_diagonal(x: Point) -> Array:
-        """The P(x) of jacobi_precond_solve."""
-        diagonal: Array = np.maximum(np.abs(rosen_hess_diag(x)), 1.0)
-        return diagonal
-
-    def p_inner(x: Point, U: VectorBlock, v: Vector) -> Array:
-        return U.T @ (jacobi_diagonal(x) * v)
-
-    def p_dual_inner(x: Point, Psi: CovectorBlock, phi: Covector) -> Array:
-        return Psi.T @ (phi / jacobi_diagonal(x))
-
-    _, explicit = trust_region_newton(rosen_fun, rosen_grad, rosen_hessvec, jacobi_precond_solve,
-                                      p_inner, p_dual_inner, x0)
-    _, matched = trust_region_newton(rosen_fun, rosen_grad, rosen_hessvec, jacobi_precond_solve,
-                                     None, None, x0, krylov="lanczos")
+    _, explicit = trust_region_newton(rosen_fun, rosen_grad, rosen_hessvec, x0,
+                                      metric_solve=jacobi_precond_solve,
+                                      precond_solve=jacobi_precond_solve,
+                                      metric_apply=jacobi_metric_apply)
+    _, matched = trust_region_newton(rosen_fun, rosen_grad, rosen_hessvec, x0,
+                                     metric_solve=jacobi_precond_solve, krylov="lanczos")
     a, b = explicit.iterations, matched.iterations
     assert len(a) == len(b) and matched.reason == explicit.reason == "converged"
     assert [(r.accepted, r.subproblem.krylov_steps) for r in a] == \
         [(r.accepted, r.subproblem.krylov_steps) for r in b]
     assert max(abs(r.f - s.f) / max(1.0, abs(r.f)) for r, s in zip(a, b)) < 1e-10
-    assert max(abs(r.gnorm - s.gnorm) / r.gnorm for r, s in zip(a, b)) < 1e-6
-    assert matched.inner_calls == 0 and matched.dual_inner_calls == 0
+    assert max(abs(r.gnorm - s.gnorm) / r.gnorm for r, s in zip(a, b)) < 1e-10
+    assert matched.metric_apply_calls == 0 and matched.precond_solve_calls == 0
 
 
 def test_krylov_selection() -> None:
-    """krylov="auto" uses CG for the conventional trust region (no inner
-    products, no saddle_free) and Lanczos otherwise; "cg" refuses the other
-    cases; both solvers converge on Rosenbrock with M = P."""
+    """krylov="auto" uses CG when P = M without saddle_free, and Lanczos
+    otherwise; every combination converges on Rosenbrock."""
     x0 = Point(np.tile([-1.2, 1.0], 25))
-    pieces = (rosen_fun, rosen_grad, rosen_hessvec, jacobi_precond_solve)
+    pieces = (rosen_fun, rosen_grad, rosen_hessvec, x0)
     runs = {
-        "auto, M = P": trust_region_newton(*pieces, None, None, x0),
-        "lanczos, M = P": trust_region_newton(*pieces, None, None, x0, krylov="lanczos"),
-        "auto, saddle-free": trust_region_newton(*pieces, None, None, x0, saddle_free=True),
-        "auto, M = I": trust_region_newton(*pieces, euclidean_inner, euclidean_dual_inner, x0),
+        "auto, M = P = I": trust_region_newton(*pieces, max_krylov=200),
+        "auto, M = P = Jacobi": trust_region_newton(*pieces, metric_solve=jacobi_precond_solve),
+        "lanczos, M = P": trust_region_newton(*pieces, metric_solve=jacobi_precond_solve,
+                                              krylov="lanczos"),
+        "auto, saddle-free": trust_region_newton(*pieces, metric_solve=jacobi_precond_solve,
+                                                 saddle_free=True),
+        "auto, M = I, P = Jacobi": trust_region_newton(*pieces, precond_solve=jacobi_precond_solve,
+                                                       metric_apply=euclidean_metric_apply),
     }
-    expected = {"auto, M = P": "cg", "lanczos, M = P": "lanczos", "auto, saddle-free": "lanczos",
-                "auto, M = I": "lanczos"}
+    expected = {"auto, M = P = I": "cg", "auto, M = P = Jacobi": "cg", "lanczos, M = P": "lanczos",
+                "auto, saddle-free": "lanczos", "auto, M = I, P = Jacobi": "lanczos"}
     for label, (_, summary) in runs.items():
         assert summary.reason == "converged", label
         assert {r.subproblem.krylov for r in summary.iterations} == {expected[label]}, label
-    refused = 0
-    try:
-        trust_region_newton(*pieces, None, None, x0, krylov="cg", saddle_free=True)
-    except ValueError:
-        refused += 1
-    try:
-        trust_region_newton(*pieces, euclidean_inner, euclidean_dual_inner, x0, krylov="cg")
-    except ValueError:
-        refused += 1
-    assert refused == 2
 
 
 def test_cg_reuses_the_gradient_solve() -> None:
-    """With M = P the outer loop computes P^{-1} g for the gradient norm, and
-    the CG solve starts from it: one preconditioner solve per Krylov step,
-    plus one per new iterate."""
+    """With P = M the outer loop computes M^{-1} g for the gradient norm, and
+    the CG solve starts from it: one M^{-1} solve per CG step, plus one per
+    new iterate, and nothing else."""
     x0 = Point(np.tile([-1.2, 1.0], 25))
-    _, summary = trust_region_newton(rosen_fun, rosen_grad, rosen_hessvec, jacobi_precond_solve,
-                                     None, None, x0)
+    _, summary = trust_region_newton(rosen_fun, rosen_grad, rosen_hessvec, x0,
+                                     metric_solve=jacobi_precond_solve)
     advanced = sum(r.subproblem.krylov_steps - (r.subproblem.stop_reason in ("boundary", "negative"))
                    for r in summary.iterations)
     new_points = 1 + summary.accepted_steps
-    assert summary.precond_calls == advanced + new_points
+    assert summary.metric_solve_calls == advanced + new_points
+    assert summary.precond_solve_calls == 0 and summary.metric_apply_calls == 0
+
+
+def test_convergence_norm() -> None:
+    """The recorded ||g|| and the stopping test use ||g||_{M^{-1}} by default
+    (the Euclidean norm when no metric is given), and ||g||_{P^{-1}} with
+    convergence_norm="preconditioner"; the default test is
+    ||g|| <= rtol ||g(x0)||. The preconditioner norm costs one P solve per
+    new iterate, which the subproblem reuses as its start vector."""
+    x0 = Point(np.tile([-1.2, 1.0], 25))
+    rtol = 1e-6
+    pieces = (rosen_fun, rosen_grad, rosen_hessvec, x0)
+    solves: dict[Literal["metric", "preconditioner"], MetricSolve] = {
+        "metric": smoothing_metric_solve, "preconditioner": jacobi_precond_solve}
+    for which, solve in solves.items():
+        def norm(x: Point, g: Covector) -> float:
+            return covector_norm(numpy_space, lambda w: solve(x, w), g)
+
+        points: list[Point] = []
+
+        def keep(x: Point, info: IterationInfo[Vector, Covector]) -> None:
+            points.append(x)
+
+        x, summary = trust_region_newton(
+            *pieces, metric_solve=smoothing_metric_solve, metric_apply=smoothing_metric_apply,
+            precond_solve=jacobi_precond_solve, convergence_norm=which, rtol=rtol, max_iter=1000,
+            callback=keep)
+        records = summary.iterations
+        assert summary.reason == "converged", which
+        xs = [x0] + points[:-1]                       # the iterate each record started from
+        for r, xk in zip(records, xs):
+            assert abs(r.gnorm - norm(xk, rosen_grad(xk))) <= 1e-12 * r.gnorm, which
+        assert summary.gnorm <= rtol * summary.gnorm0 < min(r.gnorm for r in records), which
+        assert abs(summary.gnorm - norm(x, rosen_grad(x))) <= 1e-12 * summary.gnorm, which
+        new_points = 1 + summary.accepted_steps
+        k_total = sum(r.subproblem.krylov_steps for r in records)
+        if which == "metric":
+            assert summary.precond_solve_calls == k_total + len(records)
+        else:
+            assert summary.precond_solve_calls == k_total + new_points
+    _, euclidean = trust_region_newton(*pieces, max_krylov=200)
+    g0 = float(np.linalg.norm(rosen_grad(x0)))
+    assert abs(euclidean.gnorm0 - g0) <= 1e-14 * g0
+    assert euclidean.gnorm <= 1e-8 * g0

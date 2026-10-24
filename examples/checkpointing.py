@@ -18,10 +18,9 @@ from typing import Callable
 import numpy as np
 
 from nicks_optimizers import (
-    Covector, IterationInfo, Point, ResumeState, Vector, euclidean_dual_inner, euclidean_inner,
-    trust_region_newton,
+    Covector, IterationInfo, Point, ResumeState, RunSummary, Vector, trust_region_newton,
 )
-from quickstart import fun, grad, hessvec, precond_solve
+from quickstart import fun, grad, hessvec, jacobi_solve
 
 
 class SimulatedCrash(Exception):
@@ -53,21 +52,26 @@ def resume_from(directory: Path) -> tuple[Point, Covector, ResumeState]:
 
 
 if __name__ == "__main__":
-    ops = (fun, grad, hessvec, precond_solve, euclidean_inner, euclidean_dual_inner)
     x0 = Point(np.tile([-1.2, 1.0], 25))
 
-    x_full, full = trust_region_newton(*ops, x0)
+    def run(x: Point, callback: Callback | None = None, resume: ResumeState | None = None,
+            g0: Covector | None = None) -> tuple[Point, RunSummary]:
+        """The same options every time, as exact resumption requires."""
+        return trust_region_newton(fun, grad, hessvec, x, metric_solve=jacobi_solve,
+                                   callback=callback, resume=resume, g0=g0)
+
+    x_full, full = run(x0)
     print(f"uninterrupted run: {len(full.iterations)} iterations")
 
     with tempfile.TemporaryDirectory() as tmp:
         directory = Path(tmp)
         try:
-            trust_region_newton(*ops, x0, callback=make_checkpointer(directory, every=10, crash_at=43))
+            run(x0, callback=make_checkpointer(directory, every=10, crash_at=43))
         except SimulatedCrash as crash:
             print(f"first run: {crash}")
         x, g, state = resume_from(directory)
         print(f"resuming from the checkpoint taken after iteration {state.next_iteration - 1}")
-        x_res, rest = trust_region_newton(*ops, x, resume=state, g0=g)
+        x_res, rest = run(x, resume=state, g0=g)
 
     same = np.array_equal(x_res, x_full)
     print(f"resumed run: iterations {rest.iterations[0].iteration} to {rest.iterations[-1].iteration}; "

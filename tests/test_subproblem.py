@@ -4,25 +4,26 @@ against dense linear algebra."""
 
 import numpy as np
 
+import pytest
+
 from nicks_optimizers import (
     Array,
     Covector,
-    FrozenDualInnerProduct,
     Point,
     Vector,
-    euclidean_inner,
     numpy_space,
+    numpy_space_with_reductions,
     solve_sphere_trs,
     solve_tr_subproblem,
+    solve_tr_subproblem_cg,
     trust_region_newton,
 )
-from nicks_optimizers.trust_region_subproblem import kkt_residual_dual_norm, solve_projected_trs
+from nicks_optimizers.trust_region_subproblem import krylov_residual_norm, solve_projected_trs
 from helpers import (
     Rng,
     dense_abs_m,
-    dense_dual_inner,
+    dense_apply,
     dense_dual_norm,
-    dense_inner,
     dense_solve,
     dense_vec_to_covec,
     full_space_kkt_error,
@@ -52,7 +53,8 @@ def check_lanczos_relations(rng: Rng) -> bool:
     g = rng.standard_normal(n)
     ok = True
     for passes in (2, 0):
-        Q, V, T, G, W, gamma0, gamma_next, v_next = run_lanczos(H, P, M, g, k, passes)
+        state, T, G = run_lanczos(H, P, M, g, k, passes)
+        Q, V, gamma0, gamma_next, v_next = state.Q, state.V, state.gamma0, state.gamma_next, state.v_next
         e1 = np.zeros(k); e1[0] = 1.0
         ek = np.zeros(k); ek[-1] = 1.0
         orth = float(np.linalg.norm(Q.T @ P @ Q - np.eye(k)))
@@ -98,25 +100,52 @@ def check_sphere_trs(rng: Rng) -> bool:
     return ok
 
 
-def check_surrogate_residual(rng: Rng) -> bool:
-    print("Residual from Gram matrices vs dense ||H s_flip + lam M s + g||_{M^-1} (n=60, k=25)")
+def check_explicit_residual(rng: Rng) -> bool:
+    print("Explicit residual vs dense ||H s_flip + lam M s + g||_{M^-1} (n=60, k=25, P != M)")
     n, k = 60, 25
     H = matrix_with_spectrum(np.concatenate([np.linspace(0.5, 20.0, n - 5),
                                              [-3.0, -2.0, -1.0, -0.5, -0.2]]), rng)
     P, M = random_spd(n, 30.0, rng), random_spd(n, 30.0, rng)
     g = rng.standard_normal(n)
-    Q, V, T, G, W, gamma0, gamma_next, v_next = run_lanczos(H, P, M, g, k)
+    state, T, G = run_lanczos(H, P, M, g, k)
+    Q = state.Q
     ok = True
+    for radius in (0.3, 1e4):
+        for saddle_free in (False, True):
+            y, y_flip, lam, mval, _, theta = solve_projected_trs(T, G, state.gamma0, radius, saddle_free)
+            resid, applies, solves = krylov_residual_norm(
+                numpy_space, state, y, float(y_flip[-1]), lam, G, dense_apply(M), dense_solve(M))
+            s, s_flip = Q @ y, Q @ y_flip
+            dense = dense_dual_norm(H @ s_flip + lam * M @ s + g, M)
+            model = float(g @ s + 0.5 * s @ H @ s_flip)   # = <g,s> + 0.5 <|H| s, s> on the subspace
+            label = f"{'saddle-free' if saddle_free else 'plain'}, radius {radius:g}"
+            print(f"  {label}: {int(np.sum(theta < 0))} negative M-Ritz values, lam = {lam:.3f}")
+            ok &= report(f"{label}: explicit residual vs dense", abs(resid - dense) / dense, 1e-10)
+            ok &= report(f"{label}: one M product iff lam > 0, one M^-1 solve",
+                         float(applies != int(lam > 0.0) or solves != 1), 0.0)
+            ok &= report(f"{label}: model value vs <g,s> + 0.5 <H s_flip, s>",
+                         abs(mval - model) / abs(model), 1e-12)
+    return ok
+
+
+def check_matched_residual(rng: Rng) -> bool:
+    print("P = M: the residual norm is gamma_next |y_k| with no operator applied (n=60, k=25)")
+    n, k = 60, 25
+    H = matrix_with_spectrum(np.concatenate([np.linspace(0.5, 20.0, n - 3), [-3.0, -1.0, -0.2]]), rng)
+    M = random_spd(n, 30.0, rng)
+    g = rng.standard_normal(n)
+    gn = dense_dual_norm(g, M)
+    state, T, G = run_lanczos(H, M, M, g, k)
+    ok = report("||G - I|| (the basis is M-orthonormal)", float(np.linalg.norm(G - np.eye(k))), 1e-10)
     for saddle_free in (False, True):
-        y, y_flip, lam, mval, _, theta = solve_projected_trs(T, G, gamma0, 0.3, saddle_free)
-        resid = kkt_residual_dual_norm(y, float(y_flip[-1]), lam, G, W, gamma_next)
-        s, s_flip = Q @ y, Q @ y_flip
+        y, y_flip, lam, _, _, _ = solve_projected_trs(T, np.eye(k), state.gamma0, 0.3, saddle_free)
+        resid, applies, solves = krylov_residual_norm(
+            numpy_space, state, y, float(y_flip[-1]), lam, np.eye(k), None, dense_solve(M))
+        s, s_flip = state.Q @ y, state.Q @ y_flip
         dense = dense_dual_norm(H @ s_flip + lam * M @ s + g, M)
-        model = float(g @ s + 0.5 * s @ H @ s_flip)       # = <g,s> + 0.5 <|H| s, s> on the subspace
         label = "saddle-free" if saddle_free else "plain"
-        print(f"  {label}: {int(np.sum(theta < 0))} negative M-Ritz values, lam = {lam:.3f}")
-        ok &= report(f"{label}: Gram-matrix residual vs dense", abs(resid - dense) / dense, 1e-10)
-        ok &= report(f"{label}: model value vs <g,s> + 0.5 <H s_flip, s>", abs(mval - model) / abs(model), 1e-12)
+        ok &= report(f"{label}: |gamma_next |y_k| - dense| / ||g||", abs(resid - dense) / gn, 1e-12)
+        ok &= report(f"{label}: no operator applied", float(applies + solves), 0.0)
     return ok
 
 
@@ -145,10 +174,10 @@ def check_subproblem_full_space(rng: Rng) -> bool:
         model = float(g @ s + 0.5 * s @ Hm @ s)
         ok &= report(f"{name}: KKT", full_space_kkt_error(Hm, M, g, radius, s, lam), 1e-8)
         ok &= report(f"{name}: model value", abs(mval - model) / abs(model), 1e-10)
-        # Gram-matrix residual: exact for interior steps, sqrt(eps)-type floor when lam > 0.
-        tol, where = (1e-6, "boundary, floor") if lam > 0.0 else (1e-10, "interior")
+        # The explicit residual is accurate on the boundary too.
+        where = "boundary" if lam > 0.0 else "interior"
         ok &= report(f"{name}: residual vs dense ({where})",
-                     abs(resid - dense_dual_norm(g + Hm @ s + lam * M @ s, M)) / gn, tol)
+                     abs(resid - dense_dual_norm(g + Hm @ s + lam * M @ s, M)) / gn, 1e-10)
     # Interior saddle-free step is exactly -|H|_M^{-1} g, with |.| taken in the M metric.
     s_sf = run_dense_subproblem(H_ind, P, M, g, 1e4, n, resid_tol=1e-10 * gn, saddle_free=True)[0]
     exact = -np.linalg.solve(dense_abs_m(H_ind, M), g)
@@ -176,38 +205,31 @@ def check_saddle_step_direction() -> bool:
     return ok
 
 
-def check_dual_requirement(rng: Rng) -> bool:
-    print("Regression: the dual inner product is required and must be the exact dual of ball_inner")
-    ok = True
-    try:
-        trust_region_newton(rosen_fun, rosen_grad, rosen_hessvec, jacobi_precond_solve,  # type: ignore[call-arg]
-                            ball_inner=euclidean_inner, x0=Point(np.ones(4)))
-        refused = False
-    except TypeError:
-        refused = True
-    ok &= report("calling without ball_dual_inner is refused (no silent Euclidean fallback)",
-                 0.0 if refused else 1.0, 0.0)
-
-    # Boundary residual with a consistent pair vs. the old failure mode (M inner, Euclidean dual).
+def check_metric_requirements(rng: Rng) -> bool:
+    print("A separate preconditioner needs M itself; reported boundary residuals are actual ones")
     n, k, radius = 60, 15, 0.05
     H = matrix_with_spectrum(np.linspace(-2.0, 10.0, n), rng)
     P, M = random_spd(n, 30.0, rng), random_spd(n, 30.0, rng)
     g = rng.standard_normal(n)
-    pairs: list[tuple[str, FrozenDualInnerProduct, Array]] = [
-        ("exact dual (M^-1)", dense_dual_inner(M), M),
-        ("Euclidean dual with M != I", lambda Psi, phi: Psi.T @ phi, np.eye(n)),
-    ]
-    for name, dual_inner, Mdual in pairs:
-        s, st = solve_tr_subproblem(
-            numpy_space, Covector(g), dense_vec_to_covec(H), dense_solve(P), dense_inner(M),
-            dual_inner, radius, 0.0, k, stall_tol=0.0)
-        resid = st.resid
-        actual = dense_dual_norm(g + H @ s + st.lam * M @ s, Mdual)
-        if name.startswith("exact"):
-            ok &= report(f"{name}: reported boundary residual = actual", abs(resid - actual) / actual, 1e-10)
-        else:
-            print(f"         ({name}: reports {resid:.3e}, actual {actual:.3e}; "
-                  f"the boundary formula needs exact duality)")
+    ok = True
+    try:
+        solve_tr_subproblem(numpy_space, Covector(g), dense_vec_to_covec(H), dense_solve(M),
+                            radius, 0.0, k, precond_solve=dense_solve(P))
+        refused = False
+    except ValueError:
+        refused = True
+    ok &= report("precond_solve without metric_apply is refused", 0.0 if refused else 1.0, 0.0)
+    s, st = solve_tr_subproblem(numpy_space, Covector(g), dense_vec_to_covec(H), dense_solve(M),
+                                radius, 0.0, k, precond_solve=dense_solve(P),
+                                metric_apply=dense_apply(M), stall_tol=0.0)
+    actual = dense_dual_norm(g + H @ s + st.lam * M @ s, M)
+    ok &= report("boundary active", 0.0 if st.lam > 0.0 else 1.0, 0.0)
+    ok &= report("reported boundary residual = actual", abs(st.resid - actual) / actual, 1e-10)
+    # M products: k for the Gram matrix (q_0 .. q_{k-1}), one per residual with lam > 0.
+    boundary_steps = sum(1 for lam in st.trace_lam if lam > 0.0)
+    ok &= report("calls: k Hessian products, k + 1 P solves, k + (boundary steps) M products, "
+                 "k M^-1 solves", float((st.hessvec_calls, st.precond_solve_calls, st.metric_apply_calls,
+                                         st.metric_solve_calls) != (k, k + 1, k + boundary_steps, k)), 0.0)
     return ok
 
 
@@ -231,8 +253,12 @@ def test_sphere_trs() -> None:
     assert check_sphere_trs(np.random.default_rng(1))
 
 
-def test_surrogate_residual() -> None:
-    assert check_surrogate_residual(np.random.default_rng(2))
+def test_explicit_residual() -> None:
+    assert check_explicit_residual(np.random.default_rng(2))
+
+
+def test_matched_residual() -> None:
+    assert check_matched_residual(np.random.default_rng(5))
 
 
 def test_subproblem_full_space() -> None:
@@ -243,40 +269,65 @@ def test_saddle_step_direction() -> None:
     assert check_saddle_step_direction()
 
 
-def test_dual_requirement() -> None:
-    assert check_dual_requirement(np.random.default_rng(4))
+def test_metric_requirements() -> None:
+    assert check_metric_requirements(np.random.default_rng(4))
+
+
+def test_outer_loop_checks_the_metric_arguments() -> None:
+    """trust_region_newton refuses a separate preconditioner without M, a
+    custom space without M^{-1} (no silent Euclidean fallback), krylov='cg'
+    with a separate preconditioner or saddle_free, and unknown options."""
+    x0 = Point(np.ones(4))
+    pieces = (rosen_fun, rosen_grad, rosen_hessvec, x0)
+    reductions = numpy_space_with_reductions(lambda c: c)
+    with pytest.raises(ValueError):
+        trust_region_newton(*pieces, precond_solve=jacobi_precond_solve)
+    with pytest.raises(ValueError):
+        trust_region_newton(*pieces, space=reductions)
+    with pytest.raises(ValueError):
+        trust_region_newton(*pieces, krylov="cg", precond_solve=jacobi_precond_solve,
+                            metric_apply=lambda x, v: Covector(v))
+    with pytest.raises(ValueError):
+        trust_region_newton(*pieces, krylov="cg", saddle_free=True)
+    with pytest.raises(ValueError):
+        trust_region_newton(*pieces, krylov="steihaug")  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        trust_region_newton(*pieces, convergence_norm="euclidean")  # type: ignore[arg-type]
+    trust_region_newton(*pieces, space=numpy_space, max_iter=2)   # M = I for explicit numpy_space
 
 
 def test_mismatch_example() -> None:
     assert check_mismatch_example()
 
 
-def test_preconditioner_norm_ball() -> None:
-    """ball_inner = ball_dual_inner = None means M = P: the same steps as
-    passing (u, v)_P and its dual explicitly, plain and saddle-free, with the
-    trust region inactive, active, and in the hard case regime."""
+def test_matched_path_equals_explicit_metric() -> None:
+    """P = M (no precond_solve) gives the same steps as passing P = M
+    explicitly (precond_solve = metric_solve, with metric_apply), plain and
+    saddle-free, with the trust region inactive, active, and near the hard
+    case, without applying M or a separate preconditioner."""
     rng = np.random.default_rng(11)
     n = 60
     H = matrix_with_spectrum(np.concatenate([[-3.0, -1.0], np.linspace(0.5, 20.0, n - 2)]), rng)
-    P = random_spd(n, 50.0, rng)
+    M = random_spd(n, 50.0, rng)
     g = Covector(rng.standard_normal(n))
     for radius in (1e-3, 0.5, 1e3):
         for saddle_free in (False, True):
-            steps = []
-            for inner, dual in ((dense_inner(P), dense_dual_inner(P)), (None, None)):
-                s, st = solve_tr_subproblem(numpy_space, g, dense_vec_to_covec(H), dense_solve(P),
-                                            inner, dual, radius, 1e-10, 40, saddle_free=saddle_free)
-                steps.append((s, st))
-            (s1, a), (s2, b) = steps
+            s1, a = solve_tr_subproblem(numpy_space, g, dense_vec_to_covec(H), dense_solve(M),
+                                        radius, 1e-10, 40, precond_solve=dense_solve(M),
+                                        metric_apply=dense_apply(M), saddle_free=saddle_free)
+            s2, b = solve_tr_subproblem(numpy_space, g, dense_vec_to_covec(H), dense_solve(M),
+                                        radius, 1e-10, 40, saddle_free=saddle_free)
             assert a.krylov_steps == b.krylov_steps and a.stop_reason == b.stop_reason
             assert np.linalg.norm(s1 - s2) <= 1e-8 * np.linalg.norm(s1)
             assert abs(a.lam - b.lam) <= 1e-8 * max(1.0, a.lam)
             assert abs(a.model_value - b.model_value) <= 1e-10 * abs(a.model_value)
-            assert b.inner_calls == 0 and b.dual_inner_calls == 0
+            assert abs(a.resid - b.resid) <= 1e-6 * max(a.resid, 1e-10 * float(np.sqrt(g @ g)))
+            assert b.metric_apply_calls == 0 and b.precond_solve_calls == 0
+            assert b.metric_solve_calls == b.krylov_steps + 1
 
 
 def test_steihaug_cg_subproblem() -> None:
-    """Truncated CG for the trust region of the P-norm.
+    """Truncated CG for the trust region of the M-norm (P = M).
 
     Inside the ball it computes the same step as the Lanczos solver with
     M = P (same Krylov space, same stopping test), at tolerances reached
@@ -285,7 +336,6 @@ def test_steihaug_cg_subproblem() -> None:
     would leave the ball, it stops on the boundary (||s||_P = radius) with
     at least the Cauchy decrease. On negative curvature it follows the
     direction to the boundary. Statistics report the method and calls."""
-    from nicks_optimizers import solve_tr_subproblem_cg
     rng = np.random.default_rng(13)
     n = 50
     P = random_spd(n, 5.0, rng)
@@ -304,13 +354,13 @@ def test_steihaug_cg_subproblem() -> None:
     # Interior: same step as Lanczos with M = P.
     tol = 1e-4 * float(np.sqrt(g @ np.linalg.solve(P, g)))
     s_cg, st_cg = solve_tr_subproblem_cg(numpy_space, g, hessvec_spd, precond, 1e6, tol, 60)
-    s_lz, st_lz = solve_tr_subproblem(numpy_space, g, hessvec_spd, precond, None, None, 1e6, tol, 60)
+    s_lz, st_lz = solve_tr_subproblem(numpy_space, g, hessvec_spd, precond, 1e6, tol, 60)
     assert st_cg.krylov == "cg" and st_cg.stop_reason == "tol" and st_cg.lam == 0.0
     assert st_cg.krylov_steps == st_lz.krylov_steps
     assert np.linalg.norm(s_cg - s_lz) <= 1e-6 * np.linalg.norm(s_lz)
     assert abs(st_cg.model_value - st_lz.model_value) <= 1e-10 * abs(st_lz.model_value)
-    assert st_cg.inner_calls == 0 and st_cg.dual_inner_calls == 0
-    assert st_cg.precond_calls == st_cg.krylov_steps + 1
+    assert st_cg.metric_apply_calls == 0 and st_cg.precond_solve_calls == 0
+    assert st_cg.metric_solve_calls == st_cg.krylov_steps + 1
 
     # Boundary and negative curvature.
     H_spd = np.column_stack([hessvec_spd(Vector(np.eye(n)[:, j])) for j in range(n)])
@@ -322,10 +372,10 @@ def test_steihaug_cg_subproblem() -> None:
         assert st.model_value <= cauchy_model(H, radius) + 1e-12
         assert st.n_negative == (1 if reason == "negative" else 0)
 
-    # The step cap, and P^{-1} g supplied by the caller.
+    # The step cap, and M^{-1} g supplied by the caller.
     _, st = solve_tr_subproblem_cg(numpy_space, g, hessvec_spd, precond, 1e6, 0.0, 3,
-                                   precond_g=precond(g))
-    assert st.stop_reason == "max" and st.krylov_steps == 3 and st.precond_calls == 3
+                                   start_vector=precond(g))
+    assert st.stop_reason == "max" and st.krylov_steps == 3 and st.metric_solve_calls == 3
 
 
 
@@ -334,14 +384,13 @@ def test_lanczos_is_more_robust_than_cg_to_tight_tolerances() -> None:
     an ill-conditioned pencil (cond(P^{-1} H) about 10^3) and a tight
     tolerance, Lanczos converges within n steps, while CG loses conjugacy in
     floating point and needs more."""
-    from nicks_optimizers import solve_tr_subproblem_cg
     rng = np.random.default_rng(13)
     n = 50
     P = random_spd(n, 30.0, rng)
     hessvec = dense_vec_to_covec(matrix_with_spectrum(np.linspace(0.5, 40.0, n), rng))
     g = Covector(rng.standard_normal(n))
     tol = 1e-10 * float(np.sqrt(g @ np.linalg.solve(P, g)))
-    _, lanczos = solve_tr_subproblem(numpy_space, g, hessvec, dense_solve(P), None, None, 1e6, tol, 200)
+    _, lanczos = solve_tr_subproblem(numpy_space, g, hessvec, dense_solve(P), 1e6, tol, 200)
     _, cg = solve_tr_subproblem_cg(numpy_space, g, hessvec, dense_solve(P), 1e6, tol, 200)
     assert lanczos.krylov_steps <= n and lanczos.stop_reason in ("tol", "breakdown")
     assert cg.stop_reason == "tol" and cg.krylov_steps > lanczos.krylov_steps

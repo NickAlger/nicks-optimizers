@@ -1,32 +1,41 @@
 # nicks-optimizers
 
 Matrix-free optimization methods in Python. The first is `trust_region_newton`:
-an inexact Newton trust-region method in which the **Hessian preconditioner** and
-the **shape of the trust region** are independent choices.
+an inexact Newton trust-region method built around a **metric** `M`, the
+geometry of the problem, with an optional **preconditioner** `P` as a separate
+accelerant.
 
-- **Ellipsoidal trust region given by inner products.** The trust region is
-  `{s : (s, s)_M <= radius^2}` for a metric `M(x)` that may depend on the iterate.
-  You supply the inner product and its dual, not the operators `M` and `M^{-1}`;
-  for an ellipsoid with covariance `B`, `M = B^{-1}`.
-- **Preconditioner as an accelerant only.** `P(x)` shapes the Krylov space;
-  all geometry (step lengths, curvature, stopping tests) is measured with `M`.
-- **Lanczos subproblem solver.** An explicitly reorthogonalized, P-preconditioned
-  Lanczos basis; the small trust-region problem is solved exactly in
-  M-orthonormal coordinates (including the hard case). No Hessian-vector
-  products are spent beyond one per Lanczos step.
-- **Conventional trust region, lean path.** With no inner products the ball
-  is the preconditioner's norm (Steihaug-Toint), solved by truncated
-  conjugate gradients. CG keeps five vectors and needs two reductions per
-  step; the Lanczos solver is still available on request.
+- **The metric comes first.** `M(x)` (symmetric positive definite, possibly
+  depending on the iterate) shapes the trust region
+  `{s : ||s||_M <= radius}`, measures the gradient in the stopping test
+  `||g||_{M^{-1}} <= rtol ||g(x0)||_{M^{-1}}`, and defines the curvature used
+  by the saddle-free model. You give it by operators: `metric_solve`
+  (`M^{-1}`), plus `metric_apply` (`M`) only when a separate preconditioner
+  is used. For plain numpy arrays the default is `M = I`.
+- **Preconditioning through the metric.** By default `P = M`: the
+  conventional (Steihaug-Toint) trust region, where only `M^{-1}` is ever
+  applied. Any symmetric positive definite operator passed as `metric_solve`,
+  a multigrid cycle for instance, defines `M` as its inverse. The
+  subproblems are solved by truncated conjugate gradients: five vectors, two
+  reductions per step.
+- **A separate preconditioner when the geometry should differ.**
+  `precond_solve` (`P^{-1}`) shapes the Krylov space while `M` keeps the
+  geometry, e.g. a mesh-independent L^2 trust region with a multigrid
+  preconditioner for the Hessian.
+- **Lanczos subproblem solver.** An explicitly reorthogonalized,
+  P-preconditioned Lanczos basis; the small trust-region problem is solved
+  exactly in M-orthonormal coordinates (including the hard case). It handles
+  a separate `P`, the saddle-free model, and is available for `P = M` on
+  request. No Hessian-vector products are spent beyond one per Krylov step.
 - **Saddle-free option.** `saddle_free=True` replaces the Hessian by its absolute
   value *with respect to M* (generalized eigenvalues of `H u = theta M u`), so
   saddle points repel iterates instead of attracting them.
 - **Representation-generic.** Points, vectors and covectors can be numpy arrays
   (the default), distributed objects, collections of arrays, or anything else,
   through a `VectorSpace` record of functions.
-- **Distributed.** Every reduction goes through the space or the inner
-  products, so vectors can live on many MPI ranks and the method runs in
-  lockstep. [`examples/p_laplacian.py`](examples/p_laplacian.py) minimizes a
+- **Distributed.** Every reduction goes through the space, so vectors can
+  live on many MPI ranks and the method runs in lockstep.
+  [`examples/p_laplacian.py`](examples/p_laplacian.py) minimizes a
   p-Laplacian energy with mpi4py and a multigrid preconditioner.
 - **Manifolds.** Points move only through a retraction, and tangent vectors may
   be stored redundantly (e.g. gauged factor variations), with an optional
@@ -65,52 +74,54 @@ from nicks_optimizers import trust_region_newton
 
 A = np.diag(np.arange(1.0, 11.0))
 c = np.ones(10)
-b = np.linspace(0.5, 2.0, 10)              # covariance of the trust-region ellipsoid
+d = np.arange(1.0, 11.0)                   # a diagonal preconditioner, here exact
 
 x, summary = trust_region_newton(
     lambda x: 0.5 * x @ A @ x - c @ x,     # objective
     lambda x: A @ x - c,                   # gradient (a covector)
     lambda x, v: A @ v,                    # Hessian-vector product
-    lambda x, w: w,                        # preconditioner solve P^{-1} w (here P = I)
-    lambda x, U, v: U.T @ (v / b),         # ball inner products (u_i, v)_M, M = B^{-1}
-    lambda x, Psi, phi: Psi.T @ (b * phi), # their exact dual, (psi_i, phi)_{M^{-1}}
     np.zeros(10),                          # starting point
+    metric_solve=lambda x, w: w / d,       # M^{-1} w: the metric, and (P = M) the preconditioner
     display=1,                             # print one line per iteration
 )
 print(summary.reason, summary.f)
 ```
 
-See [`examples/quickstart.py`](examples/quickstart.py) for a typed, matrix-free
-version on the chained Rosenbrock function.
+Without `metric_solve` the metric is the identity. See
+[`examples/quickstart.py`](examples/quickstart.py) for a typed, matrix-free
+version on the chained Rosenbrock function, with a separate preconditioner
+as well.
 
 ## The problem pieces
+
+```python
+trust_region_newton(fun, grad, hessvec, x0, *, metric_solve=None, precond_solve=None,
+                    metric_apply=None, operators_at=None, ...)
+```
 
 | argument | signature | meaning |
 |---|---|---|
 | `fun` | `(x) -> float` | objective |
 | `grad` | `(x) -> Covector` | differential `df(x)` |
 | `hessvec` | `(x, v) -> Covector` | `H(x) v` |
-| `precond_solve` | `(x, w) -> Vector` | `P(x)^{-1} w`, `P(x)` symmetric positive definite |
-| `ball_inner` | `(x, U, v) -> array` | `(u_i, v)_M` for each vector `u_i` in the block `U` |
-| `ball_dual_inner` | `(x, Psi, phi) -> array` | `(psi_i, phi)_{M^{-1}}` for each covector in `Psi` |
 | `x0` | `Point` | starting point, in the representation of `space` |
+| `metric_solve` | `(x, w) -> Vector` | `M(x)^{-1} w`. Default `M = I` for numpy arrays; required for other spaces |
+| `precond_solve` | `(x, w) -> Vector` | `P(x)^{-1} w`, if `P` should differ from `M` |
+| `metric_apply` | `(x, v) -> Covector` | `M(x) v`; needed only with `precond_solve` |
+
+`M` and `P` are symmetric positive definite. With a separate preconditioner,
+`metric_apply` and `metric_solve` must be inverse to each other: the Lanczos
+solver builds the M-Gram matrix of its basis with `metric_apply` and measures
+residuals with `metric_solve`.
 
 Optional: `space` (see [Other representations](#other-representations)),
 `retract(x, s) -> Point` and `project_covector(x, w) -> Covector` (see
-[Manifolds](#manifolds)), and `operators_at(x) -> (hessvec_x, precond_solve_x)`
-in place of `hessvec` and `precond_solve` (pass `None` for both): the two
-operators frozen at `x`, built once per iterate and reused after rejected
-steps, so setup they share (assembling a Hessian, building a multigrid
-hierarchy) happens once per point.
-
-`H` and `P^{-1}` are the only operators the method applies. The two inner
-products (or `None` for both, see
-[the conventional trust region](#the-conventional-trust-region-m--p)) must be
-**exact duals** of each other: the residual norm on the
-trust-region boundary relies on `(M u, M v)_{M^{-1}} = (u, v)_M`. For `M = I`
-pass `euclidean_inner` and `euclidean_dual_inner`. Inner products take a block
-first so an implementation can apply `M` once per call, e.g.
-`lambda x, U, v: U.T @ (M @ v)`.
+[Manifolds](#manifolds)), and `operators_at(x) -> PointOperators` in place of
+`hessvec` (pass `hessvec=None`): the operators frozen at `x`,
+`PointOperators(hessvec=..., metric_solve=..., precond_solve=..., metric_apply=...)`,
+built once per new iterate and reused after rejected steps, so setup they
+share (assembling a Hessian, building a multigrid hierarchy) happens once per
+point. Fields left `None` fall back to the keyword arguments.
 
 The initial `radius` (default 1.0) is an absolute length in the M-norm, so
 scale it to the problem when you know the size of a sensible first step. The
@@ -118,33 +129,36 @@ radius adapts after that, but a start that is far too large costs one
 rejected step per factor of 4. An automatic choice from the model at `x0`
 proved unreliable, and the evidence is in [`dev/TODO.md`](dev/TODO.md).
 
-Gradient norms are dual norms, `||g||_{M^{-1}}`, so the stopping tests are
-invariant under changes of variables. The run stops when
-`||g|| <= max(gtol, rtol * gnorm0)`, where `gnorm0` defaults to `||g(x0)||`.
+### Stopping test
 
-### The conventional trust region (M = P)
+Gradient norms are dual norms, `||g||_{M^{-1}} = sqrt(<g, M^{-1} g>)`, so the
+test is invariant under changes of variables. The run stops when
+`||g|| <= max(gtol, rtol * gnorm0)`, with `rtol = 1e-8`, `gtol = 0` and
+`gnorm0 = ||g(x0)||` by default. With `convergence_norm="preconditioner"`
+the norm is `||g||_{P^{-1}}` instead (the same unless `precond_solve` is
+given; then it costs one more `P` solve per new iterate, which the Krylov
+solve reuses). The Krylov tolerance is a forcing term times `||g||_{M^{-1}}`.
 
-Passing `None` for both inner products makes the trust region the ball of the
-preconditioner's norm, `<P(x) s, s> <= radius^2`, the classic Steihaug-Toint
-trust region. It needs no inner products, so it works when P is known only
-through `P^{-1}`, such as multigrid. Gradient norms are then `||g||_{P^{-1}}`.
+### Subproblem solvers
 
 `krylov` chooses the subproblem solver:
 
-- `"auto"` (default): truncated CG for the conventional trust region with
-  `saddle_free=False`, and Lanczos otherwise.
+- `"auto"` (default): truncated CG when `P = M` and `saddle_free=False`, and
+  Lanczos otherwise.
 - `"cg"`: Steihaug-Toint truncated CG (`solve_tr_subproblem_cg`). It runs
-  preconditioned CG from `s = 0` and stops on the residual, at the first
-  crossing of the boundary, or on negative curvature (then it follows that
-  direction to the boundary). It keeps five vectors, does two reductions per
-  step, and starts from the `P^{-1} g` already computed for the gradient
-  norm. It requires `None` inner products and `saddle_free=False`.
+  CG preconditioned by `M` from `s = 0` and stops on the residual, at the
+  first crossing of the boundary, or on negative curvature (then it follows
+  that direction to the boundary). It keeps five vectors, does two reductions
+  per step, and starts from the `M^{-1} g` already computed for the gradient
+  norm. It requires `P = M` and `saddle_free=False`.
 - `"lanczos"`: the reorthogonalized Lanczos solver, which is more robust in
   floating point. To tight tolerances on ill-conditioned problems, CG loses
   conjugacy and needs more steps; the tests include such a case. Lanczos
   also solves the trust-region problem exactly on the subspace when the
   boundary is active, where CG stops at the first crossing. That means
-  fewer outer iterations, at more cost per step.
+  fewer outer iterations, at more cost per step. With `P = M` its basis is
+  M-orthonormal, so it applies only `M^{-1}` and gets the residual norm from
+  the Lanczos recurrence for free.
 
 On the distributed p-Laplacian with M = P (2 ranks, 80 rings), CG took 116
 Krylov steps at p = 3 against 140 for Lanczos, and 1.7 s against 2.7 s. At
@@ -159,7 +173,9 @@ for every `lam` and a few Lanczos steps suffice. If `M` differs from `P` it does
 not, and the subspace solutions improve slowly. Global convergence is
 unaffected (every step beats the Cauchy point along `-P^{-1} g`), and boundary
 solves stop when the model stops improving (`stall_tol`) rather than on the
-residual. [`examples/matched_vs_mismatched.py`](examples/matched_vs_mismatched.py)
+residual. A separate `P` also costs, per Krylov step, one product with `M`
+and one solve with `M^{-1}` for the explicit residual.
+[`examples/matched_vs_mismatched.py`](examples/matched_vs_mismatched.py)
 shows the effect.
 
 ## Saddle-free Newton
@@ -169,7 +185,7 @@ the generalized eigenproblem `H u = lambda M u`, approximated through the
 M-Ritz pairs of the Krylov space. In the positive definite regime it equals the
 Newton model, so fast local convergence is unchanged. The Krylov stopping test
 uses the residual of the flipped system, `H s_flip + lam M s + g`, computed
-from the Lanczos relation at no extra cost.
+from the Lanczos relation (for free when `P = M`).
 
 On the problems studied so far it has not paid off inside a trust region:
 
@@ -212,21 +228,23 @@ mpiexec -n 4 python examples/p_laplacian.py --p 1.5 3 5
 
 - **Mesh:** coarse at the center and finer toward the circle, so the lumped
   mass matrix varies 16-fold across the mesh.
-- **Trust region:** the L^2 ball of the lumped mass matrix.
-- **Preconditioner:** different from the ball. It is block Jacobi over the
+- **Metric:** the L^2 norm of the lumped mass matrix, given by `metric_solve`
+  and `metric_apply` (both diagonal).
+- **Preconditioner:** separate from the metric. It is block Jacobi over the
   ranks, each block being the rank's part of the current Hessian, applied by
   one pyamg V-cycle. It is built once per iterate through `operators_at`.
+  `--metric precond` uses it as the metric instead (`M = P`, CG).
 - **Distribution:** vectors are `numpy_space_with_reductions` arrays of each
   rank's nodal values. Ghost values come in by halo exchange, and reductions
   use MPI Allreduce.
 - **Right-hand side:** chosen so that the exact discrete solution is known.
-  Every run reaches it to 1e-9 or better.
+  Every run reaches it to 3e-9 or better.
 - **Rank count:** with `--precond jacobi` (partition-independent) the
   iterates are the same on any number of ranks, and the tests check this.
 
 p is a dial: p = 1.5 takes 9 Newton iterations on every mesh, while p = 5 takes
 40 to 120 and grows with refinement. The example's docstring explains why (the
-L^2 ball admits rough steps) and compares an H^1 ball.
+L^2 trust region admits rough steps) and compares an H^1 metric.
 
 [`examples/p_laplacian_eigen.py`](examples/p_laplacian_eigen.py) finds the first
 p-Laplacian eigenvalue on the same distributed setup, by unconstrained
@@ -270,8 +288,8 @@ Nothing in the method assumes a flat space. On a manifold:
 trust-region Newton on the manifold of rank-r matrices:
 
 - points as thin SVD factors;
-- tangent vectors as gauged variations, so the Frobenius inner product is the
-  dot product of the components;
+- tangent vectors as gauged variations, so the Frobenius metric is the
+  identity in the components (`metric_solve` returns them unchanged);
 - the truncated SVD of a rank-2r factorization as the retraction;
 - the exact Riemannian Hessian, curvature term included.
 
@@ -316,15 +334,15 @@ code and are meant to be reused by other optimizers.
 | module | contents |
 |---|---|
 | `spaces` | how points, vectors and covectors are represented: `VectorSpace`, `numpy_space`, `numpy_space_with_reductions`, `tuple_block_space`, `check_space` |
-| `metrics` | inner products and norms: `InnerProduct`, `DualInnerProduct`, `euclidean_inner`, `vector_norm`, `covector_norm`, Gram-matrix growth |
+| `metrics` | the metric, given by operators, and norms: `MetricSolve`, `MetricApply`, `euclidean_metric_solve`, `euclidean_metric_apply`, `vector_norm`, `covector_norm`, M-Gram matrix growth |
 | `dense` | small dense linear algebra in coordinates: Rayleigh–Ritz for a projected pencil, the trust-region problem on a ball (with the hard case) |
 | `krylov` | Krylov processes, immutable: preconditioned Lanczos (`lanczos_start`, `lanczos_advance`, `LanczosState`, `lanczos_tridiagonal`) and conjugate gradients (`cg_start`, `cg_curvature`, `cg_advance`, `CGState`, with recurrences for P-norms); optional covector projection for redundant representations |
 | `criteria` | tests shared by inexact Newton methods: `gradient_converged`, `forcing_term`, `reduction_ratio` |
 | `trust_region_subproblem` | the trust-region subproblem over a Krylov space: `solve_tr_subproblem` (Lanczos, any M, saddle-free) and `solve_tr_subproblem_cg` (Steihaug-Toint, M = P) |
 | `trust_region_diagnostics` | records, `ResumeState`, and text output |
-| `trust_region` | `trust_region_newton` |
+| `trust_region` | `trust_region_newton`, `PointOperators` |
 
-The Lanczos process knows nothing about trust regions or inner products, so the
+The Lanczos process knows nothing about trust regions or the metric, so the
 same `lanczos_advance` loop serves other consumers, e.g. Ritz values of the
 pencil `(H, P)` for spectral estimates or low-rank approximations
 ([`tests/test_krylov.py`](tests/test_krylov.py) uses it as an eigensolver).

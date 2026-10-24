@@ -11,9 +11,8 @@ from nicks_optimizers import (
     Covector,
     CovectorBlock,
     CovectorToVector,
-    FrozenDualInnerProduct,
-    FrozenInnerProduct,
     IterationRecord,
+    LanczosState,
     RunSummary,
     Vector,
     VectorBlock,
@@ -28,7 +27,7 @@ from nicks_optimizers import (
     numpy_space,
     solve_tr_subproblem,
 )
-from nicks_optimizers.metrics import extend_dual_gram, extend_metric_gram
+from nicks_optimizers.metrics import extend_metric_gram
 
 
 Rng = np.random.Generator
@@ -56,18 +55,13 @@ def dense_vec_to_covec(A: Array) -> VectorToCovector:
 
 
 def dense_solve(A: Array) -> CovectorToVector:
-    """A dense matrix solve as a Covector -> Vector operator (P^{-1})."""
+    """A dense matrix solve as a Covector -> Vector operator (M^{-1}, P^{-1})."""
     return lambda w: Vector(np.linalg.solve(A, w))
 
 
-def dense_inner(M: Array) -> FrozenInnerProduct:
-    """(U, v)_M = U^T M v, one M product per call."""
-    return lambda U, v: U.T @ (M @ v)
-
-
-def dense_dual_inner(M: Array) -> FrozenDualInnerProduct:
-    """(Psi, phi)_{M^{-1}} = Psi^T M^{-1} phi, one solve per call."""
-    return lambda Psi, phi: Psi.T @ np.linalg.solve(M, phi)
+def dense_apply(M: Array) -> VectorToCovector:
+    """A dense metric as a Vector -> Covector operator (M)."""
+    return lambda v: Covector(M @ v)
 
 
 def dense_abs_m(H: Array, M: Array) -> Array:
@@ -90,27 +84,21 @@ def report(name: str, value: float, tol: float) -> bool:
 
 
 def run_lanczos(H: Array, P: Array, M: Array, g: Array, k: int, reorth_passes: int = 2
-                ) -> tuple[VectorBlock, CovectorBlock, Coords, Coords, Coords, float, float, Covector]:
+                ) -> tuple[LanczosState[Vector, Covector, VectorBlock, CovectorBlock], Coords, Coords]:
     """k steps of the Lanczos process with dense H, P, M wrapped as operators,
-    keeping the Gram matrices the way the trust-region solver does.
+    keeping the M-Gram matrix the way the trust-region solver does.
 
-    Returns (Q, V, T, G, W, gamma0, gamma_next, v_next), where G = Q^T M Q and
-    W = V_{k+1}^T M^{-1} V_{k+1} includes the pending vector v_next.
+    Returns (state, T, G), where G = Q^T M Q.
     """
     sp = numpy_space
-    hessvec, precond_solve = dense_vec_to_covec(H), dense_solve(P)
-    inner, dual_inner = dense_inner(M), dense_dual_inner(M)
+    hessvec, precond_solve, metric_apply = dense_vec_to_covec(H), dense_solve(P), dense_apply(M)
     state = lanczos_start(sp, Covector(g), precond_solve)
-    G = inner(state.Q, state.q).reshape(1, 1)
-    W = dual_inner(state.V, state.v).reshape(1, 1)
+    G = sp.pair_block(state.Q, metric_apply(state.q)).reshape(1, 1)
     for j in range(k):
         state = lanczos_advance(sp, state, hessvec, precond_solve, reorth_passes=reorth_passes)
-        W_next = extend_dual_gram(sp, W, state.V, state.v_next, dual_inner)
         if j < k - 1:
-            G = extend_metric_gram(sp, G, state.Q, state.q_next, inner)
-            W = W_next
-    return (state.Q, state.V, lanczos_tridiagonal(state), G, W_next, state.gamma0,
-            state.gamma_next, state.v_next)
+            G = extend_metric_gram(sp, G, state.Q, state.q_next, metric_apply)
+    return state, lanczos_tridiagonal(state), G
 
 
 def sphere_kkt_error(A: Array, b: Array, radius: float, z: Array, lam: float) -> float:
@@ -139,10 +127,13 @@ def full_space_kkt_error(Hm: Array, M: Array, g: Array, radius: float, s: Array,
 def run_dense_subproblem(H: Array, P: Array, M: Array, g: Array, radius: float, max_iter: int,
                          resid_tol: float = 0.0, stall_tol: float = 0.0, saddle_free: bool = False
                          ) -> tuple[Vector, float, float, float, int, float, int]:
-    """Dense subproblem; returns (s, model_value, step_norm, lam, k, resid, n_negative)."""
+    """Dense Lanczos subproblem with metric M and preconditioner P (passed
+    separately, even when equal); returns
+    (s, model_value, step_norm, lam, k, resid, n_negative)."""
     s, st = solve_tr_subproblem(
-        numpy_space, Covector(g), dense_vec_to_covec(H), dense_solve(P), dense_inner(M),
-        dense_dual_inner(M), radius, resid_tol, max_iter, stall_tol=stall_tol, saddle_free=saddle_free)
+        numpy_space, Covector(g), dense_vec_to_covec(H), dense_solve(M), radius, resid_tol,
+        max_iter, precond_solve=dense_solve(P), metric_apply=dense_apply(M),
+        stall_tol=stall_tol, saddle_free=saddle_free)
     return s, st.model_value, st.step_norm, st.lam, st.krylov_steps, st.resid, st.n_negative
 
 
@@ -153,9 +144,11 @@ def dense_from_operator(apply: Callable[[Vector], Covector], n: int) -> Array:
     return dense
 
 
-def without_times(records: tuple[IterationRecord, ...]) -> list[IterationRecord]:
-    """Records with the wall-clock field cleared, for exact comparisons."""
-    return [dataclasses.replace(r, elapsed=0.0) for r in records]
+def without_times(records: tuple[IterationRecord, ...]) -> list[str]:
+    """Records with the wall-clock field cleared, as text for exact
+    comparisons: repr gives every float exactly, and nan fields (CG steps on
+    the boundary have no multiplier) compare equal."""
+    return [repr(dataclasses.replace(r, elapsed=0.0)) for r in records]
 
 
 def expected_display(summary: RunSummary, level: int) -> list[str]:

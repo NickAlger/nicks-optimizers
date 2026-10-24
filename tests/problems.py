@@ -8,16 +8,14 @@ import numpy as np
 
 from nicks_optimizers import (
     Array,
-    DualInnerProduct,
-    InnerProduct,
     Coords,
     Covector,
-    CovectorBlock,
+    MetricApply,
+    MetricSolve,
     Point,
     Vector,
-    VectorBlock,
-    euclidean_dual_inner,
-    euclidean_inner,
+    euclidean_metric_apply,
+    euclidean_metric_solve,
     tuple_block_space,
 )
 
@@ -59,32 +57,32 @@ def solve_symmetric_tridiagonal(d: Array, e: float, r: Array) -> Array:
     return x
 
 
-def smoothing_inner(x: Point, U: VectorBlock, v: Vector) -> Coords:
-    """(u, v)_M with M = B^{-1} = I + SMOOTHING L, the precision of a smoothing
-    covariance B. M is applied once per call, to v."""
-    return U.T @ (v + SMOOTHING * laplacian_apply(v))
+def smoothing_metric_apply(x: Point, v: Vector) -> Covector:
+    """M v with M = B^{-1} = I + SMOOTHING L, the precision of a smoothing
+    covariance B."""
+    return Covector(v + SMOOTHING * laplacian_apply(v))
 
 
-def smoothing_dual_inner(x: Point, Psi: CovectorBlock, phi: Covector) -> Coords:
-    """(psi, phi)_{M^{-1}} = <psi, B phi>, one tridiagonal solve per call."""
-    d = 1.0 + SMOOTHING * laplacian_diagonal(phi.shape[0])
-    return Psi.T @ solve_symmetric_tridiagonal(d, -SMOOTHING, phi)
+def smoothing_metric_solve(x: Point, w: Covector) -> Vector:
+    """M^{-1} w = B w, one tridiagonal solve."""
+    d = 1.0 + SMOOTHING * laplacian_diagonal(w.shape[0])
+    return Vector(solve_symmetric_tridiagonal(d, -SMOOTHING, w))
 
 
-def weighted_inner(x: Point, U: VectorBlock, v: Vector) -> Coords:
-    """(u, v)_M(x) with M(x) = diag(1 + x^2) + SMOOTHING L, which depends on x."""
-    return U.T @ ((1.0 + x**2) * v + SMOOTHING * laplacian_apply(v))
+def weighted_metric_apply(x: Point, v: Vector) -> Covector:
+    """M(x) v with M(x) = diag(1 + x^2) + SMOOTHING L, which depends on x."""
+    return Covector((1.0 + x**2) * v + SMOOTHING * laplacian_apply(v))
 
 
-def weighted_dual_inner(x: Point, Psi: CovectorBlock, phi: Covector) -> Coords:
-    d = 1.0 + x**2 + SMOOTHING * laplacian_diagonal(phi.shape[0])
-    return Psi.T @ solve_symmetric_tridiagonal(d, -SMOOTHING, phi)
+def weighted_metric_solve(x: Point, w: Covector) -> Vector:
+    d = 1.0 + x**2 + SMOOTHING * laplacian_diagonal(w.shape[0])
+    return Vector(solve_symmetric_tridiagonal(d, -SMOOTHING, w))
 
 
-METRICS: list[tuple[str, InnerProduct, DualInnerProduct]] = [
-    ("identity ball", euclidean_inner, euclidean_dual_inner),
-    ("smoothing ball, M = I + 10 L", smoothing_inner, smoothing_dual_inner),
-    ("x-dependent ball, M(x) = diag(1+x^2) + 10 L", weighted_inner, weighted_dual_inner),
+METRICS: list[tuple[str, MetricSolve, MetricApply]] = [
+    ("identity ball", euclidean_metric_solve, euclidean_metric_apply),
+    ("smoothing ball, M = I + 10 L", smoothing_metric_solve, smoothing_metric_apply),
+    ("x-dependent ball, M(x) = diag(1+x^2) + 10 L", weighted_metric_solve, weighted_metric_apply),
 ]
 
 
@@ -192,17 +190,13 @@ def pa_jacobi_precond_solve(x: PairArray, w: PairArray) -> PairArray:
     return split_pair(jacobi_precond_solve(Point(join_pair(x)), Covector(join_pair(w))))
 
 
-def pa_smoothing_inner(x: PairArray, U: tuple[PairArray, ...], v: PairArray) -> Coords:
-    """The smoothing-ball inner products, with blocks as tuples (M applied once)."""
-    vv = join_pair(v)
-    Mv = vv + SMOOTHING * laplacian_apply(vv)
-    return np.array([join_pair(u) @ Mv for u in U], dtype=float)
+def pa_smoothing_metric_apply(x: PairArray, v: PairArray) -> PairArray:
+    """The smoothing metric on pairs of arrays."""
+    return split_pair(smoothing_metric_apply(Point(join_pair(x)), Vector(join_pair(v))))
 
 
-def pa_smoothing_dual_inner(x: PairArray, Psi: tuple[PairArray, ...], phi: PairArray) -> Coords:
-    pp = join_pair(phi)
-    Bphi = solve_symmetric_tridiagonal(1.0 + SMOOTHING * laplacian_diagonal(pp.shape[0]), -SMOOTHING, pp)
-    return np.array([join_pair(p) @ Bphi for p in Psi], dtype=float)
+def pa_smoothing_metric_solve(x: PairArray, w: PairArray) -> PairArray:
+    return split_pair(smoothing_metric_solve(Point(join_pair(x)), Covector(join_pair(w))))
 
 
 COUPLED = 0.5
@@ -210,12 +204,13 @@ COUPLED = 0.5
 
 CoupledProblem = tuple[
     Callable[[Point], float], Callable[[Point], Covector], Callable[[Point, Vector], Covector],
-    Callable[[Point, Covector], Vector], InnerProduct, DualInnerProduct]
+    Callable[[Point, Covector], Vector], MetricSolve, MetricApply]
 
 
 def coupled_problem(b: Array, d: Array, allreduce: Callable[[Coords], Coords]) -> CoupledProblem:
     """f(x) = sum(x^4/4 + x^2/2 - b x) + COUPLED/2 (sum x)^2 on one process's
-    share of x, with the trust region M = diag(d). Every global quantity goes
+    share of x, with the metric M = diag(d) (local operators: the space's
+    pairing does the reductions). Every global quantity goes
     through allreduce, as it would with MPI."""
     def total(value: float) -> float:
         return float(allreduce(np.array([value]))[0])
@@ -232,13 +227,13 @@ def coupled_problem(b: Array, d: Array, allreduce: Callable[[Coords], Coords]) -
     def precond_solve(x: Point, w: Covector) -> Vector:
         return Vector(w / (3.0 * x**2 + 1.0 + COUPLED))
 
-    def inner(x: Point, U: VectorBlock, v: Vector) -> Coords:
-        return allreduce(U.T @ (d * v))
+    def metric_solve(x: Point, w: Covector) -> Vector:
+        return Vector(w / d)
 
-    def dual_inner(x: Point, Psi: CovectorBlock, phi: Covector) -> Coords:
-        return allreduce(Psi.T @ (phi / d))
+    def metric_apply(x: Point, v: Vector) -> Covector:
+        return Covector(d * v)
 
-    return fun, grad, hessvec, precond_solve, inner, dual_inner
+    return fun, grad, hessvec, precond_solve, metric_solve, metric_apply
 
 
 def make_thread_allreduce(n_ranks: int, timeout: float = 30.0) -> Callable[[int], Callable[[Coords], Coords]]:
