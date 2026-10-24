@@ -3,7 +3,7 @@
 Findings from stress tests that are not resolved yet. Each entry says what
 was seen, how to reproduce it, and what to try.
 
-## Saddle-free Newton underperforms on low-rank matrix completion
+## Saddle-free Newton inside a trust region (first seen on matrix completion)
 
 **Seen** (2026-10-24, `examples/matrix_completion.py`, direct rank-r fits
 from `zero_point`, no rank continuation):
@@ -168,6 +168,12 @@ Lanczos steps; an H^1 ball (stiffness matrix, exact dual by sparse LU)
 needed 23 / 26 / 42 and 78 / 108 / 212. At p = 3: 12 / 14 / 17 against 8 / 9 / 10. The
 L^2 ball admits rough steps that a gradient-dependent energy punishes, and
 more of them as the mesh is refined.
+
+**Prototype:** draft PR #1 (branch `proposal/matched-metric`). It has tests,
+distributed results (fewer Lanczos steps, milder mesh dependence at p = 5,
+smaller gains than the serial H^1 ball) and open design questions. The
+main one is that with an x-dependent P, gradient-norm stopping tests change
+meaning between iterates.
 
 ## Communication per Lanczos step
 
