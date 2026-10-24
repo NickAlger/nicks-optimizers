@@ -41,14 +41,14 @@ the **shape of the trust region** are independent choices.
 pip install git+https://github.com/NickAlger/nicks-optimizers
 ```
 
-Requires Python 3.10+ and numpy. The distributed example also needs
-`pip install -e ".[examples]"` and an MPI library (e.g. `pip install mpich`).
+Requires Python 3.10+ and numpy. The distributed p-Laplacian examples also
+need `pip install -e ".[examples]"` and an MPI library (e.g. `pip install mpich`).
 For development:
 
 ```bash
 git clone https://github.com/NickAlger/nicks-optimizers
 cd nicks-optimizers
-pip install -e ".[test]"
+pip install -e ".[test,examples]" mpich   # without the extras, MPI tests are skipped
 pytest          # the test suite
 mypy            # strict type checking of src, tests and examples
 ```
@@ -135,6 +135,16 @@ M-Ritz pairs of the Krylov space. In the positive definite regime it equals the
 Newton model, so fast local convergence is unchanged. The Krylov stopping test
 uses the residual of the flipped system, `H s_flip + lam M s + g`, computed
 from the Lanczos relation at no extra cost.
+
+On the problems studied so far it has not paid off inside a trust region:
+
+- **Escaping saddles:** plain trust-region Newton already uses negative
+  curvature through boundary steps, and escaped every saddle on its own.
+- **Cost:** the |H| model needs every negative eigenvalue resolved, so it
+  costs more Krylov steps when there are many.
+- **Matrix completion:** it took a worse path.
+
+See [`dev/TODO.md`](dev/TODO.md).
 
 ## Other representations
 
