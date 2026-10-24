@@ -64,7 +64,7 @@ import argparse
 import json
 import time
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Optional
 
 import numpy as np
 import numpy.typing as npt
@@ -323,10 +323,22 @@ def multigrid_cycle(A: scipy.sparse.csr_matrix) -> Callable[[Covector], Vector]:
     return lambda w: Vector(np.asarray(cycle @ w, dtype=float))
 
 
-def operators_at(loc: Local, e: Energy, precond: str, u: Point) -> Operators:
+def laplacian_cycle(loc: Local) -> Callable[[Covector], Vector]:
+    """Block Jacobi multigrid for the stiffness matrix (the Hessian at p = 2),
+    which does not depend on the point."""
+    n = loc.vertices.shape[0]
+    return multigrid_cycle(owned_block(loc, np.zeros((n, 2)), np.ones(n), np.zeros(n)))
+
+
+def operators_at(loc: Local, e: Energy, precond: str, u: Point,
+                 fixed: Optional[Callable[[Covector], Vector]] = None) -> Operators:
     """H(u) and P(u)^{-1}, set up once per point: the Hessian's element data,
-    and for block Jacobi the owned block and its multigrid hierarchy."""
+    and for block Jacobi the owned block and its multigrid hierarchy. With
+    precond == "laplace", P is the fixed operator passed in."""
     hessvec, g, a, c = hessian_at(loc, e, u)
+    if precond == "laplace":
+        assert fixed is not None
+        return hessvec, fixed
     A = owned_block(loc, g, a, c)
     if precond == "jacobi":
         diagonal = A.diagonal()
@@ -375,18 +387,21 @@ def l2_error(loc: Local, u: Array, u_star: Array) -> float:
 # --- driver ------------------------------------------------------------------------
 
 
-def solve(loc: Local, e: Energy, precond: str, display: int = 0, max_iter: int = 200,
-          max_lanczos: int = 100) -> tuple[Point, RunSummary]:
-    """Minimize J from u = 0."""
+def solve(loc: Local, e: Energy, precond: str, ball: str = "l2", display: int = 0,
+          max_iter: int = 200, max_lanczos: int = 100) -> tuple[Point, RunSummary]:
+    """Minimize J from u = 0. ball = "l2" (lumped mass) or "precond" (the
+    preconditioner's norm, M = P)."""
     root = loc.comm.Get_rank() == 0
+    fixed = laplacian_cycle(loc) if precond == "laplace" else None
     return trust_region_newton(
         lambda u: objective(loc, e, u),
         lambda u: gradient(loc, e, u),
         None, None,
-        lambda u, U, v: l2_inner(loc, U, v),
-        lambda u, Psi, phi: l2_dual_inner(loc, Psi, phi),
+        (lambda u, U, v: l2_inner(loc, U, v)) if ball == "l2" else None,
+        (lambda u, Psi, phi: l2_dual_inner(loc, Psi, phi)) if ball == "l2" else None,
         Point(np.zeros(loc.n_owned)),
-        space=distributed_space(loc), operators_at=lambda u: operators_at(loc, e, precond, u),
+        space=distributed_space(loc),
+        operators_at=lambda u: operators_at(loc, e, precond, u, fixed),
         rtol=1e-10, max_iter=max_iter, max_lanczos=max_lanczos,
         display=display, print_fn=print if root else (lambda line: None))
 
@@ -396,7 +411,9 @@ def main() -> None:
     parser.add_argument("--p", type=float, nargs="+", default=[1.5, 3.0, 5.0])
     parser.add_argument("--eps", type=float, default=1e-3)
     parser.add_argument("--rings", type=int, default=40, help="mesh resolution")
-    parser.add_argument("--precond", choices=["amg", "jacobi"], default="amg")
+    parser.add_argument("--precond", choices=["amg", "jacobi", "laplace"], default="amg")
+    parser.add_argument("--ball", choices=["l2", "precond"], default="l2",
+                        help="trust region: L^2 (lumped mass) or the preconditioner's norm")
     parser.add_argument("--display", type=int, default=0)
     parser.add_argument("--json", help="write the iteration histories here (rank 0)")
     args = parser.parse_args()
@@ -412,13 +429,14 @@ def main() -> None:
         print(f"mesh: {mesh.points.shape[0]} nodes, {mesh.triangles.shape[0]} triangles, "
               f"element areas {area.min():.1e} to {area.max():.1e}; {loc.n_unknowns} unknowns")
         print(f"{comm.Get_size()} ranks: owned nodes {counts}, ghost nodes {ghosts}")
-        print(f"ball: L^2 (lumped mass); preconditioner: {args.precond}; eps = {args.eps:g}\n")
+        ball = "L^2 (lumped mass)" if args.ball == "l2" else "the preconditioner's norm"
+        print(f"ball: {ball}; preconditioner: {args.precond}; eps = {args.eps:g}\n")
         print("    p  iterations  accepted  Lanczos steps  ||u - u*|| / ||u*||    time")
     histories = {}
     for p in args.p:
         e, u_star = manufactured_energy(loc, p, args.eps)
         start = time.perf_counter()
-        u, summary = solve(loc, e, args.precond, display=args.display)
+        u, summary = solve(loc, e, args.precond, args.ball, display=args.display)
         elapsed = comm.allreduce(time.perf_counter() - start, op=MPI.MAX)
         error = l2_error(loc, u, u_star)
         lanczos = sum(r.subproblem.lanczos_steps for r in summary.iterations)

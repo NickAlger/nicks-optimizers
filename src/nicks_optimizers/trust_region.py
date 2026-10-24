@@ -40,6 +40,12 @@ tangent vectors of a low-rank manifold):
                                        otherwise amplify rounding errors in
                                        the invisible components (see krylov).
 
+Trust region in the preconditioner's norm: pass None for both inner
+products, and the ball is { s : <P(x) s, s> <= radius^2 }. It costs nothing
+extra (the Lanczos basis is P-orthonormal) and suits preconditioners known
+only through P^{-1}, such as multigrid; gradient norms are then
+||g||_{P(x)^{-1}}, one more solve per new iterate.
+
 H and P^{-1} are the only operators the method applies; the geometry enters
 only through the two inner products (see metrics), which must be exact
 duals. The radius carries over from one point to the next, so the theory
@@ -51,6 +57,8 @@ trust_region_diagnostics).
 """
 
 import time
+
+import numpy as np
 from typing import Callable, Optional, cast
 
 from .criteria import forcing_term, gradient_converged, reduction_ratio
@@ -106,8 +114,8 @@ def trust_region_newton(
         grad: Callable[[PointT], CovectorT],
         hessvec: Optional[Callable[[PointT, VectorT], CovectorT]],
         precond_solve: Optional[Callable[[PointT, CovectorT], VectorT]],
-        ball_inner: Callable[[PointT, VectorBlockT, VectorT], Coords],
-        ball_dual_inner: Callable[[PointT, CovectorBlockT, CovectorT], Coords],
+        ball_inner: Optional[Callable[[PointT, VectorBlockT, VectorT], Coords]],
+        ball_dual_inner: Optional[Callable[[PointT, CovectorBlockT, CovectorT], Coords]],
         x0: PointT,
         space: Optional[VectorSpace[PointT, VectorT, CovectorT, VectorBlockT, CovectorBlockT]] = None,
         retract: Optional[Callable[[PointT, VectorT], PointT]] = None,
@@ -189,12 +197,25 @@ def trust_region_newton(
     if operators_at is not None and (hessvec is not None or precond_solve is not None):
         raise ValueError("pass either hessvec and precond_solve, or operators_at, not both")
 
+    if (ball_inner is None) != (ball_dual_inner is None):
+        raise ValueError("pass both inner products, or neither (trust region in the P-norm)")
+    matched = ball_dual_inner is None
+
     def frozen_operators(x: PointT) -> tuple[Callable[[VectorT], CovectorT],
                                              Callable[[CovectorT], VectorT]]:
         if operators_at is not None:
             return operators_at(x)
         assert hessvec is not None and precond_solve is not None
         return (lambda v: hessvec(x, v)), (lambda w: precond_solve(x, w))
+
+    def dual_norm(x: PointT, g: CovectorT,
+                  operators: Optional[tuple[Callable[[VectorT], CovectorT],
+                                            Callable[[CovectorT], VectorT]]]) -> float:
+        """||g||_{M^{-1}}; with M = P, sqrt(<g, P^{-1} g>)."""
+        if ball_dual_inner is None:
+            assert operators is not None
+            return float(np.sqrt(max(sp.pair(g, operators[1](g)), 0.0)))
+        return covector_norm(sp, lambda Psi, phi: ball_dual_inner(x, Psi, phi), g)
 
     start = time.perf_counter()
     sp = space if space is not None else cast(
@@ -216,11 +237,13 @@ def trust_region_newton(
         g, grad_calls = canonical(x, g0), 0
     else:
         g, grad_calls = canonical(x, grad(x)), 1
-    gnorm = covector_norm(sp, lambda Psi, phi: ball_dual_inner(x, Psi, phi), g)
+    operators: Optional[tuple[Callable[[VectorT], CovectorT], Callable[[CovectorT], VectorT]]] = (
+        frozen_operators(x) if matched else None)
+    gnorm = dual_norm(x, g, operators)
+    outer_precond_calls = 1 if matched else 0
     if gnorm0 is None:
         gnorm0 = gnorm
     records: list[IterationRecord] = []
-    operators: Optional[tuple[Callable[[VectorT], CovectorT], Callable[[CovectorT], VectorT]]] = None
     while True:
         if gradient_converged(gnorm, gnorm0, gtol, rtol):
             reason: RunReason = "converged"
@@ -236,8 +259,8 @@ def trust_region_newton(
             operators = frozen_operators(x)
         s, stats = solve_tr_subproblem(
             sp, g, operators[0], operators[1],
-            lambda U, v: ball_inner(x, U, v),
-            lambda Psi, phi: ball_dual_inner(x, Psi, phi),
+            None if ball_inner is None else (lambda U, v: ball_inner(x, U, v)),
+            None if ball_dual_inner is None else (lambda Psi, phi: ball_dual_inner(x, Psi, phi)),
             radius, forcing * gnorm, max_lanczos,
             g_dual_norm=gnorm, stall_tol=stall_tol, saddle_free=saddle_free,
             project_covector=None if project_covector is None else (
@@ -259,11 +282,14 @@ def trust_region_newton(
         records.append(record)
         if accepted:
             x, fx = x_trial, f_trial
-            operators = None
+            operators = frozen_operators(x) if matched else None
             g = canonical(x, grad(x))
             grad_calls += 1
-            gnorm = covector_norm(sp, lambda Psi, phi: ball_dual_inner(x, Psi, phi), g)
-            outer_dual_calls += 1
+            gnorm = dual_norm(x, g, operators)
+            if matched:
+                outer_precond_calls += 1
+            else:
+                outer_dual_calls += 1
         radius = new_radius
         it += 1
         if display >= 1:
@@ -276,7 +302,8 @@ def trust_region_newton(
 
     final_state = ResumeState(radius=radius, gnorm0=gnorm0, next_iteration=it, f=fx)
     summary = build_summary(reason, records, fx, gnorm, gnorm0, fun_calls, grad_calls,
-                            outer_dual_calls, time.perf_counter() - start, final_state)
+                            outer_dual_calls if not matched else 0, time.perf_counter() - start,
+                            final_state, outer_precond_calls)
     if display >= 1:
         print_fn(format_summary(summary))
     return x, summary

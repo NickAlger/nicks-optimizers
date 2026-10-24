@@ -174,8 +174,8 @@ def boundary_stalled(lam: float, model_value: float, prev_model_value: Optional[
 def solve_tr_subproblem(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlockT, CovectorBlockT],
                         g: CovectorT, hessvec: Callable[[VectorT], CovectorT],
                         precond_solve: Callable[[CovectorT], VectorT],
-                        ball_inner: Callable[[VectorBlockT, VectorT], Coords],
-                        ball_dual_inner: Callable[[CovectorBlockT, CovectorT], Coords],
+                        ball_inner: Optional[Callable[[VectorBlockT, VectorT], Coords]],
+                        ball_dual_inner: Optional[Callable[[CovectorBlockT, CovectorT], Coords]],
                         radius: float, resid_tol: float, max_iter: int,
                         g_dual_norm: Optional[float] = None, stall_tol: float = 1e-3,
                         saddle_free: bool = False, breakdown_tol: float = 1e-12,
@@ -188,7 +188,12 @@ def solve_tr_subproblem(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlo
     The operators and inner products are frozen at the current point; the
     inner products take a block as their first argument (see the module
     docstring) and must be exact duals. g_dual_norm = ||g||_{M^{-1}} may be
-    passed in to save one call. project_covector, for representations with
+    passed in to save one call.
+
+    Passing None for both inner products means M = P, the trust region of
+    the preconditioner's norm. Then nothing has to be computed: the basis is
+    P-orthonormal, so G = I and W = I (with the pending vector), and
+    ||g||_{P^{-1}} = gamma0; g_dual_norm is ignored. project_covector, for representations with
     redundant components, maps covectors to canonical representatives; it is
     applied to every Krylov covector (see krylov).
 
@@ -206,15 +211,20 @@ def solve_tr_subproblem(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlo
 
     Returns (s, stats): the step and its SubproblemStats.
     """
+    if (ball_inner is None) != (ball_dual_inner is None):
+        raise ValueError("pass both inner products, or neither (M = P)")
     dual_calls = 0
-    if g_dual_norm is None:
+    if ball_dual_inner is not None and g_dual_norm is None:
         g_dual_norm = covector_norm(space, ball_dual_inner, g)
         dual_calls += 1
     state = lanczos_start(space, g, precond_solve)
     if space.dimension is not None:
         max_iter = min(max_iter, space.dimension(state.q))
-    G = ball_inner(state.Q, state.q).reshape(1, 1)              # (q0, q0)_M
-    W = np.array([[(g_dual_norm / state.gamma0) ** 2]])         # (v0, v0)_{M^{-1}}
+    if ball_inner is None or g_dual_norm is None:              # M = P
+        G, W = np.ones((1, 1)), np.ones((1, 1))
+    else:
+        G = ball_inner(state.Q, state.q).reshape(1, 1)          # (q0, q0)_M
+        W = np.array([[(g_dual_norm / state.gamma0) ** 2]])     # (v0, v0)_{M^{-1}}
     prev_model_value: Optional[float] = None
     trace_model: list[float] = []
     trace_resid: list[float] = []
@@ -227,6 +237,8 @@ def solve_tr_subproblem(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlo
         # W covers the basis V plus the pending covector v_next.
         if state.breakdown:
             W_next = grow_gram(W, np.zeros(k + 1))
+        elif ball_dual_inner is None:
+            W_next = np.eye(k + 1)
         else:
             W_next = extend_dual_gram(space, W, state.V, state.v_next, ball_dual_inner)
             dual_calls += 1
@@ -249,13 +261,15 @@ def solve_tr_subproblem(space: VectorSpace[PointT, VectorT, CovectorT, VectorBlo
                 model_value=model_value, true_model_value=true_model_value,
                 resid=resid, resid_tol=resid_tol, n_negative=n_negative,
                 theta_min=float(theta[0]),
-                hessvec_calls=k, precond_calls=k + 1, inner_calls=k, dual_inner_calls=dual_calls,
+                hessvec_calls=k, precond_calls=k + 1,
+                inner_calls=0 if ball_inner is None else k, dual_inner_calls=dual_calls,
                 trace_model=tuple(trace_model), trace_resid=tuple(trace_resid),
                 trace_lam=tuple(trace_lam), trace_negative=tuple(trace_negative))
             return space.combine_vectors(state.Q, y), stats
 
         prev_model_value = model_value
         # The pending vector joins the basis at the next lanczos_advance.
-        G = extend_metric_gram(space, G, state.Q, state.q_next, ball_inner)
+        G = (np.eye(k + 1) if ball_inner is None
+             else extend_metric_gram(space, G, state.Q, state.q_next, ball_inner))
         W = W_next
     raise AssertionError("unreachable: the loop returns at k == max_iter")
