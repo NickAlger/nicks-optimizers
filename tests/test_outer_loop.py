@@ -253,3 +253,35 @@ def test_operator_arguments_are_checked() -> None:
         except ValueError:
             continue
         raise AssertionError("invalid operator arguments were accepted")
+
+
+def test_trust_region_in_the_preconditioner_norm() -> None:
+    """Passing no inner products means M = P. With the diagonal (Jacobi)
+    preconditioner of the Rosenbrock problem, (u, v)_P can also be written
+    out explicitly: both runs take the same steps, and the M = P run makes no
+    inner-product calls."""
+    from problems import rosen_hess_diag
+    x0 = Point(np.tile([-1.2, 1.0], 25))
+
+    def jacobi_diagonal(x: Point) -> Array:
+        """The P(x) of jacobi_precond_solve."""
+        diagonal: Array = np.maximum(np.abs(rosen_hess_diag(x)), 1.0)
+        return diagonal
+
+    def p_inner(x: Point, U: VectorBlock, v: Vector) -> Array:
+        return U.T @ (jacobi_diagonal(x) * v)
+
+    def p_dual_inner(x: Point, Psi: CovectorBlock, phi: Covector) -> Array:
+        return Psi.T @ (phi / jacobi_diagonal(x))
+
+    _, explicit = trust_region_newton(rosen_fun, rosen_grad, rosen_hessvec, jacobi_precond_solve,
+                                      p_inner, p_dual_inner, x0)
+    _, matched = trust_region_newton(rosen_fun, rosen_grad, rosen_hessvec, jacobi_precond_solve,
+                                     None, None, x0)
+    a, b = explicit.iterations, matched.iterations
+    assert len(a) == len(b) and matched.reason == explicit.reason == "converged"
+    assert [(r.accepted, r.subproblem.lanczos_steps) for r in a] == \
+        [(r.accepted, r.subproblem.lanczos_steps) for r in b]
+    assert max(abs(r.f - s.f) / max(1.0, abs(r.f)) for r, s in zip(a, b)) < 1e-10
+    assert max(abs(r.gnorm - s.gnorm) / r.gnorm for r, s in zip(a, b)) < 1e-6
+    assert matched.inner_calls == 0 and matched.dual_inner_calls == 0

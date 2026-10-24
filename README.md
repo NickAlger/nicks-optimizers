@@ -99,6 +99,11 @@ operators frozen at `x`, built once per iterate and reused after rejected
 steps, so setup they share (assembling a Hessian, building a multigrid
 hierarchy) happens once per point.
 
+Passing `None` for both inner products makes the trust region the ball of the
+preconditioner's norm, `<P(x) s, s> <= radius^2` (classic Steihaug-Toint). It
+costs nothing extra, since the Krylov basis is P-orthonormal, and works when P
+is known only through `P^{-1}`, such as multigrid.
+
 `H` and `P^{-1}` are the only operators the method applies. The two inner
 products must be **exact duals** of each other: the residual norm on the
 trust-region boundary relies on `(M u, M v)_{M^{-1}} = (u, v)_M`. For `M = I`

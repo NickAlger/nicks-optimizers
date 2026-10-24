@@ -169,15 +169,17 @@ def history_array(summary: RunSummary) -> Array:
 
 def build_summary(reason: RunReason, records: list[IterationRecord], f: float, gnorm: float,
                   gnorm0: float, fun_calls: int, grad_calls: int, outer_dual_calls: int,
-                  elapsed: float, resume: ResumeState) -> RunSummary:
-    """Assemble the RunSummary, adding up the work recorded per iteration."""
+                  elapsed: float, resume: ResumeState, outer_precond_calls: int = 0) -> RunSummary:
+    """Assemble the RunSummary, adding up the work recorded per iteration.
+    The outer_* counts are calls made outside the subproblems (gradient
+    norms)."""
     subs = [r.subproblem for r in records]
     return RunSummary(
         reason=reason, iterations=tuple(records), f=f, gnorm=gnorm, gnorm0=gnorm0,
         accepted_steps=sum(r.accepted for r in records),
         fun_calls=fun_calls, grad_calls=grad_calls,
         hessvec_calls=sum(s.hessvec_calls for s in subs),
-        precond_calls=sum(s.precond_calls for s in subs),
+        precond_calls=outer_precond_calls + sum(s.precond_calls for s in subs),
         inner_calls=sum(s.inner_calls for s in subs),
         dual_inner_calls=outer_dual_calls + sum(s.dual_inner_calls for s in subs),
         elapsed=elapsed, resume=resume)

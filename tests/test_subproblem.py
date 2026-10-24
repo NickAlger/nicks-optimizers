@@ -248,3 +248,27 @@ def test_dual_requirement() -> None:
 
 def test_mismatch_example() -> None:
     assert check_mismatch_example()
+
+
+def test_preconditioner_norm_ball() -> None:
+    """ball_inner = ball_dual_inner = None means M = P: the same steps as
+    passing (u, v)_P and its dual explicitly, plain and saddle-free, with the
+    trust region inactive, active, and in the hard case regime."""
+    rng = np.random.default_rng(11)
+    n = 60
+    H = matrix_with_spectrum(np.concatenate([[-3.0, -1.0], np.linspace(0.5, 20.0, n - 2)]), rng)
+    P = random_spd(n, 50.0, rng)
+    g = Covector(rng.standard_normal(n))
+    for radius in (1e-3, 0.5, 1e3):
+        for saddle_free in (False, True):
+            steps = []
+            for inner, dual in ((dense_inner(P), dense_dual_inner(P)), (None, None)):
+                s, st = solve_tr_subproblem(numpy_space, g, dense_vec_to_covec(H), dense_solve(P),
+                                            inner, dual, radius, 1e-10, 40, saddle_free=saddle_free)
+                steps.append((s, st))
+            (s1, a), (s2, b) = steps
+            assert a.lanczos_steps == b.lanczos_steps and a.stop_reason == b.stop_reason
+            assert np.linalg.norm(s1 - s2) <= 1e-8 * np.linalg.norm(s1)
+            assert abs(a.lam - b.lam) <= 1e-8 * max(1.0, a.lam)
+            assert abs(a.model_value - b.model_value) <= 1e-10 * abs(a.model_value)
+            assert b.inner_calls == 0 and b.dual_inner_calls == 0

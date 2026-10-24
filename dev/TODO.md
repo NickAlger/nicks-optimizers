@@ -169,11 +169,28 @@ needed 23 / 26 / 42 and 78 / 108 / 212. At p = 3: 12 / 14 / 17 against 8 / 9 / 1
 L^2 ball admits rough steps that a gradient-dependent energy punishes, and
 more of them as the mesh is refined.
 
-**Prototype:** draft PR #1 (branch `proposal/matched-metric`). It has tests,
-distributed results (fewer Lanczos steps, milder mesh dependence at p = 5,
-smaller gains than the serial H^1 ball) and open design questions. The
-main one is that with an x-dependent P, gradient-norm stopping tests change
-meaning between iterates.
+**Implemented** (PR #1, merged 2026-10-24): passing `None` for both inner
+products means M = P, in `solve_tr_subproblem` and `trust_region_newton`. It agrees with explicit (u, v)_P inner products step
+for step (Jacobi on Rosenbrock; dense tests at all radii, plain and
+saddle-free) and makes no inner-product calls. `p_laplacian.py` gains
+`--ball precond` and a fixed `--precond laplace`. Results on 2 ranks,
+iterations / Lanczos steps on 20/40/80 rings:
+
+| p | L^2 ball, Hessian AMG | M = P, Hessian AMG | M = P, Laplacian AMG |
+|---|---|---|---|
+| 1.5 | 9/9/9; 85/120/167 | 12/13/13; 63/101/126 | 9/10/13; 81/111/215 |
+| 3 | 16/17/23; 89/102/130 | 16/19/21; 59/90/140 | 12/18/21; 83/177/290 |
+| 5 | 43/89/120; 310/507/790 | 44/56/88; 170/259/344 | too slow: P far from H |
+
+Fewer Lanczos steps (the matched solves stop on the residual, not the stall
+test), and milder mesh dependence at p = 5. Not the serial H^1 ball's
+23/26/42: block Jacobi breaks the H^1 norm at rank interfaces.
+
+Still open: with an x-dependent P, gradient norms change meaning between
+iterates. At u = 0, p = 5, P(0) is about eps^3 K, so ||g0||_{P^{-1}} is huge,
+and rtol * gnorm0 stops at L^2 errors of 3e-6 to 3e-5 (versus 1e-9 for the
+L^2 ball). Users would pass gtol or gnorm0, or the test could use a fixed
+norm.
 
 ## Communication per Lanczos step
 
