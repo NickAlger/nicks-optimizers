@@ -1,0 +1,62 @@
+"""The Lanczos process used on its own, without any trust region."""
+
+import numpy as np
+import pytest
+
+from nicks_optimizers import (
+    Covector,
+    Vector,
+    lanczos_advance,
+    lanczos_start,
+    lanczos_tridiagonal,
+    numpy_space,
+)
+from helpers import dense_solve, dense_vec_to_covec, matrix_with_spectrum, random_spd
+
+
+def test_lanczos_as_eigensolver() -> None:
+    """Run the process to breakdown on an n-dimensional problem: it stops after
+    exactly n steps, its Ritz values (eigenvalues of T) are the eigenvalues of
+    the pencil H u = theta P u, and a broken-down process refuses to advance.
+    Earlier states are left untouched by later steps."""
+    rng = np.random.default_rng(9)
+    n = 30
+    H = matrix_with_spectrum(np.linspace(-3.0, 7.0, n), rng)
+    P = random_spd(n, 10.0, rng)
+    hessvec, precond_solve = dense_vec_to_covec(H), dense_solve(P)
+
+    state = lanczos_start(numpy_space, Covector(rng.standard_normal(n)), precond_solve)
+    history = [state]
+    while not state.breakdown and state.steps < n + 2:
+        state = lanczos_advance(numpy_space, state, hessvec, precond_solve)
+        history.append(state)
+    assert state.steps == n
+
+    Linv = np.linalg.inv(np.linalg.cholesky(P))
+    exact = np.linalg.eigvalsh(Linv @ H @ Linv.T)
+    ritz = np.linalg.eigvalsh(lanczos_tridiagonal(state))
+    assert np.max(np.abs(ritz - exact)) <= 1e-9 * np.max(np.abs(exact))
+
+    with pytest.raises(ValueError):
+        lanczos_advance(numpy_space, state, hessvec, precond_solve)
+
+    # Frozen states: each one still describes its own step count.
+    for k, earlier in enumerate(history):
+        assert earlier.steps == k
+        assert len(earlier.deltas) == k
+        assert earlier.Q.shape[1] == max(k, 1)
+
+
+def test_extreme_ritz_values_converge_early() -> None:
+    """The typical eigensolver use: a few steps already resolve the extreme
+    eigenvalues of a pencil with well-separated ends of its spectrum."""
+    rng = np.random.default_rng(10)
+    n = 200
+    evals = np.concatenate([[-50.0, -20.0], np.linspace(1.0, 2.0, n - 4), [40.0, 100.0]])
+    H = matrix_with_spectrum(evals, rng)
+    state = lanczos_start(numpy_space, Covector(rng.standard_normal(n)), lambda w: Vector(w))
+    for _ in range(25):
+        state = lanczos_advance(numpy_space, state, dense_vec_to_covec(H), lambda w: Vector(w))
+    ritz = np.linalg.eigvalsh(lanczos_tridiagonal(state))
+    assert abs(ritz[0] - (-50.0)) <= 1e-8 * 50.0
+    assert abs(ritz[-1] - 100.0) <= 1e-8 * 100.0

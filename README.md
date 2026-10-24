@@ -156,6 +156,27 @@ With the same options and deterministic functions, the resumed run reproduces
 the uninterrupted one exactly. A state saved at a different point than `x` is
 detected and rejected. See [`examples/checkpointing.py`](examples/checkpointing.py).
 
+## Package layout
+
+Modules in dependency order. The first five do not depend on the trust-region
+code and are meant to be reused by other optimizers.
+
+| module | contents |
+|---|---|
+| `spaces` | how points, vectors and covectors are represented: `VectorSpace`, `numpy_space`, `numpy_space_with_reductions`, `tuple_block_space`, `check_space` |
+| `metrics` | inner products and norms: `InnerProduct`, `DualInnerProduct`, `euclidean_inner`, `vector_norm`, `covector_norm`, Gram-matrix growth |
+| `dense` | small dense linear algebra in coordinates: Rayleigh–Ritz for a projected pencil, the trust-region problem on a ball (with the hard case) |
+| `krylov` | preconditioned Lanczos as an immutable process: `lanczos_start`, `lanczos_advance`, `LanczosState`, `lanczos_tridiagonal` |
+| `criteria` | tests shared by inexact Newton methods: `gradient_converged`, `forcing_term`, `reduction_ratio` |
+| `trust_region_subproblem` | the trust-region subproblem over a Krylov space: `solve_tr_subproblem` |
+| `trust_region_diagnostics` | records, `ResumeState`, and text output |
+| `trust_region` | `trust_region_newton` |
+
+The Lanczos process knows nothing about trust regions or inner products, so the
+same `lanczos_advance` loop serves other consumers, e.g. Ritz values of the
+pencil `(H, P)` for spectral estimates or low-rank approximations
+([`tests/test_krylov.py`](tests/test_krylov.py) uses it as an eigensolver).
+
 ## License
 
 MIT, see [LICENSE](LICENSE).

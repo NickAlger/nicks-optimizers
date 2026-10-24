@@ -7,26 +7,24 @@ import numpy as np
 
 from nicks_optimizers import (
     Array,
-    BallDualInner,
-    BallInner,
     Covector,
     CovectorBlock,
+    DualInnerProduct,
+    InnerProduct,
     Point,
     Vector,
     VectorBlock,
     covector_norm,
     euclidean_dual_inner,
     euclidean_inner,
+    forcing_term,
     history_array,
     numpy_space,
+    reduction_ratio,
     solve_tr_subproblem,
     trust_region_newton,
 )
-from nicks_optimizers.ellipsoidal_tr import (
-    forcing_term,
-    reduction_ratio,
-    update_radius,
-)
+from nicks_optimizers.trust_region import update_radius
 from helpers import (
     Rng,
     dense_from_operator,
@@ -75,7 +73,7 @@ def check_problem_operators(rng: Rng) -> bool:
     return ok
 
 
-def reference_iterations(x0: Array, inner: BallInner, dual_inner: BallDualInner,
+def reference_iterations(x0: Array, inner: InnerProduct, dual_inner: DualInnerProduct,
                          n_iter: int, radius: float = 1.0) -> Point:
     """Outer iterations written out by hand, with every operator and inner
     product evaluated at the current point; same defaults as trust_region_newton."""
@@ -161,7 +159,7 @@ def check_gnorm0_and_rtol() -> bool:
 def run_and_report(label: str, fun: Callable[[Point], float], grad: Callable[[Point], Covector],
                    hessvec: Callable[[Point, Vector], Covector],
                    precond_solve: Callable[[Point, Covector], Vector],
-                   inner: BallInner, dual_inner: BallDualInner,
+                   inner: InnerProduct, dual_inner: DualInnerProduct,
                    x0: Point, saddle_free: bool) -> bool:
     x, summary = trust_region_newton(
         fun, grad, hessvec, precond_solve, inner, dual_inner, x0,

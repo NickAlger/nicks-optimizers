@@ -6,19 +6,16 @@ import numpy as np
 
 from nicks_optimizers import (
     Array,
-    BlockDualInner,
     Covector,
+    FrozenDualInnerProduct,
     Point,
     euclidean_inner,
     numpy_space,
+    solve_sphere_trs,
     solve_tr_subproblem,
     trust_region_newton,
 )
-from nicks_optimizers.ellipsoidal_tr import (
-    kkt_residual_dual_norm,
-    solve_projected_trs,
-    solve_sphere_trs,
-)
+from nicks_optimizers.trust_region_subproblem import kkt_residual_dual_norm, solve_projected_trs
 from helpers import (
     Rng,
     dense_abs_m,
@@ -195,7 +192,7 @@ def check_dual_requirement(rng: Rng) -> bool:
     H = matrix_with_spectrum(np.linspace(-2.0, 10.0, n), rng)
     P, M = random_spd(n, 30.0, rng), random_spd(n, 30.0, rng)
     g = rng.standard_normal(n)
-    pairs: list[tuple[str, BlockDualInner, Array]] = [
+    pairs: list[tuple[str, FrozenDualInnerProduct, Array]] = [
         ("exact dual (M^-1)", dense_dual_inner(M), M),
         ("Euclidean dual with M != I", lambda Psi, phi: Psi.T @ phi, np.eye(n)),
     ]

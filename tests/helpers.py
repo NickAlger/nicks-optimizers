@@ -7,12 +7,12 @@ import numpy as np
 
 from nicks_optimizers import (
     Array,
-    BlockDualInner,
-    BlockInner,
     Coords,
     Covector,
     CovectorBlock,
     CovectorToVector,
+    FrozenDualInnerProduct,
+    FrozenInnerProduct,
     IterationRecord,
     RunSummary,
     Vector,
@@ -22,16 +22,13 @@ from nicks_optimizers import (
     format_lanczos_trace,
     format_row,
     format_summary,
+    lanczos_advance,
+    lanczos_start,
+    lanczos_tridiagonal,
     numpy_space,
     solve_tr_subproblem,
 )
-from nicks_optimizers.ellipsoidal_tr import (
-    extend_dual_gram,
-    extend_metric_gram,
-    lanczos_start,
-    lanczos_step,
-    tridiagonal,
-)
+from nicks_optimizers.metrics import extend_dual_gram, extend_metric_gram
 
 
 Rng = np.random.Generator
@@ -63,12 +60,12 @@ def dense_solve(A: Array) -> CovectorToVector:
     return lambda w: Vector(np.linalg.solve(A, w))
 
 
-def dense_inner(M: Array) -> BlockInner:
+def dense_inner(M: Array) -> FrozenInnerProduct:
     """(U, v)_M = U^T M v, one M product per call."""
     return lambda U, v: U.T @ (M @ v)
 
 
-def dense_dual_inner(M: Array) -> BlockDualInner:
+def dense_dual_inner(M: Array) -> FrozenDualInnerProduct:
     """(Psi, phi)_{M^{-1}} = Psi^T M^{-1} phi, one solve per call."""
     return lambda Psi, phi: Psi.T @ np.linalg.solve(M, phi)
 
@@ -94,7 +91,8 @@ def report(name: str, value: float, tol: float) -> bool:
 
 def run_lanczos(H: Array, P: Array, M: Array, g: Array, k: int, reorth_passes: int = 2
                 ) -> tuple[VectorBlock, CovectorBlock, Coords, Coords, Coords, float, float, Covector]:
-    """k preconditioned Lanczos steps with dense H, P, M wrapped as operators.
+    """k steps of the Lanczos process with dense H, P, M wrapped as operators,
+    keeping the Gram matrices the way the trust-region solver does.
 
     Returns (Q, V, T, G, W, gamma0, gamma_next, v_next), where G = Q^T M Q and
     W = V_{k+1}^T M^{-1} V_{k+1} includes the pending vector v_next.
@@ -102,25 +100,17 @@ def run_lanczos(H: Array, P: Array, M: Array, g: Array, k: int, reorth_passes: i
     sp = numpy_space
     hessvec, precond_solve = dense_vec_to_covec(H), dense_solve(P)
     inner, dual_inner = dense_inner(M), dense_dual_inner(M)
-    v, q, gamma0 = lanczos_start(sp, Covector(g), precond_solve)
-    Q, V = sp.vector_block(q), sp.covector_block(v)
-    G = inner(Q, q).reshape(1, 1)
-    W = dual_inner(V, v).reshape(1, 1)
-    deltas, gammas = np.zeros(0), np.zeros(0)
-    v_prev: Covector | None = None
-    gamma_next, v_next = 0.0, v
+    state = lanczos_start(sp, Covector(g), precond_solve)
+    G = inner(state.Q, state.q).reshape(1, 1)
+    W = dual_inner(state.V, state.v).reshape(1, 1)
     for j in range(k):
-        gamma_prev = float(gammas[-1]) if gammas.size else 0.0
-        delta, gamma_next, v_next, q_next = lanczos_step(
-            sp, hessvec, precond_solve, Q, V, q, v, v_prev, gamma_prev, reorth_passes)
-        deltas = np.append(deltas, delta)
-        W = extend_dual_gram(sp, W, V, v_next, dual_inner)
+        state = lanczos_advance(sp, state, hessvec, precond_solve, reorth_passes=reorth_passes)
+        W_next = extend_dual_gram(sp, W, state.V, state.v_next, dual_inner)
         if j < k - 1:
-            gammas = np.append(gammas, gamma_next)
-            G = extend_metric_gram(sp, G, Q, q_next, inner)
-            Q, V = sp.append_vector(Q, q_next), sp.append_covector(V, v_next)
-            v_prev, v, q = v, v_next, q_next
-    return Q, V, tridiagonal(deltas, gammas), G, W, gamma0, gamma_next, v_next
+            G = extend_metric_gram(sp, G, state.Q, state.q_next, inner)
+            W = W_next
+    return (state.Q, state.V, lanczos_tridiagonal(state), G, W_next, state.gamma0,
+            state.gamma_next, state.v_next)
 
 
 def sphere_kkt_error(A: Array, b: Array, radius: float, z: Array, lam: float) -> float:

@@ -8,8 +8,8 @@ import numpy as np
 
 from nicks_optimizers import (
     Array,
-    BallDualInner,
-    BallInner,
+    DualInnerProduct,
+    InnerProduct,
     Coords,
     Covector,
     CovectorBlock,
@@ -81,7 +81,7 @@ def weighted_dual_inner(x: Point, Psi: CovectorBlock, phi: Covector) -> Coords:
     return Psi.T @ solve_symmetric_tridiagonal(d, -SMOOTHING, phi)
 
 
-METRICS: list[tuple[str, BallInner, BallDualInner]] = [
+METRICS: list[tuple[str, InnerProduct, DualInnerProduct]] = [
     ("identity ball", euclidean_inner, euclidean_dual_inner),
     ("smoothing ball, M = I + 10 L", smoothing_inner, smoothing_dual_inner),
     ("x-dependent ball, M(x) = diag(1+x^2) + 10 L", weighted_inner, weighted_dual_inner),
@@ -210,7 +210,7 @@ COUPLED = 0.5
 
 CoupledProblem = tuple[
     Callable[[Point], float], Callable[[Point], Covector], Callable[[Point, Vector], Covector],
-    Callable[[Point, Covector], Vector], BallInner, BallDualInner]
+    Callable[[Point, Covector], Vector], InnerProduct, DualInnerProduct]
 
 
 def coupled_problem(b: Array, d: Array, allreduce: Callable[[Coords], Coords]) -> CoupledProblem:
