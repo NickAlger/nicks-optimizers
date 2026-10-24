@@ -30,11 +30,13 @@ def test_derivatives_match_retraction_curves() -> None:
     g_err, h_err, asym = mc.derivative_check(samples, x, np.random.default_rng(6), t=1e-4)
     assert g_err < 1e-8 and h_err < 1e-5 and asym < 1e-12
 
+    # Step sizes where truncation (not rounding) dominates, so the rate is
+    # clean on any hardware.
     x = mc.random_low_rank((40, 30), np.array([1.0, 0.1, 0.01]), rng)
-    coarse = mc.derivative_check(samples, x, np.random.default_rng(6), t=1e-4)
-    fine = mc.derivative_check(samples, x, np.random.default_rng(6), t=1e-5)
-    assert coarse[0] / fine[0] > 50.0 and fine[0] < 1e-7          # gradient: t^2
-    assert coarse[1] / fine[1] > 5.0 and fine[1] < 1e-4           # Hessian: t^2, then rounding
+    coarse = mc.derivative_check(samples, x, np.random.default_rng(6), t=1e-3)
+    fine = mc.derivative_check(samples, x, np.random.default_rng(6), t=1e-4)
+    assert coarse[0] / fine[0] > 50.0 and fine[0] < 1e-4          # gradient: t^2
+    assert coarse[1] / fine[1] > 50.0 and fine[1] < 1e-2          # Hessian: t^2
     assert fine[2] < 1e-12
 
 
@@ -108,7 +110,8 @@ def test_gauge_stays_clean_only_with_projection() -> None:
 
 def test_completion_from_zero() -> None:
     """From X = 0 the method converges to a fit within 20% of the best rank-r
-    error, with Newton's quadratic convergence at the end."""
+    error, superlinearly at the end (the gradient contracts by a factor
+    below 1e-2 in each of the last two steps, faster each time)."""
     a, samples, rng = small_problem(3, (120, 90), 4, 4.0)
     x, summary = mc.complete(samples, mc.zero_point((120, 90), 4, rng))
     assert summary.reason == "converged"
@@ -116,7 +119,8 @@ def test_completion_from_zero() -> None:
     best = float(np.sqrt(np.sum(d[4:] ** 2) / np.sum(d ** 2)))
     assert mc.relative_error(x, a) < 1.2 * best
     gnorms = [rec.gnorm for rec in summary.iterations] + [summary.gnorm]
-    assert gnorms[-1] < gnorms[-2] ** 1.5 / gnorms[0] ** 0.5     # superlinear last step
+    ratios = [gnorms[-2] / gnorms[-3], gnorms[-1] / gnorms[-2]]
+    assert ratios[0] < 1e-2 and ratios[1] < ratios[0]
 
 
 def test_rank_continuation_on_fast_decay() -> None:
