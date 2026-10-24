@@ -106,6 +106,12 @@ pass `euclidean_inner` and `euclidean_dual_inner`. Inner products take a block
 first so an implementation can apply `M` once per call, e.g.
 `lambda x, U, v: U.T @ (M @ v)`.
 
+The initial `radius` (default 1.0) is an absolute length in the M-norm, so
+scale it to the problem when you know the size of a sensible first step. The
+radius adapts after that, but a start that is far too large costs one
+rejected step per factor of 4. An automatic choice from the model at `x0`
+proved unreliable, and the evidence is in [`dev/TODO.md`](dev/TODO.md).
+
 Gradient norms are dual norms, `||g||_{M^{-1}}`, so the stopping tests are
 invariant under changes of variables. The run stops when
 `||g|| <= max(gtol, rtol * gnorm0)`, where `gnorm0` defaults to `||g(x0)||`.

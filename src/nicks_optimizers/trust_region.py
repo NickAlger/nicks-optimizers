@@ -149,6 +149,10 @@ def trust_region_newton(
     and covectors at x is redundant (a subspace or quotient of the stored
     components), pass project_covector (see the module docstring).
 
+    The initial radius is an absolute length in the M-norm (default 1.0);
+    scale it to the problem when a sensible first step size is known, since
+    each factor of 4 too large costs a rejected step.
+
     Gradient norms are dual norms, ||g|| = ||g||_{M(x)^{-1}}. With saddle_free, the model
     Hessian is |H|_{M}, approximated through the M-Ritz pairs of the Krylov
     space, so saddle points repel the iterates instead of attracting them.
