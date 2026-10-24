@@ -45,7 +45,10 @@ solved by truncated conjugate gradients (five vectors, two reductions per
 step) unless krylov="lanczos" asks for the reorthogonalized Lanczos solver
 (exact subspace solutions on the boundary, more robust in floating point).
 With a separate P, Lanczos builds the M-Gram matrix with metric_apply and
-measures residuals with metric_solve.
+measures residuals with metric_solve. krylov="flexible" (with a separate P)
+grows the subspace by applying P to the KKT residual and forms the projected
+Hessian explicitly, so P may be nonsymmetric, nonlinear or stochastic (see
+solve_tr_subproblem_flexible).
 
 Per-point setup, instead of the operator arguments:
   operators_at(x) -> PointOperators    all the operators at x, frozen
@@ -73,9 +76,10 @@ The radius carries over from one point to the next, so the theory wants
 M(x) uniformly equivalent to a fixed norm over the iterates; an x-dependent
 M also moves the norm of the stopping test.
 
-Each iteration computes a step with solve_tr_subproblem or
-solve_tr_subproblem_cg (see trust_region_subproblem) and records what
-happened (see trust_region_diagnostics).
+Each iteration computes a step with solve_tr_subproblem,
+solve_tr_subproblem_cg or solve_tr_subproblem_flexible (see
+trust_region_subproblem) and records what happened (see
+trust_region_diagnostics).
 """
 
 import time
@@ -104,7 +108,11 @@ from .trust_region_diagnostics import (
     display_iteration,
     format_summary,
 )
-from .trust_region_subproblem import solve_tr_subproblem, solve_tr_subproblem_cg
+from .trust_region_subproblem import (
+    solve_tr_subproblem,
+    solve_tr_subproblem_cg,
+    solve_tr_subproblem_flexible,
+)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -162,7 +170,7 @@ def trust_region_newton(
         operators_at: Optional[Callable[[PointT], PointOperators[VectorT, CovectorT]]] = None,
         project_covector: Optional[Callable[[PointT, CovectorT], CovectorT]] = None,
         saddle_free: bool = False,
-        krylov: Literal["auto", "cg", "lanczos"] = "auto",
+        krylov: Literal["auto", "cg", "lanczos", "flexible"] = "auto",
         convergence_norm: Literal["metric", "preconditioner"] = "metric",
         radius: float = 1.0, radius_max: float = 1e4,
         radius_min: float = 1e-14, eta: float = 1e-4,
@@ -196,8 +204,10 @@ def trust_region_newton(
 
     Subproblem solver (krylov): "auto" uses truncated CG when P = M and
     saddle_free is off, and Lanczos otherwise; "lanczos" forces Lanczos; "cg"
-    forces CG and requires P = M and no saddle_free. At most max_krylov steps
-    per solve. With saddle_free, the model Hessian is |H|_{M}, approximated
+    forces CG and requires P = M and no saddle_free; "flexible" uses
+    solve_tr_subproblem_flexible and requires a separate P (any map from
+    covectors to vectors) and metric_apply. At most max_krylov steps per
+    solve. With saddle_free, the model Hessian is |H|_{M}, approximated
     through the M-Ritz pairs of the Krylov space, so saddle points repel the
     iterates instead of attracting them.
 
@@ -206,7 +216,8 @@ def trust_region_newton(
     forcing = forcing_term(...) computed from the convergence norm. Lanczos
     also stops when the trust region is active and the model stops changing
     (stall_tol); CG stops when its next iterate would leave the trust region
-    or it meets negative curvature, and then steps to the boundary.
+    or it meets negative curvature, and then steps to the boundary; the
+    flexible solver stops on the residual (or a breakdown) only.
 
     Convergence: stops when ||g|| <= max(gtol, rtol * gnorm0); with the
     default gtol = 0, when ||g|| <= rtol ||g(x0)||. The norm is
@@ -253,8 +264,10 @@ def trust_region_newton(
         raise ValueError("with a space, pass retract (flat_retraction(space) gives x + s)")
     if not numpy_default and operators_at is None and metric_solve is None:
         raise ValueError("with a space, pass metric_solve (euclidean_metric_solve gives M = I)")
-    if krylov not in ("auto", "cg", "lanczos"):
-        raise ValueError(f"krylov must be 'auto', 'cg' or 'lanczos', not {krylov!r}")
+    if krylov not in ("auto", "cg", "lanczos", "flexible"):
+        raise ValueError(f"krylov must be 'auto', 'cg', 'lanczos' or 'flexible', not {krylov!r}")
+    if krylov == "flexible" and operators_at is None and (precond_solve is None or metric_apply is None):
+        raise ValueError("krylov='flexible' needs a separate precond_solve, and metric_apply")
     if krylov == "cg" and (saddle_free or precond_solve is not None):
         raise ValueError("krylov='cg' needs P = M (no precond_solve) and saddle_free=False")
     if convergence_norm not in ("metric", "preconditioner"):
@@ -295,18 +308,24 @@ def trust_region_newton(
             raise ValueError("a separate preconditioner needs metric_apply (M)")
         if krylov == "cg" and given.precond_solve is not None:
             raise ValueError("krylov='cg' needs P = M (no precond_solve)")
+        if krylov == "flexible" and given.precond_solve is None:
+            raise ValueError("krylov='flexible' needs a separate precond_solve, and metric_apply")
         return PointOperators(hessvec=given.hessvec, metric_solve=Ms,
                               precond_solve=given.precond_solve, metric_apply=Ma)
 
     def gradient_norms(g: CovectorT, ops: PointOperators[VectorT, CovectorT]
                        ) -> tuple[float, float, Optional[VectorT], int, int]:
         """(convergence norm, ||g||_{M^{-1}}, start vector, M^{-1} solves,
-        P^{-1} solves). The start vector is P^{-1} g when it was computed
-        anyway (M^{-1} g when P = M), for the subproblem to reuse."""
+        P^{-1} solves). The start vector is what the subproblem solver starts
+        from, when it was computed anyway: M^{-1} g for CG and the flexible
+        solver, P^{-1} g for Lanczos (M^{-1} g when P = M)."""
         assert ops.metric_solve is not None
         Mg = ops.metric_solve(g)
         m_norm = float(np.sqrt(max(sp.pair(g, Mg), 0.0)))
-        if ops.precond_solve is None:
+        if ops.precond_solve is None or krylov == "flexible":
+            if convergence_norm == "preconditioner" and ops.precond_solve is not None:
+                Pg = ops.precond_solve(g)
+                return float(np.sqrt(max(sp.pair(g, Pg), 0.0))), m_norm, Mg, 1, 1
             return m_norm, m_norm, Mg, 1, 0
         if convergence_norm == "preconditioner":
             Pg = ops.precond_solve(g)
@@ -354,6 +373,12 @@ def trust_region_newton(
         if use_cg:
             s, stats = solve_tr_subproblem_cg(
                 sp, g, ops.hessvec, ops.metric_solve, radius, forcing * metric_gnorm, max_krylov,
+                project_covector=project, start_vector=start_vector)
+        elif krylov == "flexible":
+            assert ops.precond_solve is not None and ops.metric_apply is not None
+            s, stats = solve_tr_subproblem_flexible(
+                sp, g, ops.hessvec, ops.metric_solve, ops.metric_apply, ops.precond_solve,
+                radius, forcing * metric_gnorm, max_krylov, saddle_free=saddle_free,
                 project_covector=project, start_vector=start_vector)
         else:
             s, stats = solve_tr_subproblem(

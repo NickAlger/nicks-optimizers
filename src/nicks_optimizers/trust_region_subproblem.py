@@ -3,14 +3,20 @@
     min_s  <g, s> + 0.5 <H_model s, s>    s.t.  ||s||_M <= radius,
 
 where M is the metric (the geometry, see metrics) and H_model is H, or |H|_M
-for the saddle-free model. A preconditioner P only chooses the Krylov space
-K_k(P^{-1} H, P^{-1} g); by default P = M. Two solvers:
+for the saddle-free model. A preconditioner P only chooses the subspace;
+by default P = M. Three solvers:
 
-  solve_tr_subproblem     Lanczos with full reorthogonalization: any P,
-                          and the saddle-free model.
-  solve_tr_subproblem_cg  Steihaug-Toint truncated conjugate gradients for
-                          P = M and the plain model: five vectors, two
-                          reductions per step.
+  solve_tr_subproblem           Lanczos with full reorthogonalization over
+                                K_k(P^{-1} H, P^{-1} g): any symmetric
+                                positive definite P, and the saddle-free
+                                model.
+  solve_tr_subproblem_cg        Steihaug-Toint truncated conjugate gradients
+                                for P = M and the plain model: five vectors,
+                                two reductions per step.
+  solve_tr_subproblem_flexible  a subspace grown by applying P to the KKT
+                                residual, for preconditioners that are
+                                nonsymmetric, nonlinear (inexact inner
+                                solves) or stochastic; needs M and M^{-1}.
 
 Lanczos. With T = <H Q, Q> and G = [(q_i, q_j)_M] = L L^T, the matrix
 A = L^{-1} T L^{-T} is H in the M-orthonormal basis Q L^{-T}, so its
@@ -43,7 +49,7 @@ from typing import Callable, Literal, Optional
 
 import numpy as np
 
-from .dense import pencil_ritz, solve_sphere_trs_eig
+from .dense import grow_gram, pencil_ritz, solve_sphere_trs_eig
 from .krylov import (
     CGState,
     LanczosState,
@@ -66,7 +72,7 @@ from .spaces import (
 
 
 StopReason = Literal["tol", "stall", "breakdown", "max", "boundary", "negative"]
-KrylovMethod = Literal["lanczos", "cg"]
+KrylovMethod = Literal["lanczos", "cg", "flexible"]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -74,13 +80,14 @@ class SubproblemStats:
     """Diagnostics of one trust-region subproblem solve: scalars and tuples
     only, so records stay small however long the run.
 
-      krylov            "lanczos" or "cg", the solver used
+      krylov            "lanczos", "cg" or "flexible", the solver used
       krylov_steps      number of Krylov steps k (= Hessian-vector products)
       stop_reason       "tol" (residual met resid_tol), "stall" (Lanczos:
                         boundary active and the model stopped changing),
                         "breakdown" (Lanczos: invariant subspace, the subspace
-                        solution is exact), "max" (max_krylov or, for
-                        Lanczos, the dimension), "boundary" (CG: the next
+                        solution is exact; flexible: no new direction, not
+                        even M^{-1} R), "max" (max_krylov or, for Lanczos
+                        and flexible, the dimension), "boundary" (CG: the next
                         iterate would leave the trust region; the step stops
                         on it) or "negative" (CG: negative curvature along the
                         search direction; the step follows it to the boundary)
@@ -91,14 +98,18 @@ class SubproblemStats:
       true_model_value  <g,s> + 0.5 <H s, s> (differs only with saddle_free)
       resid, resid_tol  final ||R||_{M^{-1}} and the tolerance it was tested
                         against (CG: nan when the step stopped on the boundary)
-      n_negative, theta_min  Lanczos: number of negative M-Ritz values and the
-                        smallest one. CG: 1 if negative curvature was found,
-                        and the smallest <H p, p> / ||p||_M^2 seen.
+      n_negative, theta_min  Lanczos and flexible: number of negative M-Ritz
+                        values and the smallest one. CG: 1 if negative
+                        curvature was found, and the smallest
+                        <H p, p> / ||p||_M^2 seen.
       *_calls           calls of each operator made by this solve
                         (metric_solve also counts its use as the
                         preconditioner when P = M)
       trace_*           per Krylov step: model value, residual, multiplier,
                         number of negative curvature values
+      fallbacks         flexible: how often the preconditioner's direction was
+                        unusable (not finite, or nothing new) and M^{-1} R
+                        was used instead; 0 for the other solvers
     """
     krylov: KrylovMethod
     krylov_steps: int
@@ -119,6 +130,7 @@ class SubproblemStats:
     trace_resid: tuple[float, ...]
     trace_lam: tuple[float, ...]
     trace_negative: tuple[int, ...]
+    fallbacks: int = 0
 
 
 def solve_projected_trs(T: Coords, G: Coords, gamma0: float, radius: float,
@@ -394,3 +406,135 @@ def solve_tr_subproblem_cg(space: VectorSpace[VectorT, CovectorT, VectorBlockT, 
         trace_model=tuple(trace_model), trace_resid=tuple(trace_resid),
         trace_lam=tuple(trace_lam), trace_negative=tuple(trace_negative))
     return s, stats
+
+
+def solve_tr_subproblem_flexible(
+        space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
+        g: CovectorT, hessvec: Callable[[VectorT], CovectorT],
+        metric_solve: Callable[[CovectorT], VectorT],
+        metric_apply: Callable[[VectorT], CovectorT],
+        precond_solve: Callable[[CovectorT], VectorT],
+        radius: float, resid_tol: float, max_iter: int, *,
+        saddle_free: bool = False, breakdown_tol: float = 1e-10,
+        project_covector: Optional[Callable[[CovectorT], CovectorT]] = None,
+        start_vector: Optional[VectorT] = None
+        ) -> tuple[VectorT, SubproblemStats]:
+    """Approximately solve  min <g, s> + 0.5 <H_model s, s>  s.t.  ||s||_M <= radius
+    over a subspace grown with a preconditioner that need not be symmetric,
+    linear or deterministic: P^{-1} is any map from covectors to vectors
+    (an inexact inner solve, a block triangular solve, sweeps of a randomized
+    row-action method, a few steps of stochastic gradient descent, ...).
+
+    P only proposes directions; nothing relies on its properties:
+      * the basis starts with M^{-1} g, so every step gives at least the
+        decrease of the Cauchy point along -M^{-1} g;
+      * each new direction is P^{-1} R, R = H s + lam M s + g the KKT
+        residual of the current step, made M-orthonormal to the basis by
+        two Gram-Schmidt passes; if it is not finite or adds nothing (norm
+        below breakdown_tol times its norm before orthogonalization),
+        M^{-1} R is used instead ("fallback");
+      * the projected Hessian T = Q^T H Q is formed from stored products H Q,
+        and the small problem is solved exactly (as by solve_tr_subproblem,
+        with G = I), so the step is the model's minimizer over the subspace
+        and its model value is the true one;
+      * the stopping test uses the explicit residual norm ||R||_{M^{-1}}.
+    Applying P to the residual targets the system (H + lam M) s = -g that the
+    step must solve, so a separate P that approximates H (or H + lam M) is
+    effective on the boundary too, where Lanczos over K_k(P^{-1} H, P^{-1} g)
+    stalls. With P = M (fixed) the subspace is the Krylov space of the
+    Lanczos solver. With saddle_free, H_model is |H|_M (via M-Ritz pairs) and
+    R the surrogate residual of solve_tr_subproblem.
+
+    Each step costs one product with H, one application of P, one product
+    with M (two with a fallback) and one solve with M^{-1}; the blocks Q,
+    M Q and H Q are stored. start_vector = M^{-1} g, if already computed,
+    saves one solve. project_covector (for redundant representations) is
+    applied to every stored covector and residual; P's outputs must be valid
+    vectors of the representation.
+
+    Stops at the first of ||R||_{M^{-1}} <= resid_tol ("tol"), a breakdown
+    ("breakdown", not even M^{-1} R adds a direction), or max_iter steps
+    (capped at the dimension when the space provides one, "max").
+    Returns (s, stats).
+    """
+    proj = (lambda w: w) if project_covector is None else project_covector
+    hessvec_calls = precond_calls = apply_calls = solve_calls = fallbacks = 0
+    if start_vector is None:
+        Mg = metric_solve(g)
+        solve_calls += 1
+    else:
+        Mg = start_vector
+    gamma0 = float(np.sqrt(max(space.pair(g, Mg), 0.0)))
+    q = space.scale_vector(1.0 / gamma0, Mg)
+    Hq = proj(hessvec(q))
+    hessvec_calls += 1
+    Q, MQ, HQ = (space.vector_block(q), space.covector_block(space.scale_covector(1.0 / gamma0, g)),
+                 space.covector_block(Hq))
+    T = np.array([[space.pair(Hq, q)]])
+    if space.dimension is not None:
+        max_iter = min(max_iter, space.dimension(q))
+    trace_model: list[float] = []
+    trace_resid: list[float] = []
+    trace_lam: list[float] = []
+    trace_negative: list[int] = []
+
+    for k in range(1, max_iter + 1):
+        y, y_flip, lam, model_value, true_model_value, theta = solve_projected_trs(
+            T, np.eye(k), gamma0, radius, saddle_free)
+        R = space.axpy_covector(1.0, g, space.combine_covectors(HQ, y_flip))
+        if lam > 0.0:
+            R = space.axpy_covector(lam, space.combine_covectors(MQ, y), R)
+        R = proj(R)
+        MinvR = metric_solve(R)
+        solve_calls += 1
+        resid = float(np.sqrt(max(space.pair(R, MinvR), 0.0)))
+        n_negative = int(np.sum(theta < 0.0))
+        trace_model.append(model_value)
+        trace_resid.append(resid)
+        trace_lam.append(lam)
+        trace_negative.append(n_negative)
+        reason: Optional[StopReason] = ("tol" if resid <= resid_tol
+                                        else "max" if k == max_iter else None)
+        if reason is None:
+            z = precond_solve(R)
+            precond_calls += 1
+            q_new: Optional[VectorT] = None
+            for candidate, from_precond in ((z, True), (MinvR, False)):
+                Mz = metric_apply(candidate)
+                apply_calls += 1
+                before = float(np.sqrt(abs(space.pair(Mz, candidate))))
+                if np.isfinite(before) and before > 0.0:
+                    for _ in range(2):                  # Gram-Schmidt in the M inner product, twice
+                        c = space.pair_block(Q, Mz)
+                        candidate = space.axpy_vector(-1.0, space.combine_vectors(Q, c), candidate)
+                        Mz = space.axpy_covector(-1.0, space.combine_covectors(MQ, c), Mz)
+                    norm = float(np.sqrt(max(space.pair(Mz, candidate), 0.0)))
+                    if np.isfinite(norm) and norm > breakdown_tol * before:
+                        q_new = space.scale_vector(1.0 / norm, candidate)
+                        Mq_new = proj(space.scale_covector(1.0 / norm, Mz))
+                        break
+                if from_precond:
+                    fallbacks += 1
+            if q_new is None:
+                reason = "breakdown"
+            else:
+                Hq = proj(hessvec(q_new))
+                hessvec_calls += 1
+                Q = space.append_vector(Q, q_new)
+                MQ = space.append_covector(MQ, Mq_new)
+                HQ = space.append_covector(HQ, Hq)
+                T = grow_gram(T, space.pair_block(Q, Hq))
+        if reason is not None:
+            stats = SubproblemStats(
+                krylov="flexible", krylov_steps=k, stop_reason=reason,
+                step_norm=float(np.linalg.norm(y)), lam=lam,
+                model_value=model_value, true_model_value=true_model_value,
+                resid=resid, resid_tol=resid_tol, n_negative=n_negative,
+                theta_min=float(theta[0]), hessvec_calls=hessvec_calls,
+                metric_solve_calls=solve_calls, precond_solve_calls=precond_calls,
+                metric_apply_calls=apply_calls,
+                trace_model=tuple(trace_model), trace_resid=tuple(trace_resid),
+                trace_lam=tuple(trace_lam), trace_negative=tuple(trace_negative),
+                fallbacks=fallbacks)
+            return space.combine_vectors(Q, y), stats
+    raise AssertionError("unreachable: the loop returns at k == max_iter")

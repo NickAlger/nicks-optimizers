@@ -38,12 +38,14 @@ def check_work_counts() -> bool:
     print("RunSummary work counts equal the calls actually made (counting wrappers)")
     ok = True
     # (label, krylov, saddle_free, separate preconditioner, convergence norm)
-    configurations: list[tuple[str, Literal["auto", "lanczos"], bool, bool,
+    configurations: list[tuple[str, Literal["auto", "lanczos", "flexible"], bool, bool,
                                Literal["metric", "preconditioner"]]] = [
         ("P = M, CG", "auto", False, False, "metric"),
         ("P = M, Lanczos", "lanczos", False, False, "metric"),
         ("separate P, saddle-free", "auto", True, True, "metric"),
         ("separate P, preconditioner norm", "auto", False, True, "preconditioner"),
+        ("separate P, flexible", "flexible", False, True, "metric"),
+        ("separate P, flexible, preconditioner norm", "flexible", False, True, "preconditioner"),
     ]
     for label, krylov, saddle_free, separate, convergence_norm in configurations:
         counts = {"fun": 0, "grad": 0, "hessvec": 0, "metric_solve": 0, "precond": 0, "metric_apply": 0}

@@ -229,12 +229,14 @@ def format_krylov_trace(stats: SubproblemStats) -> str:
     for j, (m, r, lam, neg) in enumerate(zip(stats.trace_model, stats.trace_resid,
                                              stats.trace_lam, stats.trace_negative), start=1):
         lines.append(f"{pad}{j:>4}  {m:11.4e}  {r:9.2e}  {lam:9.2e}  {neg:3d}")
-    smallest = ("smallest M-Ritz value" if stats.krylov == "lanczos"
-                else "smallest curvature <Hp, p> / ||p||_M^2")
+    smallest = ("smallest curvature <Hp, p> / ||p||_M^2" if stats.krylov == "cg"
+                else "smallest M-Ritz value")
     last = (f"{pad}stop: {stats.stop_reason} ({stats.krylov}, resid tol {stats.resid_tol:.2e}), "
             f"{smallest} {stats.theta_min:.2e}")
     if stats.true_model_value != stats.model_value:
         last += f", true-model value {stats.true_model_value:.4e}"
+    if stats.fallbacks:
+        last += f", {stats.fallbacks} preconditioner fallbacks"
     lines.append(last)
     return "\n".join(lines)
 

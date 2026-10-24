@@ -75,3 +75,11 @@ def test_amg_runs_are_reproducible(tmp_path: Path) -> None:
     (tmp_path / "history_2.json").rename(tmp_path / "first.json")
     second = run_example(2, tmp_path, "--p", "5")
     assert first == second
+
+
+def test_flexible_solver_on_distributed_vectors(tmp_path: Path) -> None:
+    """The flexible subproblem solver (L^2 metric, block Jacobi multigrid as
+    the separate preconditioner) reaches the exact discrete solution on 2
+    ranks."""
+    history = run_example(2, tmp_path, "--p", "1.5", "3", "--krylov", "flexible")
+    assert all(entry["error"] < 1e-8 for entry in history.values())

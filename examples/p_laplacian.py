@@ -406,7 +406,7 @@ def l2_error(loc: Local, u: Array, u_star: Array) -> float:
 
 def solve(loc: Local, e: Energy, precond: str, metric: str = "l2", display: int = 0,
           max_iter: int = 200, max_krylov: int = 100,
-          krylov: Literal["auto", "cg", "lanczos"] = "auto") -> tuple[Point, RunSummary]:
+          krylov: Literal["auto", "cg", "lanczos", "flexible"] = "auto") -> tuple[Point, RunSummary]:
     """Minimize J from u = 0. metric = "l2" (lumped mass, with P separate:
     Lanczos) or "precond" (M = P, solved by truncated CG unless
     krylov = "lanczos")."""
@@ -431,8 +431,9 @@ def main() -> None:
     parser.add_argument("--precond", choices=["amg", "jacobi", "laplace"], default="amg")
     parser.add_argument("--metric", choices=["l2", "precond"], default="l2",
                         help="L^2 (lumped mass), or the preconditioner itself (M = P)")
-    parser.add_argument("--krylov", choices=["auto", "cg", "lanczos"], default="auto",
-                        help="subproblem solver (auto: CG for --metric precond, else Lanczos)")
+    parser.add_argument("--krylov", choices=["auto", "cg", "lanczos", "flexible"], default="auto",
+                        help="subproblem solver (auto: CG for --metric precond, else Lanczos; "
+                             "flexible needs --metric l2)")
     parser.add_argument("--display", type=int, default=0)
     parser.add_argument("--json", help="write the iteration histories here (rank 0)")
     args = parser.parse_args()

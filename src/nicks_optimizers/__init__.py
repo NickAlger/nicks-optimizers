@@ -11,6 +11,8 @@ Modules, in dependency order:
   krylov                    Krylov processes (preconditioned Lanczos and CG)
   criteria                  tests shared by inexact Newton methods
   trust_region_subproblem   the trust-region subproblem over a Krylov space
+                            (Lanczos, CG, and a flexible solver for
+                            unconventional preconditioners)
   trust_region_diagnostics  records, resumption state and text output
   trust_region              trust_region_newton
 
@@ -88,6 +90,7 @@ from .trust_region_subproblem import (
     SubproblemStats,
     solve_tr_subproblem,
     solve_tr_subproblem_cg,
+    solve_tr_subproblem_flexible,
 )
 
 __all__ = [
@@ -167,6 +170,7 @@ __all__ = [
     "merge_summaries",
     "solve_tr_subproblem",
     "solve_tr_subproblem_cg",
+    "solve_tr_subproblem_flexible",
     "trust_region_newton",
 ]
 

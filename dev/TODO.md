@@ -270,6 +270,16 @@ exclusive with the operator keywords. Helpers instead of bundling:
 `trees` module (`as_tuple_tree`, `tree_map`, ...). Tuple trees are strict:
 a list raises, and `as_tuple_tree` converts.
 
+## Flexible preconditioners (2026-10-24)
+
+Robustness to preconditioners that are nonsymmetric, nonlinear or
+stochastic. `solve_tr_subproblem_flexible` (`krylov="flexible"`) expands the
+subspace with P^{-1} applied to the KKT residual and forms the projected
+Hessian explicitly. It converged with every preconditioner tried, where
+Lanczos failed with nonsymmetric and stochastic ones; with a good fixed SPD
+P, Lanczos was as fast or faster in the outer loop. Details, results and
+open questions: `experiments/flexible_preconditioners/README.md`.
+
 ## Communication per Lanczos step
 
 The CG path for M = P needs only two reductions per step (<H p, p> and

@@ -50,6 +50,15 @@ vectors and covectors are added, scaled and paired), the Hilbert structure
 - **Typed.** Primal/dual roles are spelled out as types (`Point`, `Vector`,
   `Covector`), erased at run time, and the package passes `mypy --strict`.
 
+## Repository layout
+
+- `src/`: the library, tested and type-checked (`mypy --strict`).
+- `examples/`: demonstrations, tested and type-checked, run in CI.
+- `experiments/`: exploratory studies of open questions, not part of the
+  tested surface. An experiment that pans out graduates to `src/` and
+  `examples/`. See [`experiments/README.md`](experiments/README.md).
+- `dev/TODO.md`: findings and open questions.
+
 ## Installation
 
 ```bash
@@ -165,6 +174,18 @@ solve reuses). The Krylov tolerance is a forcing term times `||g||_{M^{-1}}`.
   fewer outer iterations, at more cost per step. With `P = M` its basis is
   M-orthonormal, so it applies only `M^{-1}` and gets the residual norm from
   the Lanczos recurrence for free.
+- `"flexible"`: for a separate preconditioner that is not a fixed SPD
+  operator: nonsymmetric (block triangular, Gauss-Seidel), nonlinear
+  (inexact inner solves) or stochastic (randomized sweeps, minibatch SGD)
+  (`solve_tr_subproblem_flexible`). P only proposes directions: the basis
+  starts with `M^{-1} g`, grows by `P^{-1}` applied to the KKT residual, is
+  made M-orthonormal, and the projected Hessian is formed explicitly, so every
+  step is the exact model minimizer on its subspace and beats the Cauchy
+  point whatever P does. It requires `precond_solve` and `metric_apply`.
+  With a good fixed SPD P, Lanczos was as fast or faster in the outer loop;
+  with nonsymmetric or stochastic P, Lanczos failed where the flexible solver
+  converged. See
+  [`experiments/flexible_preconditioners`](experiments/flexible_preconditioners/).
 
 On the distributed p-Laplacian with M = P (2 ranks, 80 rings), CG took 116
 Krylov steps at p = 3 against 140 for Lanczos, and 1.7 s against 2.7 s. At
@@ -375,7 +396,7 @@ code and are meant to be reused by other optimizers.
 | `dense` | small dense linear algebra in coordinates: Rayleigh–Ritz for a projected pencil, the trust-region problem on a ball (with the hard case) |
 | `krylov` | Krylov processes, immutable: preconditioned Lanczos (`lanczos_start`, `lanczos_advance`, `LanczosState`, `lanczos_tridiagonal`) and conjugate gradients (`cg_start`, `cg_curvature`, `cg_advance`, `CGState`, with recurrences for P-norms); optional covector projection for redundant representations |
 | `criteria` | tests shared by inexact Newton methods: `gradient_converged`, `forcing_term`, `reduction_ratio` |
-| `trust_region_subproblem` | the trust-region subproblem over a Krylov space: `solve_tr_subproblem` (Lanczos, any M, saddle-free) and `solve_tr_subproblem_cg` (Steihaug-Toint, M = P) |
+| `trust_region_subproblem` | the trust-region subproblem over a Krylov space: `solve_tr_subproblem` (Lanczos, any M, saddle-free), `solve_tr_subproblem_cg` (Steihaug-Toint, M = P) and `solve_tr_subproblem_flexible` (any preconditioner) |
 | `trust_region_diagnostics` | records, `ResumeState`, and text output |
 | `trust_region` | `trust_region_newton`, `PointOperators` |
 
