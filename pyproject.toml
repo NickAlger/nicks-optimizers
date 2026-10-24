@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nicks-optimizers"
+version = "0.1.0"
+description = "Matrix-free trust-region Newton method with ellipsoidal trust regions, Hessian preconditioning and a saddle-free option"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Nick Alger" }]
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Typing :: Typed",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7", "mypy>=1.8"]
+
+[project.urls]
+Repository = "https://github.com/NickAlger/nicks-optimizers"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+nicks_optimizers = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["tests"]
+addopts = "-q"
+
+[tool.mypy]
+strict = true
+files = ["src", "tests", "examples"]
+mypy_path = "tests"
