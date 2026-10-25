@@ -293,7 +293,8 @@ preconditioner rescued a cold start at full rank. Write-up:
 
 ## Compiled iterations with a pluggable backend (2026-10-25)
 
-Plan agreed, not implemented yet: a `Backend` record (jit, a bounded loop
+Plan agreed; phases 0 to 3 done (CG path, JAX proof of concept in
+`experiments/jax_backend/`): a `Backend` record (jit, a bounded loop
 built from scan or while_loop, cond, index_update, an array namespace) so
 that the pieces of each iteration can be compiled by JAX or another
 framework, with numpy as the default and reference and no framework imports

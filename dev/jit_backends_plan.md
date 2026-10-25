@@ -1,6 +1,7 @@
 # Plan: compiled iterations with a pluggable backend
 
-October 2026. **Status: plan agreed (2026-10-25), not implemented yet.**
+October 2026. **Status: plan agreed (2026-10-25); phases 0 to 3 done
+(2026-10-25), see [Progress](#progress); phases 4 to 8 to follow.**
 
 ## Summary
 
@@ -178,7 +179,7 @@ show the Krylov state being copied between pieces.
 `xp`, a subset common to numpy >= 1.24, `jax.numpy` and the array API
 standard:
 
-- creation: `asarray`, `zeros`, `ones`, `full`, `eye`, `arange`, `stack`
+- creation: `asarray`, `zeros`, `ones`, `full`, `eye`, `arange`
 - elementwise: `sqrt`, `abs`, `maximum`, `minimum`, `where`, `isfinite`,
   `logical_and`, `logical_or`, `logical_not`
 - constants: `inf`, `nan`
@@ -651,6 +652,32 @@ New: `backend=`, `point_data=` and `krylov_capacity=` keywords; `Backend`,
 - **Distributed runs**: unchanged for numpy (`numpy_space_with_reductions`,
   every process runs the same driver and loops). JAX with `mpi4jax` would
   need an allreduce usable inside compiled code; not planned.
+
+## Progress
+
+- **Phase 0** (389a851): the pre-refactor package is vendored as
+  `tests/nicks_optimizers_legacy/` and `tests/test_legacy.py` compares 42
+  configurations bit for bit; `dev/bench.py` times the examples of two
+  checkouts.
+- **Phase 1** (d0541f2): `backend.py`, the strict backend
+  (`tests/strict_backend.py`) and the guardrail tests (`tests/test_backend.py`).
+  Deviation: the done check lives in the loop implementations
+  (`loop_from_scan` skips finished carries with `cond`), not in every loop
+  body.
+- **Phase 2** (8b7bc8a): `trust_region_core.py` (pure `init` and `iterate`,
+  no numpy import) under the Python driver; `point_data` and
+  `operators_at(x, data)`; truncated CG as a bounded loop with status codes;
+  pairings return numpy scalars. Bit for bit against legacy on all 42
+  configurations; the strict backend reproduces the numpy records exactly on
+  the CG path (`tests/test_strict.py`). The numpy primitives carry states
+  without flattening. The numpy overhead per Krylov step is recorded under
+  risks.
+- **Phase 3** (78d2b49): `experiments/jax_backend/`. The design works with JAX
+  as planned and without library changes: same iteration and Krylov counts,
+  objective values equal to rounding, one compilation per run, 1.6 to 2.3
+  times faster per iteration on CPU at n = 4,000 to 16,000. While-built
+  loops were 2 to 40% faster than scan-built ones there; the skipped steps
+  themselves are cheap.
 
 ## Out of scope for now
 

@@ -66,7 +66,7 @@ Cond = Callable[[Any, Callable[[Any], Any], Callable[[Any], Any], Any], Any]
 # (dev/jit_backends_plan.md); tests/test_backend.py checks the core against it.
 CONTRACT: frozenset[str] = frozenset({
     # creation
-    "asarray", "zeros", "ones", "full", "eye", "arange", "stack",
+    "asarray", "zeros", "ones", "full", "eye", "arange",
     # elementwise
     "sqrt", "abs", "maximum", "minimum", "where", "isfinite",
     "logical_and", "logical_or", "logical_not",
