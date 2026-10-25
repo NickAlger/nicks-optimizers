@@ -26,7 +26,7 @@ the public interface; lower-level pieces are available from their modules.
 
 from .backend import Backend, loop_from_scan, loop_from_while, numpy_backend
 from .criteria import forcing_term, gradient_converged, reduction_ratio
-from .dense import pencil_ritz, solve_sphere_trs, solve_sphere_trs_eig, tridiagonal
+from .dense import pencil_ritz, solve_projected_trs, solve_sphere_trs, solve_sphere_trs_eig
 from .krylov import (
     CGState,
     LanczosState,
@@ -36,6 +36,7 @@ from .krylov import (
     lanczos_advance,
     lanczos_start,
     lanczos_tridiagonal,
+    tridiagonal,
 )
 from .metrics import (
     MetricApply,
@@ -149,6 +150,7 @@ __all__ = [
     "vector_norm",
     # dense
     "pencil_ritz",
+    "solve_projected_trs",
     "solve_sphere_trs",
     "solve_sphere_trs_eig",
     "tridiagonal",

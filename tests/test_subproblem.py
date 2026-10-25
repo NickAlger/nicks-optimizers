@@ -19,7 +19,8 @@ from nicks_optimizers import (
     solve_tr_subproblem_cg,
     trust_region_newton,
 )
-from nicks_optimizers.trust_region_subproblem import krylov_residual_norm, solve_projected_trs
+from nicks_optimizers.dense import solve_projected_trs
+from nicks_optimizers.trust_region_subproblem import krylov_residual_norm
 from helpers import (
     Rng,
     dense_abs_m,

@@ -51,7 +51,7 @@ from typing import Any, Callable, Generic, Literal, Optional
 import numpy as np
 
 from .backend import Backend, backend_state, numpy_backend, run_cond, run_loop
-from .dense import grow_gram, pencil_ritz, solve_sphere_trs_eig
+from .dense import solve_projected_trs
 from .krylov import (
     CGState,
     LanczosState,
@@ -62,7 +62,7 @@ from .krylov import (
     lanczos_start,
     lanczos_tridiagonal,
 )
-from .metrics import extend_metric_gram
+from .metrics import extend_metric_gram, grow_gram
 from .spaces import (
     Coords,
     CovectorBlockT,
@@ -200,44 +200,12 @@ def subproblem_stats(raw: RawSubproblem, krylov: KrylovMethod) -> SubproblemStat
         fallbacks=integer(raw.fallbacks))
 
 
-def solve_projected_trs(T: Coords, G: Coords, gamma0: float, radius: float,
-                        saddle_free: bool = False
-                        ) -> tuple[Coords, Coords, float, float, float, Coords]:
-    """Solve the small trust-region problem in M-orthonormal coordinates.
-
-    The model Hessian has the M-Ritz vectors as eigenvectors and the M-Ritz
-    values theta as eigenvalues, or |theta| for the saddle-free model.
-
-    Returns (y, y_flip, lam, model_value, true_model_value, theta):
-      y            coefficients of the step, s = Q y
-      y_flip       coefficients of the flipped step s_flip = Q y_flip, whose
-                   components along negative M-Ritz vectors are negated. If
-                   the Ritz vectors were exact eigenvectors, |H|_M s would
-                   equal H s_flip; y_flip = y unless saddle_free.
-      lam          trust-region multiplier, in both coordinate systems
-      model_value  g^T s + 0.5 s^T H_model s, the model that was minimized
-      true_model_value  g^T s + 0.5 s^T H s with the true H on the subspace
-                   (equal to model_value unless saddle_free)
-      theta        M-Ritz values
-    """
-    k = T.shape[0]
-    L, theta, Z = pencil_ritz(T, G)
-    curvature = np.abs(theta) if saddle_free else theta
-    order = np.argsort(curvature)
-    e1 = np.zeros(k)
-    e1[0] = 1.0
-    b = gamma0 * np.linalg.solve(L, e1)
-    z, lam = solve_sphere_trs_eig(curvature[order], Z[:, order], b, radius)
-    zh = Z.T @ z                                     # M-Ritz coordinates
-    model_value = float(b @ z + 0.5 * np.sum(curvature * zh**2))
-    true_model_value = float(b @ z + 0.5 * np.sum(theta * zh**2))
-    y = np.linalg.solve(L.T, z)
-    if saddle_free:
-        signs = np.where(theta < 0.0, -1.0, 1.0)
-        y_flip = np.linalg.solve(L.T, Z @ (signs * zh))
-    else:
-        y_flip = y
-    return y, y_flip, lam, model_value, true_model_value, theta
+def _python_numbers(result: tuple[Coords, Coords, Any, Any, Any, Coords]
+                    ) -> tuple[Coords, Coords, float, float, float, Coords]:
+    """The scalars of solve_projected_trs as Python floats, for the solvers
+    that still build their statistics in Python (numpy backend only)."""
+    y, y_flip, lam, model_value, true_model_value, theta = result
+    return y, y_flip, float(lam), float(model_value), float(true_model_value), theta
 
 
 def krylov_residual_norm(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
@@ -349,8 +317,8 @@ def solve_tr_subproblem(space: VectorSpace[VectorT, CovectorT, VectorBlockT, Cov
     for k in range(1, max_iter + 1):
         state = lanczos_advance(space, state, hessvec, precond, breakdown_tol,
                                 project_covector=project_covector)
-        y, y_flip, lam, model_value, true_model_value, theta = solve_projected_trs(
-            lanczos_tridiagonal(state), G, state.gamma0, radius, saddle_free)
+        y, y_flip, lam, model_value, true_model_value, theta = _python_numbers(solve_projected_trs(
+            lanczos_tridiagonal(state), G, state.gamma0, radius, saddle_free))
         resid, a, b = krylov_residual_norm(space, state, y, float(y_flip[-1]), lam, G,
                                            None if matched else metric_apply, metric_solve)
         applies, solves = applies + a, solves + b
@@ -601,8 +569,8 @@ def solve_tr_subproblem_flexible(
     trace_negative: list[int] = []
 
     for k in range(1, max_iter + 1):
-        y, y_flip, lam, model_value, true_model_value, theta = solve_projected_trs(
-            T, np.eye(k), gamma0, radius, saddle_free)
+        y, y_flip, lam, model_value, true_model_value, theta = _python_numbers(solve_projected_trs(
+            T, np.eye(k), gamma0, radius, saddle_free))
         R = space.axpy_covector(1.0, g, space.combine_covectors(HQ, y_flip, k))
         if lam > 0.0:
             R = space.axpy_covector(lam, space.combine_covectors(MQ, y, k), R)

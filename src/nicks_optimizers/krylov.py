@@ -42,7 +42,6 @@ from typing import Any, Callable, Generic, Optional
 import numpy as np
 
 from .backend import Backend, backend_state, numpy_backend
-from .dense import tridiagonal
 from .spaces import (
     Coords,
     CovectorBlockT,
@@ -51,6 +50,16 @@ from .spaces import (
     VectorSpace,
     VectorT,
 )
+
+
+def tridiagonal(diag: Coords, offdiag: Coords) -> Coords:
+    """Dense symmetric tridiagonal matrix. Uses the first len(diag)-1 off-diagonals."""
+    k = len(diag)
+    T: Coords = np.diag(np.asarray(diag, dtype=float))
+    if k > 1:
+        off = np.asarray(offdiag[: k - 1], dtype=float)
+        T = T + np.diag(off, 1) + np.diag(off, -1)
+    return T
 
 
 def lanczos_initial_pair(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT],

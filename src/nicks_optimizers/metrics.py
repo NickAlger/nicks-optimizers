@@ -38,7 +38,6 @@ from typing import Any, Callable
 
 import numpy as np
 
-from .dense import grow_gram
 from .spaces import (
     Coords,
     Covector,
@@ -96,6 +95,16 @@ def covector_norm(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorB
     """||w||_{M^{-1}} = sqrt(<w, M^{-1} w>), the dual norm of the M-norm: the
     largest <w, s> over steps with ||s||_M <= 1."""
     return float(np.sqrt(max(space.pair(w, metric_solve(w)), 0.0)))
+
+
+def grow_gram(G: Coords, col: Coords) -> Coords:
+    """Add one row and column to the symmetric matrix G.
+
+    col has length G.shape[0] + 1; its last entry is the new diagonal entry.
+    """
+    off = col[:-1, None]
+    grown: Coords = np.block([[G, off], [off.T, col[-1:, None]]])
+    return grown
 
 
 def extend_metric_gram(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
