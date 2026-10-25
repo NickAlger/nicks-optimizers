@@ -293,9 +293,10 @@ preconditioner rescued a cold start at full rank. Write-up:
 
 ## Compiled iterations with a pluggable backend (2026-10-25)
 
-Plan agreed; phases 0 to 6 done (every solver runs on compiling backends;
-JAX results in `experiments/jax_backend/`; chunked block operations, phase
-7, are needed before compiled Lanczos is faster than numpy): a `Backend` record (jit, a bounded loop
+Plan agreed; phases 0 to 7 done (every solver runs on compiling backends;
+each solve starts with a small basis and doubles it, which brings compiled
+Lanczos and flexible iterations to 0.5 to 1.1 times numpy's on CPU; JAX
+results in `experiments/jax_backend/`; phase 8, graduation, to follow): a `Backend` record (jit, a bounded loop
 built from scan or while_loop, cond, index_update, an array namespace) so
 that the pieces of each iteration can be compiled by JAX or another
 framework, with numpy as the default and reference and no framework imports

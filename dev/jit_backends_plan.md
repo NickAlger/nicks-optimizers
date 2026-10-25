@@ -1,7 +1,7 @@
 # Plan: compiled iterations with a pluggable backend
 
-October 2026. **Status: plan agreed (2026-10-25); phases 0 to 6 done
-(2026-10-25), see [Progress](#progress); phases 7 and 8 to follow.**
+October 2026. **Status: plan agreed (2026-10-25); phases 0 to 7 done
+(2026-10-25), see [Progress](#progress); phase 8 to follow.**
 
 ## Summary
 
@@ -246,6 +246,12 @@ stays static under compilation.
    is not a goal; the tolerances assume float64, and the JAX example turns
    on `jax_enable_x64`.)
 
+10. **Never use a block's old value next to its update** (added in phase
+    7). A compiler updates a block in place only when nothing reads the old
+    value afterwards; pairing with the old basis while the step appends to
+    it makes it copy the basis at every step (measured: 2.5 times slower
+    iterations).
+
 Small helpers keep the where-style code readable: `safe_div`,
 `count_where(mask)`, `when(pred, fn, operand)` (a `cond` whose other branch
 returns the operand).
@@ -272,7 +278,11 @@ beyond k are zero, so k is only a hint that lets an implementation skip work
 (D2). CG uses no blocks at all (five vectors); Lanczos stores two blocks
 (Q, V = P Q) and the flexible solver three (Q, M Q, H Q).
 
-**Capacity.**
+**Capacity.** *Changed in phase 7, after measurements (see
+[Progress](#progress)):* every solve starts at `krylov_capacity` (default 32)
+and doubles when full, on every backend including numpy, instead of
+keeping the run's largest capacity; `array_space` stays unchunked; numpy
+blocks preallocate their capacity. The original design follows.
 
 - numpy (`static_shapes=False`): the capacity is just the bound
   min(max_krylov, dimension). Storage grows on demand and operations use
@@ -644,12 +654,17 @@ New: `backend=`, `point_data=` and `krylov_capacity=` keywords; `Backend`,
   Users who care can build the loop from `while_loop`.
 - **Copies between pieces.** Without buffer reuse, passing the Krylov state
   from one compiled piece to the next may copy it, briefly doubling the
-  basis memory. Measured in phase 7.
+  basis memory. *Measured in phase 7:* no copy of the basis inside the
+  pieces; the piece that continues a solve after a growth copies its input
+  blocks once, so a growth costs two copies of the basis. No donation hint.
 - **Work at fixed capacity (measured in phase 6).** Unchunked block
   operations and padded small problems run over the whole capacity: with
   room for 100 vectors and 10 to 20 in use, compiled Lanczos and flexible
-  iterations were 2 to 6 times slower than numpy on CPU. Chunking (phase 7)
-  is needed before compiled Lanczos pays off.
+  iterations were slower than numpy on CPU. *Phase 7:* mostly the padded
+  small problem (eigh); chunking does not pay on CPU; a capacity per solve
+  keeps both within a factor of two of the work in use. A user who sets
+  `krylov_capacity = max_krylov` pays 1.3 to 2.6 times numpy's time per
+  iteration.
 - **Compile time (measured in phase 6).** 4 to 6 s per capacity for the
   Lanczos and flexible pieces; a reusable compiled solver would amortize it
   across calls.
@@ -716,6 +731,49 @@ New: `backend=`, `point_data=` and `krylov_capacity=` keywords; `Backend`,
   compiling takes 4 to 18 s per run. Numpy runs of the examples: within 1 to
   5% of the baseline for the realistic ones, 1.6 to 1.8 times for the toy
   ones (quickstart, checkpointing).
+- **Phase 7** (2d2c2b9, c1668dd and `experiments/jax_backend/capacity.py`,
+  `blocks.py`). Measured first, under JAX on CPU: at fixed capacity the
+  padded small problem cost more than the block products (eigh of 100 x 100:
+  1.4 ms per Krylov step, 0.06 ms at 16), and chunked block products do not
+  pay, since XLA copies a sliced or gathered chunk before the product (about
+  three passes over its rows against one for the masked full product;
+  better only when k is below a third of the capacity). Delivered instead:
+  - **Capacity per solve** (deviation): every Lanczos or flexible solve
+    starts at `krylov_capacity` (default `DEFAULT_CAPACITY` = 32) and doubles
+    when full, on every backend, numpy included; compiled versions are kept
+    per capacity for the run. Block products and the small problem stay
+    within a factor of two of the k in use; no chunked `array_space`
+    (deviation; the variants stay in `blocks.py` for a GPU check). The loop
+    of a solve is bounded by its capacity.
+  - **Preallocated numpy blocks**: members along the leading axis of a
+    `(capacity,) + shape` array, the next member written in place when no
+    other block on the storage owns that row (copy otherwise). The capacity
+    per solve bounds the allocation, so lazily committed zero pages are not
+    relied on. The concatenation it replaces was the largest block cost of
+    numpy runs: a flexible run with up to 88 steps per solve (n = 65,025)
+    takes 3.9 s instead of 7.0 s, with a lower peak memory (RSS +241 MiB
+    instead of +309); small bases now hold room for 32 vectors (Lanczos
+    with at most 18 steps: +17 MiB, and still faster).
+  - **G = None** for an identity Gram matrix (P = M, the flexible solver):
+    no Cholesky factor or triangular solves; halves the padded problem at
+    capacity 100. Exact on numpy.
+  - **Rule 10** (old block values), after the Gram column of Lanczos with a
+    separate P paired the old basis and made XLA copy it (fixed in
+    c1668dd).
+  - Measured: no copy of the basis in the loops (scan and while); two
+    copies per growth between pieces, no donation hint; about 0.5 ms per
+    compiled piece call plus 1 ms of driver work per iteration, so begin
+    and run need no further fusing. Phase 6's "scan pays for skipped steps"
+    was an artifact of run order (the first JAX run in a process is about
+    35 ms per iteration slower); with a warm-up, scan and while are within
+    noise.
+
+  Results: compiled Lanczos and flexible iterations take 0.5 to 1.1 times
+  numpy's (n = 3,969 and 16,129; phase 6: 0.4 to 1.6), with the numpy run's
+  counts (one Krylov step in 419 apart, from rounding). numpy results are
+  unchanged up to rounding from the block layout; the vendored legacy copy
+  stores blocks the same way, so the legacy comparison stays bit for bit.
+  Examples on numpy: 0.94 to 1.01 times phase 6.
 
 ## Out of scope for now
 
