@@ -293,11 +293,12 @@ preconditioner rescued a cold start at full rank. Write-up:
 
 ## Compiled iterations with a pluggable backend (2026-10-25)
 
-Proposal under review: a `Backend` record (jit, while_loop, cond,
-index_update, an array namespace) so that each iteration can be compiled
-by JAX or another framework, with numpy as the default and reference and
-no framework imports in `src/`. Plan, decisions to review and phases:
-`dev/jit_backends_plan.md`.
+Plan agreed, not implemented yet: a `Backend` record (jit, a bounded loop
+built from scan or while_loop, cond, index_update, an array namespace) so
+that the pieces of each iteration can be compiled by JAX or another
+framework, with numpy as the default and reference and no framework imports
+in `src/`. Krylov bases double their capacity when full and continue the
+solve. Plan, decisions and phases: `dev/jit_backends_plan.md`.
 
 ## Communication per Lanczos step
 
