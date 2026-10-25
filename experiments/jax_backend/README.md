@@ -7,10 +7,11 @@ iteration compiled by JAX, through a `Backend` record written outside the
 library, and with the same results as the numpy backend? And what does it
 buy?
 
-**Status.** Phase 3 of the plan: done for the CG path (P = M, no
-saddle-free model), the only path converted so far. Positive: it works
-unchanged, gives the same iterates, compiles once per run, and is up to
-2.3 times faster per iteration on CPU.
+**Status.** CG path (phase 3): positive. It works unchanged, gives the same
+iterates, compiles once per run, and is up to 2.3 times faster per
+iteration on CPU. Lanczos and the flexible solver (phase 6): correct (same
+iterates, the basis grows as designed), but not faster than numpy on CPU
+yet, and compiling them takes 4 to 18 s per run; see the second part below.
 
 ## The backend
 
@@ -120,6 +121,76 @@ Krylov steps per iteration, so the scan skips the rest.
 6. **Requirements on user code, as expected**: functions must be traceable
    (no `float()` of values, no Python branches on data) and return arrays.
    x64 must be on.
+
+## Lanczos and the flexible solver (`solvers.py`, phase 6)
+
+The same p-Laplacian problem with three configurations: Lanczos with
+P = M (the H^1 metric); Lanczos with M = h^2 I (L^2) and P = the H^1 metric,
+which needs the Gram matrix and the explicit residual; and the flexible
+solver with the same M and P. The JAX runs use `array_space` (blocks of
+fixed capacity) and start with room for 8 or 32 basis vectors, doubling
+when a solve fills the basis. "Per it" is the median time of an iteration;
+"compile" is the rest of the wall time (compilations at the start and after
+each growth). `solvers.json` holds the numbers.
+
+| n | solver | run | its | Krylov | growths | f vs numpy | compile | per it | traces f / Hv |
+|---|---|---|---|---|---|---|---|---|---|
+| 3,969 | lanczos | numpy | 16 | 200 | - | - | 0.9 s | 12.4 ms | 17 / 200 calls |
+| | | jax, cap 8 | 16 | 200 | 3 | 4e-16 | 14.2 s | (48.7 ms) | 4 / 9 |
+| | | jax, cap 32 | 16 | 200 | 1 | 4e-16 | 7.6 s | 9.2 ms | 3 / 5 |
+| | lanczos P != M | numpy | 16 | 166 | - | - | 0.4 s | 17.9 ms | 17 / 166 calls |
+| | | jax, cap 8 | 16 | 166 | 3 | 1e-14 | 12.7 s | 10.2 ms | 4 / 7 |
+| | | jax, cap 32 | 16 | 166 | 1 | 8e-15 | 6.1 s | 9.5 ms | 3 / 3 |
+| | flexible | numpy | 26 | 220 | - | - | 0.5 s | 11.2 ms | 27 / 220 calls |
+| | | jax, cap 8 | 26 | 220 | 3 | 5e-15 | 16.1 s | 8.7 ms | 5 / 9 |
+| | | jax, cap 32 | 26 | 220 | 1 | 5e-15 | 6.4 s | 6.3 ms | 3 / 3 |
+| 16,129 | lanczos | numpy | 17 | 372 | - | - | 2.8 s | 47.9 ms | 18 / 372 calls |
+| | | jax, cap 8 | 17 | 372 | 4 | 2e-16 | 15.0 s | (187 ms) | 5 / 10 |
+| | | jax, cap 32 | 17 | 372 | 2 | 2e-16 | 10.7 s | 55.0 ms | 4 / 6 |
+| | lanczos P != M | numpy | 16 | 235 | - | - | 1.5 s | 28.4 ms | 17 / 235 calls |
+| | | jax, cap 8 | 16 | 235 | 3 | 2e-14 | 14.7 s | 20.0 ms | 4 / 9 |
+| | | jax, cap 32 | 16 | 235 | 1 | 2e-14 | 8.7 s | 28.9 ms | 3 / 5 |
+| | flexible | numpy | 28 | 419 | - | - | 3.4 s | 21.5 ms | 29 / 419 calls |
+| | | jax, cap 8 | 28 | 419 | 4 | 5e-14 | 18.4 s | 24.5 ms | 5 / 10 |
+| | | jax, cap 32 | 28 | 419 | 2 | 5e-14 | 13.6 s | 40.8 ms | 4 / 6 |
+
+Medians in parentheses are unreliable: with four growths in 17 iterations,
+half of the iterations compile something (the growth, then the start of the
+next iteration at the new capacity).
+
+With room for max_krylov = 100 vectors from the start (no growth), the
+steady state is clean, and it shows what fixed capacity costs:
+
+| n | solver | numpy | jax, scan loop | jax, while loop |
+|---|---|---|---|---|
+| 3,969 | lanczos | 11.7 ms / it | 76.5 ms / it | 25.4 ms / it |
+| | flexible | 11.3 ms / it | 23.6 ms / it | 20.7 ms / it |
+| 16,129 | lanczos | 45.1 ms / it | 106 ms / it | 87.5 ms / it |
+| | flexible | 28.2 ms / it | 62.5 ms / it | 65.3 ms / it |
+
+Findings:
+
+7. **Correct, with growth as designed.** Every run has the numpy run's
+   iteration and Krylov counts; objective values agree to 2e-16 to 5e-14.
+   Bases that start with room for 8 vectors grow 3 or 4 times per run and
+   give the same results as larger ones. The functions are traced a few
+   times per run (once per piece and capacity), however many steps follow.
+8. **Fixed capacity costs work.** With room for 100 vectors and 10 to 20 in
+   use, the compiled iterations are 2 to 6 times slower than numpy: every
+   block product (two Gram-Schmidt passes per step) and the padded small
+   problems run over all 100 slots, where numpy works with the k in use.
+   Starting small and doubling (cap 8 or 32) brings the steady state back to
+   numpy's level (0.4 to 1.4 times). Chunked block operations (phase 7: work
+   proportional to k at any capacity) are the remaining step.
+9. **Compiling dominates short runs**: 4 to 6 s for the pieces at one
+   capacity, and about as much again for each new capacity. A reusable
+   compiled solver (pieces cached across calls) would amortize it.
+10. **Scan-built loops pay for skipped steps when the carry holds a
+   basis.** For Lanczos at n = 3,969 with room for 100 vectors, the scan
+   loop's extra 51 ms per iteration over the while loop matches one copy of
+   the basis (6.4 MB) per skipped step (about 87 per iteration); at n =
+   16,129 the gap is smaller (18 ms) than that estimate, so the copies are
+   not the whole story. Worth a look in the optimized HLO (phase 7).
 
 ## Open questions
 

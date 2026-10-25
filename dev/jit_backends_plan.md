@@ -1,7 +1,7 @@
 # Plan: compiled iterations with a pluggable backend
 
-October 2026. **Status: plan agreed (2026-10-25); phases 0 to 3 done
-(2026-10-25), see [Progress](#progress); phases 4 to 8 to follow.**
+October 2026. **Status: plan agreed (2026-10-25); phases 0 to 6 done
+(2026-10-25), see [Progress](#progress); phases 7 and 8 to follow.**
 
 ## Summary
 
@@ -645,6 +645,14 @@ New: `backend=`, `point_data=` and `krylov_capacity=` keywords; `Backend`,
 - **Copies between pieces.** Without buffer reuse, passing the Krylov state
   from one compiled piece to the next may copy it, briefly doubling the
   basis memory. Measured in phase 7.
+- **Work at fixed capacity (measured in phase 6).** Unchunked block
+  operations and padded small problems run over the whole capacity: with
+  room for 100 vectors and 10 to 20 in use, compiled Lanczos and flexible
+  iterations were 2 to 6 times slower than numpy on CPU. Chunking (phase 7)
+  is needed before compiled Lanczos pays off.
+- **Compile time (measured in phase 6).** 4 to 6 s per capacity for the
+  Lanczos and flexible pieces; a reusable compiled solver would amortize it
+  across calls.
 - **`vmap` over problems** works in principle (everything is `where`, `cond`
   and bounded loops), but the slowest problem sets the pace, both branches
   of every `cond` run, and a scan-built loop does full work in every step.
@@ -681,6 +689,33 @@ New: `backend=`, `point_data=` and `krylov_capacity=` keywords; `Backend`,
   phases 4 to 6; the numpy overhead on small problems is acceptable for now;
   scan stays the default loop (fewer limitations with automatic
   differentiation, a moderate extra cost, and GPU timings still to come).
+- **Phase 4** (7bad9d8): blocks with a capacity in `VectorSpace`
+  (`vector_block(v, capacity)`, `set_*`, `pair_block(B, w, k)`, `combine_*(B, c,
+  k)`, `grow_*`); `NumpyBlock`, `TupleBlock`, `array_space(backend)`; `LeafBlock`
+  removed; `reshape` joined the contract. Bit for bit against legacy.
+- **Phase 5** (c0768bb): `dense.py` in `xp`, no numpy import; padding with the
+  inactive part decoupled (static shapes) or cut away (numpy); the secular
+  bound set to 60 (at most 10 iterations seen, 3 to 5 typical). The Ritz
+  vectors are reordered as rows of Z^T, which keeps numpy's memory layout
+  and rounding. Bit for bit against legacy; padding invariance tested.
+- **Phase 6** (dc1cb68 and the JAX experiment): all three solvers as
+  `KrylovSolver` pieces; Lanczos and flexible as bounded loops with FULL;
+  the outer iteration as `step_start` (compiled per capacity), `step_grow`,
+  `step_continue`, `step_finish`; `krylov_capacity` and
+  `RunSummary.capacity_growths`. Deviations: `step_start` fuses begin and
+  run (two compiled calls per iteration in the common case, as the plan
+  allowed), and CG uses the same pieces (no separate fused iterate).
+  Computed indices out of range may occur only on discarded carries (the
+  strict backend clamps reads and drops writes, as JAX does). `krylov` and
+  `trust_region_subproblem` import no numpy; a broken-down Lanczos process
+  comes back unchanged instead of raising. Bit for bit against legacy; on
+  the strict backend the solvers agree with numpy at capacities 1, 2, 3 and
+  50. Under JAX (`experiments/jax_backend/solvers.py`): correct, with growth as
+  designed, but the steady state is only at numpy's level when the basis
+  starts small (2 to 6 times slower with room for 100 vectors), and
+  compiling takes 4 to 18 s per run. Numpy runs of the examples: within 1 to
+  5% of the baseline for the realistic ones, 1.6 to 1.8 times for the toy
+  ones (quickstart, checkpointing).
 
 ## Out of scope for now
 
