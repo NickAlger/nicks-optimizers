@@ -534,7 +534,7 @@ so drifting takes a deliberate change rather than a slip:
 ## Testing
 
 - **Pre-refactor comparison (D7).** Phase 0 vendors a copy of the current
-  package as `tests/legacy/` (renamed, used by tests only, deleted when the
+  package as `tests/nicks_optimizers_legacy/` (used by tests only, deleted when the
   refactor is done). A test runs the old and new packages side by side in
   the same process on a matrix of configurations (Rosenbrock with the
   identity, smoothing and x-dependent metrics; the double well; the
