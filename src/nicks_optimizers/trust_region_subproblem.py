@@ -266,11 +266,12 @@ def krylov_residual_norm(space: VectorSpace[VectorT, CovectorT, VectorBlockT, Co
         return state.gamma_next * abs(y_flip_last), 0, 0
     R = space.scale_covector(state.gamma_next * y_flip_last, state.v_next)
     applies = 0
+    k = y.shape[0]
     if lam > 0.0:
-        Ms = metric_apply(space.combine_vectors(state.Q, y))
+        Ms = metric_apply(space.combine_vectors(state.Q, y, k))
         applies = 1
         R = space.axpy_covector(lam, Ms, R)
-        R = space.axpy_covector(-lam, space.combine_covectors(state.V, G @ y), R)
+        R = space.axpy_covector(-lam, space.combine_covectors(state.V, G @ y, k), R)
     return float(np.sqrt(max(space.pair(R, metric_solve(R)), 0.0))), applies, 1
 
 
@@ -331,13 +332,13 @@ def solve_tr_subproblem(space: VectorSpace[VectorT, CovectorT, VectorBlockT, Cov
     matched = precond_solve is None
     precond = metric_solve if precond_solve is None else precond_solve
     applies, solves = 0, 0
-    state = lanczos_start(space, g, precond, start_vector)
+    state = lanczos_start(space, g, precond, start_vector, capacity=max_iter)
     if space.dimension is not None:
         max_iter = min(max_iter, space.dimension(state.q))
     if metric_apply is None or matched:
         G = np.ones((1, 1))                                     # M-orthonormal basis
     else:
-        G = space.pair_block(state.Q, metric_apply(state.q)).reshape(1, 1)   # (q0, q0)_M
+        G = space.pair_block(state.Q, metric_apply(state.q), 1)[:1].reshape(1, 1)   # (q0, q0)_M
         applies += 1
     prev_model_value: Optional[float] = None
     trace_model: list[float] = []
@@ -374,7 +375,7 @@ def solve_tr_subproblem(space: VectorSpace[VectorT, CovectorT, VectorBlockT, Cov
                 metric_apply_calls=applies,
                 trace_model=tuple(trace_model), trace_resid=tuple(trace_resid),
                 trace_lam=tuple(trace_lam), trace_negative=tuple(trace_negative))
-            return space.combine_vectors(state.Q, y), stats
+            return space.combine_vectors(state.Q, y, k), stats
 
         prev_model_value = model_value
         # The pending vector joins the basis at the next lanczos_advance.
@@ -587,8 +588,10 @@ def solve_tr_subproblem_flexible(
     q = space.scale_vector(1.0 / gamma0, Mg)
     Hq = proj(hessvec(q))
     hessvec_calls += 1
-    Q, MQ, HQ = (space.vector_block(q), space.covector_block(space.scale_covector(1.0 / gamma0, g)),
-                 space.covector_block(Hq))
+    capacity = max_iter
+    Q, MQ, HQ = (space.vector_block(q, capacity),
+                 space.covector_block(space.scale_covector(1.0 / gamma0, g), capacity),
+                 space.covector_block(Hq, capacity))
     T = np.array([[space.pair(Hq, q)]])
     if space.dimension is not None:
         max_iter = min(max_iter, space.dimension(q))
@@ -600,9 +603,9 @@ def solve_tr_subproblem_flexible(
     for k in range(1, max_iter + 1):
         y, y_flip, lam, model_value, true_model_value, theta = solve_projected_trs(
             T, np.eye(k), gamma0, radius, saddle_free)
-        R = space.axpy_covector(1.0, g, space.combine_covectors(HQ, y_flip))
+        R = space.axpy_covector(1.0, g, space.combine_covectors(HQ, y_flip, k))
         if lam > 0.0:
-            R = space.axpy_covector(lam, space.combine_covectors(MQ, y), R)
+            R = space.axpy_covector(lam, space.combine_covectors(MQ, y, k), R)
         R = proj(R)
         MinvR = metric_solve(R)
         solve_calls += 1
@@ -624,9 +627,9 @@ def solve_tr_subproblem_flexible(
                 before = float(np.sqrt(abs(space.pair(Mz, candidate))))
                 if np.isfinite(before) and before > 0.0:
                     for _ in range(2):                  # Gram-Schmidt in the M inner product, twice
-                        c = space.pair_block(Q, Mz)
-                        candidate = space.axpy_vector(-1.0, space.combine_vectors(Q, c), candidate)
-                        Mz = space.axpy_covector(-1.0, space.combine_covectors(MQ, c), Mz)
+                        c = space.pair_block(Q, Mz, k)[:k]
+                        candidate = space.axpy_vector(-1.0, space.combine_vectors(Q, c, k), candidate)
+                        Mz = space.axpy_covector(-1.0, space.combine_covectors(MQ, c, k), Mz)
                     norm = float(np.sqrt(max(space.pair(Mz, candidate), 0.0)))
                     if np.isfinite(norm) and norm > breakdown_tol * before:
                         q_new = space.scale_vector(1.0 / norm, candidate)
@@ -639,10 +642,10 @@ def solve_tr_subproblem_flexible(
             else:
                 Hq = proj(hessvec(q_new))
                 hessvec_calls += 1
-                Q = space.append_vector(Q, q_new)
-                MQ = space.append_covector(MQ, Mq_new)
-                HQ = space.append_covector(HQ, Hq)
-                T = grow_gram(T, space.pair_block(Q, Hq))
+                Q = space.set_vector(Q, k, q_new)
+                MQ = space.set_covector(MQ, k, Mq_new)
+                HQ = space.set_covector(HQ, k, Hq)
+                T = grow_gram(T, space.pair_block(Q, Hq, k + 1)[:k + 1])
         if reason is not None:
             stats = SubproblemStats(
                 krylov="flexible", krylov_steps=k, stop_reason=reason,
@@ -655,5 +658,5 @@ def solve_tr_subproblem_flexible(
                 trace_model=tuple(trace_model), trace_resid=tuple(trace_resid),
                 trace_lam=tuple(trace_lam), trace_negative=tuple(trace_negative),
                 fallbacks=fallbacks)
-            return space.combine_vectors(Q, y), stats
+            return space.combine_vectors(Q, y, k), stats
     raise AssertionError("unreachable: the loop returns at k == max_iter")

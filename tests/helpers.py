@@ -92,8 +92,8 @@ def run_lanczos(H: Array, P: Array, M: Array, g: Array, k: int, reorth_passes: i
     """
     sp = numpy_space
     hessvec, precond_solve, metric_apply = dense_vec_to_covec(H), dense_solve(P), dense_apply(M)
-    state = lanczos_start(sp, Covector(g), precond_solve)
-    G = sp.pair_block(state.Q, metric_apply(state.q)).reshape(1, 1)
+    state = lanczos_start(sp, Covector(g), precond_solve, capacity=k + 1)
+    G = sp.pair_block(state.Q, metric_apply(state.q), 1)[:1].reshape(1, 1)
     for j in range(k):
         state = lanczos_advance(sp, state, hessvec, precond_solve, reorth_passes=reorth_passes)
         if j < k - 1:

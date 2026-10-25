@@ -179,7 +179,7 @@ show the Krylov state being copied between pieces.
 `xp`, a subset common to numpy >= 1.24, `jax.numpy` and the array API
 standard:
 
-- creation: `asarray`, `zeros`, `ones`, `full`, `eye`, `arange`
+- creation: `asarray`, `zeros`, `ones`, `full`, `eye`, `arange`, `reshape`
 - elementwise: `sqrt`, `abs`, `maximum`, `minimum`, `where`, `isfinite`,
   `logical_and`, `logical_or`, `logical_not`
 - constants: `inf`, `nan`

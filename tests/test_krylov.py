@@ -30,7 +30,8 @@ def test_lanczos_as_eigensolver() -> None:
     P = random_spd(n, 10.0, rng)
     hessvec, precond_solve = dense_vec_to_covec(H), dense_solve(P)
 
-    state = lanczos_start(numpy_space, Covector(rng.standard_normal(n)), precond_solve)
+    state = lanczos_start(numpy_space, Covector(rng.standard_normal(n)), precond_solve,
+                          capacity=n + 2)
     history = [state]
     while not state.breakdown and state.steps < n + 2:
         state = lanczos_advance(numpy_space, state, hessvec, precond_solve)
@@ -49,7 +50,7 @@ def test_lanczos_as_eigensolver() -> None:
     for k, earlier in enumerate(history):
         assert earlier.steps == k
         assert len(earlier.deltas) == k
-        assert earlier.Q.shape[1] == max(k, 1)
+        assert earlier.Q.columns.shape[1] == max(k, 1)
 
 
 def test_extreme_ritz_values_converge_early() -> None:
@@ -59,7 +60,8 @@ def test_extreme_ritz_values_converge_early() -> None:
     n = 200
     evals = np.concatenate([[-50.0, -20.0], np.linspace(1.0, 2.0, n - 4), [40.0, 100.0]])
     H = matrix_with_spectrum(evals, rng)
-    state = lanczos_start(numpy_space, Covector(rng.standard_normal(n)), lambda w: Vector(w))
+    state = lanczos_start(numpy_space, Covector(rng.standard_normal(n)), lambda w: Vector(w),
+                          capacity=26)
     for _ in range(25):
         state = lanczos_advance(numpy_space, state, dense_vec_to_covec(H), lambda w: Vector(w))
     ritz = np.linalg.eigvalsh(lanczos_tridiagonal(state))
@@ -91,7 +93,7 @@ def test_redundant_representation_needs_projection() -> None:
 
     def run(project_covector: Optional[Callable[[Covector], Covector]]
             ) -> LanczosState[Vector, Covector, VectorBlock, CovectorBlock]:
-        state = lanczos_start(numpy_space, g, lambda w: Vector(w))
+        state = lanczos_start(numpy_space, g, lambda w: Vector(w), capacity=n)
         while not state.breakdown and state.steps < n - m:
             state = lanczos_advance(numpy_space, state, hessvec, lambda w: Vector(w),
                                     project_covector=project_covector)

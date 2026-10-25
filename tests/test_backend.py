@@ -32,6 +32,7 @@ from nicks_optimizers.backend import (
     structure_of,
     unflatten,
 )
+from nicks_optimizers import Covector, Vector, array_space, check_space, numpy_space, tuple_tree_space
 from strict_backend import Strict, StrictError, strict, strict_backend, strict_xp
 
 SRC = pathlib.Path(__file__).resolve().parent.parent / "src" / "nicks_optimizers"
@@ -232,3 +233,47 @@ def test_strict_backend_catches_what_a_compiler_would_refuse() -> None:
     # both branches run: one that fails on the other case's data fails the test
     with pytest.raises(ZeroDivisionError):
         bk.cond(zero > 1.0, lambda c: 1 / 0, lambda c: c, zero)
+
+
+# --- spaces with blocks of fixed capacity ----------------------------------------------------
+
+
+@pytest.mark.parametrize("backend", [numpy_backend, strict_backend], ids=["numpy", "strict"])
+@pytest.mark.parametrize("shape", [(7,), (3, 4)], ids=["1-D", "2-D"])
+def test_array_space_satisfies_the_space_identities(backend: Any, shape: tuple[int, ...]) -> None:
+    rng = np.random.default_rng(0)
+    space = array_space(backend)
+    v1, v2, w1, w2 = (strict(rng.standard_normal(shape)) if backend is strict_backend
+                      else rng.standard_normal(shape) for _ in range(4))
+    assert check_space(space, v1, v2, w1, w2) < 1e-14
+    tree = tuple_tree_space(space)
+    assert check_space(tree, (v1, (w2,)), (v2, (v1,)), (w1, (v2,)), (w2, (w1,))) < 1e-14
+    assert space.dimension is not None and space.dimension(v1) == int(np.prod(shape))
+
+
+def test_array_space_blocks_have_fixed_shapes() -> None:
+    """A block is one array of capacity members; growing keeps the members,
+    and members at and beyond k do not count."""
+    space = array_space(numpy_backend)
+    B = space.set_vector(space.vector_block(np.ones(3), 4), 1, 2.0 * np.ones(3))
+    assert np.asarray(B).shape == (4, 3)
+    grown = space.grow_vector_block(B, 6)
+    assert np.asarray(grown).shape == (6, 3) and np.array_equal(np.asarray(grown)[:4], np.asarray(B))
+    w = np.array([1.0, 0.0, 0.0])
+    assert np.asarray(space.pair_block(B, w, 1)).tolist() == [1.0, 0.0, 0.0, 0.0]
+    assert np.asarray(space.combine_vectors(B, np.array([1.0, 1.0, 9.0, 9.0]), 2)).tolist() == [3.0] * 3
+
+
+def test_numpy_blocks_store_the_members_in_use() -> None:
+    """numpy_space keeps only the members set; it replaces or fills members
+    out of order, and refuses members beyond the capacity."""
+    B = numpy_space.vector_block(Vector(np.ones(2)), 3)
+    assert B.columns.shape == (2, 1) and B.capacity == 3
+    B = numpy_space.set_vector(B, 2, Vector(np.full(2, 3.0)))         # fills member 1 with zeros
+    assert B.columns.tolist() == [[1.0, 0.0, 3.0], [1.0, 0.0, 3.0]]
+    B = numpy_space.set_vector(B, 1, Vector(np.full(2, 2.0)))
+    assert B.columns[:, 1].tolist() == [2.0, 2.0]
+    assert numpy_space.pair_block(B, Covector(np.ones(2)), 2).tolist() == [2.0, 4.0, 0.0]
+    with pytest.raises(IndexError):
+        numpy_space.set_vector(B, 3, Vector(np.ones(2)))
+    assert numpy_space.grow_vector_block(B, 5).capacity == 5

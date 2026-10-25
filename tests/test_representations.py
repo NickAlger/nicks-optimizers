@@ -70,7 +70,8 @@ def check_space_consistency(rng: Rng) -> bool:
     ok &= report("numpy_space_with_reductions, one process", check_space(single, v1, v2, w1, w2), 1e-14)
     ok &= report("two-array space from tuple_block_space",
                  check_space(PAIR_SPACE, split_pair(v1), split_pair(v2), split_pair(w1), split_pair(w2)), 1e-14)
-    broken = dataclasses.replace(numpy_space, pair_block=lambda B, w: 2.0 * (B.T @ w))
+    broken = dataclasses.replace(numpy_space,
+                                 pair_block=lambda B, w, k: 2.0 * numpy_space.pair_block(B, w, k))
     err = check_space(broken, v1, v2, w1, w2)
     detected = err > 0.1
     print(f"  [{'PASS' if detected else 'FAIL'}] a space whose pair_block disagrees with pair is "

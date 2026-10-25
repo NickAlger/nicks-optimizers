@@ -70,8 +70,9 @@ def lanczos_initial_pair(space: VectorSpace[VectorT, CovectorT, VectorBlockT, Co
 
 
 def reorthogonalize(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
-                    t: CovectorT, Q: VectorBlockT, V: CovectorBlockT, passes: int = 2) -> CovectorT:
-    """Make P^{-1} t P-orthogonal to the vectors in Q.
+                    t: CovectorT, Q: VectorBlockT, V: CovectorBlockT, k: Any, passes: int = 2
+                    ) -> CovectorT:
+    """Make P^{-1} t P-orthogonal to the first k vectors in Q.
 
     The pairs (q_i, v_i = P q_i) satisfy <v_i, q_j> = delta_ij, and
     <P q_i, P^{-1} t> = <t, q_i>, so it suffices to drive the pairings
@@ -79,22 +80,22 @@ def reorthogonalize(space: VectorSpace[VectorT, CovectorT, VectorBlockT, Covecto
     classical Gram-Schmidt ("twice is enough").
     """
     for _ in range(passes):
-        t = space.axpy_covector(-1.0, space.combine_covectors(V, space.pair_block(Q, t)), t)
+        t = space.axpy_covector(-1.0, space.combine_covectors(V, space.pair_block(Q, t, k), k), t)
     return t
 
 
 def lanczos_step(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
                  hessvec: Callable[[VectorT], CovectorT],
                  precond_solve: Callable[[CovectorT], VectorT],
-                 Q: VectorBlockT, V: CovectorBlockT, q: VectorT, v: CovectorT,
+                 Q: VectorBlockT, V: CovectorBlockT, k: Any, q: VectorT, v: CovectorT,
                  v_prev: Optional[CovectorT], gamma_prev: float,
                  reorth_passes: int = 2,
                  project_covector: Optional[Callable[[CovectorT], CovectorT]] = None
                  ) -> tuple[float, float, CovectorT, VectorT]:
     """One step of P-preconditioned Lanczos with full reorthogonalization.
 
-    q, v are the newest pair (the last members of Q, V) and v_prev the one
-    before it (None at the first step). Forms the covector
+    Q, V hold k members; q, v are the newest pair (the last members) and
+    v_prev the one before it (None at the first step). Forms the covector
         t = H q - delta v - gamma_prev v_prev,   delta = <H q, q>,
     reorthogonalizes it, maps it to its canonical representative with
     project_covector if given (see the module docstring), and returns
@@ -108,7 +109,7 @@ def lanczos_step(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBl
     t = space.axpy_covector(-delta, v, h)
     if v_prev is not None:
         t = space.axpy_covector(-gamma_prev, v_prev, t)
-    t = reorthogonalize(space, t, Q, V, reorth_passes)
+    t = reorthogonalize(space, t, Q, V, k, reorth_passes)
     if project_covector is not None:
         t = project_covector(t)
     y = precond_solve(t)
@@ -158,13 +159,16 @@ class LanczosState(Generic[VectorT, CovectorT, VectorBlockT, CovectorBlockT]):
 
 def lanczos_start(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
                   g: CovectorT, precond_solve: Callable[[CovectorT], VectorT],
-                  precond_g: Optional[VectorT] = None
+                  precond_g: Optional[VectorT] = None, *, capacity: int
                   ) -> LanczosState[VectorT, CovectorT, VectorBlockT, CovectorBlockT]:
     """The process before its first step: the basis is q_0 = P^{-1} g / gamma0.
-    Costs one preconditioner solve, unless precond_g = P^{-1} g is given."""
+    Costs one preconditioner solve, unless precond_g = P^{-1} g is given. The
+    blocks Q and V have room for capacity members: the process can take
+    capacity steps."""
     v0, q0, gamma0 = lanczos_initial_pair(space, g, precond_solve, precond_g)
     return LanczosState(
-        steps=0, gamma0=gamma0, Q=space.vector_block(q0), V=space.covector_block(v0),
+        steps=0, gamma0=gamma0, Q=space.vector_block(q0, capacity),
+        V=space.covector_block(v0, capacity),
         q=q0, v=v0, deltas=(), gammas=(), gamma_next=0.0,
         v_next=space.scale_covector(0.0, v0), q_next=space.scale_vector(0.0, q0),
         breakdown=False, v_prev=None, hscale=0.0)
@@ -191,8 +195,8 @@ def lanczos_advance(space: VectorSpace[VectorT, CovectorT, VectorBlockT, Covecto
     if state.breakdown:
         raise ValueError("the Lanczos process has broken down (invariant subspace); it cannot grow")
     if state.steps > 0:
-        Q = space.append_vector(state.Q, state.q_next)
-        V = space.append_covector(state.V, state.v_next)
+        Q = space.set_vector(state.Q, state.steps, state.q_next)
+        V = space.set_covector(state.V, state.steps, state.v_next)
         gammas = state.gammas + (state.gamma_next,)
         v_prev: Optional[CovectorT] = state.v
         q, v = state.q_next, state.v_next
@@ -200,8 +204,8 @@ def lanczos_advance(space: VectorSpace[VectorT, CovectorT, VectorBlockT, Covecto
         Q, V, gammas, v_prev, q, v = state.Q, state.V, state.gammas, state.v_prev, state.q, state.v
     gamma_prev = gammas[-1] if gammas else 0.0
     delta, gamma_next, v_next, q_next = lanczos_step(
-        space, hessvec, precond_solve, Q, V, q, v, v_prev, gamma_prev, reorth_passes,
-        project_covector)
+        space, hessvec, precond_solve, Q, V, state.steps + 1, q, v, v_prev, gamma_prev,
+        reorth_passes, project_covector)
     hscale = max(state.hscale, abs(delta), gamma_prev)
     breakdown = gamma_next <= breakdown_tol * hscale
     return LanczosState(

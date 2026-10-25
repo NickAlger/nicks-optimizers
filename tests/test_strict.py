@@ -15,6 +15,7 @@ import pytest
 import matrix_completion as mc
 from helpers import without_times
 from nicks_optimizers import (
+    array_space,
     euclidean_metric_solve,
     flat_retraction,
     numpy_backend,
@@ -74,11 +75,21 @@ TRACEABLE_METRICS = [("identity", euclidean_metric_solve), ("smoothing", smoothi
                      ("x-dependent", weighted_metric_solve)]
 
 
-def both(run: Any) -> None:
-    """The same run on the numpy and strict backends gives the same records."""
+def both(run: Any, exact: bool = True) -> None:
+    """The same run on the numpy and strict backends gives the same records:
+    bit for bit, or (exact=False) with the same counts and stop reasons and
+    values equal to rounding (numpy scalars on one side and 0-d arrays on the
+    other may round differently, e.g. in x ** 2)."""
     x_np, s_np = run(numpy_backend)
     x_st, s_st = run(strict_backend)
     assert s_np.reason == "converged" or s_np.reason == "max_iter"
+    if not exact:
+        assert [(r.accepted, r.subproblem.krylov_steps, r.subproblem.stop_reason)
+                for r in s_st.iterations] == [(r.accepted, r.subproblem.krylov_steps,
+                                              r.subproblem.stop_reason) for r in s_np.iterations]
+        assert all(abs(a.f - b.f) <= 1e-12 * max(abs(b.f), 1e-300) + 1e-300
+                   for a, b in zip(s_st.iterations, s_np.iterations))
+        return
     assert without_times(s_st.iterations) == without_times(s_np.iterations)
     assert repr(dataclasses.replace(s_st, iterations=(), elapsed=0.0)) == \
         repr(dataclasses.replace(s_np, iterations=(), elapsed=0.0))
@@ -105,6 +116,15 @@ def test_tuple_trees_and_few_krylov_steps() -> None:
                                         space=space, retract=flat_retraction(space),
                                         metric_solve=euclidean_metric_solve, max_krylov=3,
                                         max_iter=40, backend=bk))
+
+
+def test_array_space_cg() -> None:
+    """array_space, the space for compiling backends, on both backends."""
+    x0: Any = np.tile([-1.2, 1.0], 10)
+    both(lambda bk: trust_region_newton(rosen_fun, rosen_grad, rosen_hessvec, x0,
+                                        space=array_space(bk), retract=lambda x, s: x + s,
+                                        metric_solve=euclidean_metric_solve, backend=bk),
+         exact=False)
 
 
 def test_matrix_completion_cg() -> None:

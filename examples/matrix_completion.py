@@ -101,9 +101,7 @@ from typing import Literal
 from nicks_optimizers import (
     Array,
     RunSummary,
-    CovectorBlock,
-    LeafBlock,
-    VectorBlock,
+    NumpyBlock,
     VectorSpace,
     euclidean_metric_solve,
     trust_region_newton,
@@ -117,8 +115,8 @@ IntArray = npt.NDArray[np.intp]
 LowRank = NewType("LowRank", tuple[Array, Array, Array])     # (U, s, V): U diag(s) V^T
 Tangent = NewType("Tangent", tuple[Array, Array])            # (dU, dV), U^T dU = 0
 Cotangent = NewType("Cotangent", tuple[Array, Array])        # (gU, gV), canonical if U^T gU = 0
-TangentBlock = tuple[LeafBlock[VectorBlock], LeafBlock[VectorBlock]]          # blocks of dU, dV
-CotangentBlock = tuple[LeafBlock[CovectorBlock], LeafBlock[CovectorBlock]]
+TangentBlock = tuple[NumpyBlock, NumpyBlock]          # blocks of dU, dV
+CotangentBlock = tuple[NumpyBlock, NumpyBlock]
 FixedRankSpace = VectorSpace[Tangent, Cotangent, TangentBlock, CotangentBlock]
 
 

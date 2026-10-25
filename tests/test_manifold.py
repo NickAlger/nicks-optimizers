@@ -98,7 +98,7 @@ def test_gauge_stays_clean_only_with_projection() -> None:
     precond = lambda w: euclidean_metric_solve(x, w)   # the Frobenius metric, M = I
 
     def run(project: Optional[Callable[[mc.Cotangent], mc.Cotangent]]) -> tuple[float, float]:
-        state = lanczos_start(sp, mc.gradient(samples, x), precond)
+        state = lanczos_start(sp, mc.gradient(samples, x), precond, capacity=201)
         for _ in range(200):
             state = lanczos_advance(sp, state, hessvec, precond, project_covector=project)
         gauge = float(np.max(np.abs(x[0].T @ state.v_next[0])))

@@ -101,6 +101,9 @@ def covector_norm(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorB
 def extend_metric_gram(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
                        G: Coords, Q: VectorBlockT, q_new: VectorT,
                        metric_apply: Callable[[VectorT], CovectorT]) -> Coords:
-    """Grow G = [(q_i, q_j)_M] by the row and column for q_new: one product
-    with M and one block pairing."""
-    return grow_gram(G, space.pair_block(space.append_vector(Q, q_new), metric_apply(q_new)))
+    """Grow G = [(q_i, q_j)_M] of the k = G.shape[0] members of Q by the row
+    and column for q_new: one product with M and one block pairing. Q needs
+    room for k + 1 members."""
+    k = G.shape[0]
+    with_new = space.set_vector(Q, k, q_new)
+    return grow_gram(G, space.pair_block(with_new, metric_apply(q_new), k + 1)[:k + 1])

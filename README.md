@@ -238,7 +238,9 @@ See [`dev/TODO.md`](dev/TODO.md).
 `trust_region_newton(..., space=...)` takes a `VectorSpace`: a frozen record of
 functions for the vector space structure only (`scale_vector`,
 `scale_covector`, `axpy_vector`, `axpy_covector`, `pair`, block operations,
-and optionally `dimension`). Ready-made spaces:
+and optionally `dimension`). Blocks (Krylov bases) have a fixed capacity,
+members not set yet are zero, and block operations take the number of
+members in use. Ready-made spaces:
 
 - `numpy_space`: the default, one numpy array per vector, of any shape (a
   matrix-valued unknown can stay a matrix).
@@ -254,7 +256,10 @@ and optionally `dimension`). Ready-made spaces:
   one (e.g. `x0 = as_tuple_tree(x0)`). Leaves must not be tuples or lists.
 - `tuple_block_space(...)`: any vector type from five functions; blocks are
   tuples of vectors. Override `pair_block` and `combine_*` with
-  `dataclasses.replace` for batched versions.
+  `dataclasses.replace` for batched versions. Numpy backend only.
+- `array_space(backend)`: one array per vector, computed through the
+  backend's array namespace, with blocks allocated at their full capacity:
+  the space for compiling backends (see [Backends](#backends)).
 
 With a space, pass the metric and the retraction too. Helpers for the simple
 cases:
@@ -420,7 +425,7 @@ trust-region code and are meant to be reused by other optimizers.
 |---|---|
 | `backend` | how loops, branches and arrays are computed: `Backend`, `numpy_backend`, `loop_from_scan`, `loop_from_while` |
 | `trees` | tuple trees: `Tree`, `as_tuple_tree`, `tree_map`, `tree_map2`, `tree_leaves` |
-| `spaces` | the vector space structure: `VectorSpace`, `numpy_space`, `numpy_space_with_reductions`, `tuple_tree_space`, `tuple_block_space`, `flat_retraction`, `check_space` |
+| `spaces` | the vector space structure: `VectorSpace`, `numpy_space`, `numpy_space_with_reductions`, `tuple_tree_space`, `tuple_block_space`, `array_space`, `flat_retraction`, `check_space` |
 | `metrics` | the Hilbert structure, the metric given by operators: `euclidean_metric_solve`, `euclidean_metric_apply`, `direct_sum`, `vector_norm`, `covector_norm`, M-Gram matrix growth |
 | `dense` | small dense linear algebra in coordinates: Rayleigh–Ritz for a projected pencil, the trust-region problem on a ball (with the hard case) |
 | `krylov` | Krylov processes, immutable: preconditioned Lanczos (`lanczos_start`, `lanczos_advance`, `LanczosState`, `lanczos_tridiagonal`) and conjugate gradients (`cg_start`, `cg_curvature`, `cg_advance`, `CGState`, with recurrences for P-norms); optional covector projection for redundant representations |
