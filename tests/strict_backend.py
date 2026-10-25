@@ -13,8 +13,8 @@ could be compiled (dev/jit_backends_plan.md, "Guarding against drift").
     not raise on the other case's data, and both must return the same
     structure, shapes and dtypes.
   * computed indices out of range are clamped in reads and dropped in
-    index_update, as JAX does (the core uses them only on discarded
-    carries).
+    index_update, and a failed factorization (LinAlgError) gives NaN, as
+    with JAX (the core produces both only on discarded carries).
   * static_shapes is True, so the padded code paths run.
   * jit makes the arguments of a compiled piece Strict, as tracing would.
 
@@ -97,9 +97,22 @@ def _lift(fn: Callable[..., Any]) -> Callable[..., Any]:
 
 def _linalg(name: str) -> Callable[..., Any]:
     f = getattr(np.linalg, name)
-    if name == "eigh":                       # a named tuple in numpy 2: make it a plain pair
-        return _lift(lambda a: tuple(f(a)))
-    return _lift(f)
+
+    def failed(a: Any, *rest: Any) -> Any:
+        """NaN in the shape of the result, as JAX gives for a failed factorization."""
+        if name == "eigh":
+            return np.full(a.shape[:-1], np.nan), np.full(a.shape, np.nan)
+        return np.full(np.shape(rest[0]) if name == "solve" else a.shape, np.nan)
+
+    def call(*args: Any) -> Any:
+        try:
+            out = f(*args)
+        except np.linalg.LinAlgError:
+            # The core factors singular matrices only on discarded carries,
+            # e.g. a Gram matrix extended by a body run on a finished solve.
+            return failed(*args)
+        return tuple(out) if name == "eigh" else out   # eigh: a named tuple in numpy 2
+    return _lift(call)
 
 
 def _namespace() -> types.SimpleNamespace:

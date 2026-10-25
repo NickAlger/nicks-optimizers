@@ -215,6 +215,16 @@ def test_strict_namespace_has_only_the_contract() -> None:
     assert isinstance(w, Strict) and isinstance(V, Strict)
 
 
+def test_strict_factorizations_fail_with_nan_as_jax_does() -> None:
+    # A body run on a discarded carry may factor a singular matrix: NaN, not
+    # an exception (numpy raises, JAX does not).
+    singular = strict_xp.asarray([[1.0, 2.0], [2.0, 1.0]])
+    L = strict_xp.linalg.cholesky(singular)
+    x = strict_xp.linalg.solve(strict_xp.zeros((2, 2)), strict_xp.ones(2))
+    assert isinstance(L, Strict) and np.isnan(np.asarray(L).view(np.ndarray)).all()
+    assert x.shape == (2,) and np.isnan(x.view(np.ndarray)).all()
+
+
 def test_strict_backend_catches_what_a_compiler_would_refuse() -> None:
     bk = strict_backend
     zero = strict(np.asarray(0.0))

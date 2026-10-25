@@ -24,12 +24,15 @@ a framework can compile them. A Backend record says how:
                                        is compiled (arrays are then padded to
                                        a capacity); False for numpy
 
-Computed indices (in index_update and in reads) may fall out of range only
-on carries the core discards: a loop body run on a finished carry, as under
-vmap or when a scan skips finished steps by evaluating both branches of a
-cond. A compiling backend must not fail then; JAX clamps such reads and
-drops such writes. With numpy nothing is ever evaluated on a discarded
-carry, so an out-of-range index there is an error.
+Discarded carries. A compiling backend may evaluate a loop body on a
+finished carry (under vmap, or when a scan skips finished steps by
+evaluating both branches of a cond) and throw the result away. There the
+core may compute indices out of range (in index_update and in reads) and
+hand singular matrices to xp.linalg (a Gram matrix extended by a vector
+that is not new). A compiling backend must not fail then: JAX clamps such
+reads, drops such writes and returns NaN from a failed factorization. On
+live carries neither happens. With numpy nothing is ever evaluated on a
+discarded carry, so either one there is an error.
 
 numpy_backend is the default. loop_from_scan and loop_from_while build the
 bounded loop from either primitive of a framework, e.g. for JAX
