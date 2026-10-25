@@ -51,7 +51,9 @@ def fingerprint(run: Run) -> list[str]:
     compares equal), with wall-clock fields cleared."""
     x, summary = run
     records = [repr(dataclasses.replace(r, elapsed=0.0)) for r in summary.iterations]
-    rest = repr(dataclasses.replace(summary, iterations=(), elapsed=0.0))
+    shared = [f.name for f in dataclasses.fields(old.RunSummary)]          # fields of both versions
+    rest = repr([(name, getattr(summary, name)) for name in shared
+                 if name not in ("iterations", "elapsed")])
     return records + [rest, repr(as_lists(x))]
 
 

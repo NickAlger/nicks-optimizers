@@ -127,6 +127,8 @@ class RunSummary:
       elapsed       seconds
       resume        the ResumeState at the returned point, for continuing the
                     run (e.g. after max_iter) with resume=summary.resume
+      capacity_growths  how often the Krylov basis doubled its capacity (only
+                    with static shapes, see trust_region_newton)
     """
     reason: RunReason
     iterations: tuple[IterationRecord, ...]
@@ -142,6 +144,7 @@ class RunSummary:
     metric_apply_calls: int
     elapsed: float
     resume: ResumeState
+    capacity_growths: int = 0
 
 
 def merge_summaries(first: RunSummary, second: RunSummary) -> RunSummary:
@@ -159,7 +162,8 @@ def merge_summaries(first: RunSummary, second: RunSummary) -> RunSummary:
         metric_solve_calls=first.metric_solve_calls + second.metric_solve_calls,
         precond_solve_calls=first.precond_solve_calls + second.precond_solve_calls,
         metric_apply_calls=first.metric_apply_calls + second.metric_apply_calls,
-        elapsed=first.elapsed + second.elapsed, resume=second.resume)
+        elapsed=first.elapsed + second.elapsed, resume=second.resume,
+        capacity_growths=first.capacity_growths + second.capacity_growths)
 
 
 def history_array(summary: RunSummary) -> Array:
@@ -173,7 +177,8 @@ def history_array(summary: RunSummary) -> Array:
 
 def build_summary(reason: RunReason, records: list[IterationRecord], f: float, gnorm: float,
                   gnorm0: float, fun_calls: int, grad_calls: int, outer_metric_solve_calls: int,
-                  outer_precond_solve_calls: int, elapsed: float, resume: ResumeState) -> RunSummary:
+                  outer_precond_solve_calls: int, elapsed: float, resume: ResumeState,
+                  capacity_growths: int = 0) -> RunSummary:
     """Assemble the RunSummary, adding up the work recorded per iteration.
     The outer_* counts are solves made outside the subproblems (gradient
     norms)."""
@@ -186,7 +191,7 @@ def build_summary(reason: RunReason, records: list[IterationRecord], f: float, g
         metric_solve_calls=outer_metric_solve_calls + sum(s.metric_solve_calls for s in subs),
         precond_solve_calls=outer_precond_solve_calls + sum(s.precond_solve_calls for s in subs),
         metric_apply_calls=sum(s.metric_apply_calls for s in subs),
-        elapsed=elapsed, resume=resume)
+        elapsed=elapsed, resume=resume, capacity_growths=capacity_growths)
 
 
 _ROW = ("{it:>4}  {f:>13}  {g:>8}  {gr:>8}  {r:>8}  {sr:>5}  {pred:>9}  {ared:>9}  "

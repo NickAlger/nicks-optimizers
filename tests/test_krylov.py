@@ -22,8 +22,9 @@ from helpers import dense_solve, dense_vec_to_covec, matrix_with_spectrum, rando
 def test_lanczos_as_eigensolver() -> None:
     """Run the process to breakdown on an n-dimensional problem: it stops after
     exactly n steps, its Ritz values (eigenvalues of T) are the eigenvalues of
-    the pencil H u = theta P u, and a broken-down process refuses to advance.
-    Earlier states are left untouched by later steps."""
+    the pencil H u = theta P u, and a broken-down process does not advance
+    (the state comes back unchanged). Earlier states are left untouched by
+    later steps."""
     rng = np.random.default_rng(9)
     n = 30
     H = matrix_with_spectrum(np.linspace(-3.0, 7.0, n), rng)
@@ -43,13 +44,12 @@ def test_lanczos_as_eigensolver() -> None:
     ritz = np.linalg.eigvalsh(lanczos_tridiagonal(state))
     assert np.max(np.abs(ritz - exact)) <= 1e-9 * np.max(np.abs(exact))
 
-    with pytest.raises(ValueError):
-        lanczos_advance(numpy_space, state, hessvec, precond_solve)
+    assert lanczos_advance(numpy_space, state, hessvec, precond_solve) is state
 
     # Frozen states: each one still describes its own step count.
     for k, earlier in enumerate(history):
         assert earlier.steps == k
-        assert len(earlier.deltas) == k
+        assert np.count_nonzero(earlier.deltas) == k and lanczos_tridiagonal(earlier).shape == (k, k)
         assert earlier.Q.columns.shape[1] == max(k, 1)
 
 

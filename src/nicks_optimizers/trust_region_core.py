@@ -8,18 +8,29 @@ compile (see backend and dev/jit_backends_plan.md).
   RawIteration   what one iteration reports, as arrays; the driver turns it
                  into an IterationRecord
   init(problem, backend, x0, g0) -> OuterState
-  iterate(problem, backend, state, radius, gnorm0) -> (OuterState, RawIteration)
 
-iterate computes the step (the subproblem solve), the trial point, the
-reduction ratio and the new radius, and, when the step is accepted, the
-gradient, the point data and the gradient norms at the new point (under
-backend.cond). Nothing here branches in Python on computed values, and
-nothing imports numpy: arrays go through backend.xp. The stopping tests,
-records, display, callback and resuming stay in the driver
-(trust_region.trust_region_newton).
+and the pieces of one iteration, which the driver
+(trust_region.trust_region_newton) calls in turn:
 
-The Lanczos and flexible solvers are not converted yet: they run inside
-iterate with the numpy backend only.
+  step_start(problem, backend, state, radius, gnorm0, capacity=c) -> carry
+                 start the subproblem solve and run it until it stops or its
+                 Krylov basis (room for c vectors) is full
+  step_grow(problem, backend, state, carry, capacity=c2) -> carry
+  step_continue(problem, backend, state, carry) -> carry
+                 when the basis was full: copy the solve into a larger basis
+                 and continue where it stopped (nothing is recomputed)
+  step_finish(problem, backend, state, carry, radius, gnorm0)
+                 -> (OuterState, RawIteration)
+                 the step, the trial point, the reduction ratio, the new
+                 radius, and, when the step is accepted, the gradient, the
+                 point data and the gradient norms at the new point (under
+                 backend.cond)
+
+Each piece rebuilds the operators from (x, point data), so no function
+crosses the boundary of a compiled piece. Nothing here branches in Python on
+computed values, and nothing imports numpy: arrays go through backend.xp.
+The stopping tests, records, display, callback and resuming stay in the
+driver.
 """
 
 from dataclasses import dataclass
@@ -28,9 +39,11 @@ from typing import Any, Callable, Generic, Literal, Optional
 from .backend import Backend, backend_state, run_cond
 from .spaces import CovectorT, VectorSpace, VectorT
 from .trust_region_subproblem import (
-    solve_tr_subproblem,
-    solve_tr_subproblem_flexible,
-    truncated_cg,
+    KrylovSolver,
+    SubproblemOperators,
+    cg_solver,
+    flexible_solver,
+    lanczos_solver,
 )
 
 
@@ -237,42 +250,60 @@ def uses_cg(problem: CoreProblem, ops: PointOperators[Any, Any]) -> bool:
                                       and not problem.saddle_free)
 
 
-def iterate(problem: CoreProblem, backend: Backend, state: OuterState, radius: Any, gnorm0: Any
-            ) -> tuple[OuterState, RawIteration]:
-    """One iteration from state with the given radius: the step, the trial
-    point, rho, the new radius, and the state at the next point (the trial
-    point if accepted, else the same)."""
-    xp = backend.xp
-    x = state.x
-    forcing = forcing_term(xp, state.gnorm, gnorm0, problem.forcing_max)
-    resid_tol = forcing * state.metric_gnorm
-    ops = operators(problem, x, state.data)
-    pc = problem.project_covector
-    project = None if pc is None else (lambda w: pc(x, w))
+def subproblem_at(problem: CoreProblem, state: OuterState
+                  ) -> tuple[KrylovSolver, SubproblemOperators[Any, Any]]:
+    """The subproblem solver for this run (chosen from the configuration and
+    whether a separate preconditioner is given, so fixed when a piece is
+    traced) and its operators at the current point."""
+    ops = operators(problem, state.x, state.data)
+    pc, x = problem.project_covector, state.x
     assert ops.metric_solve is not None
-    sub: Any                    # RawSubproblem; SubproblemStats from the solvers not yet converted
+    sub_ops = SubproblemOperators(
+        hessvec=ops.hessvec, metric_solve=ops.metric_solve, precond_solve=ops.precond_solve,
+        metric_apply=ops.metric_apply,
+        project_covector=None if pc is None else (lambda w: pc(x, w)))
     if uses_cg(problem, ops):
-        s, sub = truncated_cg(backend, problem.space, state.g, ops.hessvec, ops.metric_solve,
-                              radius, resid_tol, problem.max_krylov, project_covector=project,
-                              start_vector=state.start)
-    elif backend.static_shapes:
-        raise NotImplementedError("the Lanczos and flexible solvers run with the numpy backend "
-                                  "only, for now (dev/jit_backends_plan.md, phase 6)")
-    elif problem.krylov == "flexible":
-        assert ops.precond_solve is not None and ops.metric_apply is not None
-        # Not converted yet: Python numbers in, SubproblemStats out.
-        s, sub = solve_tr_subproblem_flexible(
-            problem.space, state.g, ops.hessvec, ops.metric_solve, ops.metric_apply,
-            ops.precond_solve, float(radius), float(resid_tol), problem.max_krylov,
-            saddle_free=problem.saddle_free, project_covector=project, start_vector=state.start)
-    else:
-        s, sub = solve_tr_subproblem(
-            problem.space, state.g, ops.hessvec, ops.metric_solve, float(radius),
-            float(resid_tol), problem.max_krylov, precond_solve=ops.precond_solve,
-            metric_apply=ops.metric_apply, stall_tol=problem.stall_tol,
-            saddle_free=problem.saddle_free, project_covector=project, start_vector=state.start)
+        return cg_solver(problem.max_krylov), sub_ops
+    if problem.krylov == "flexible":
+        return flexible_solver(problem.max_krylov, saddle_free=problem.saddle_free), sub_ops
+    return lanczos_solver(problem.max_krylov, saddle_free=problem.saddle_free,
+                          stall_tol=problem.stall_tol), sub_ops
 
-    x_trial = problem.retract(x, s)
+
+def step_start(problem: CoreProblem, backend: Backend, state: OuterState, radius: Any,
+               gnorm0: Any, *, capacity: Optional[int]) -> Any:
+    """Start the subproblem solve at state with the given radius, and run it
+    until it stops or its basis (of the given capacity; None: max_krylov)
+    is full. Returns the solver's carry."""
+    solver, ops = subproblem_at(problem, state)
+    forcing = forcing_term(backend.xp, state.gnorm, gnorm0, problem.forcing_max)
+    carry = solver.begin(backend, problem.space, ops, state.g, radius, forcing * state.metric_gnorm,
+                         state.start, capacity)
+    return solver.run(backend, problem.space, ops, state.g, carry)
+
+
+def step_continue(problem: CoreProblem, backend: Backend, state: OuterState, carry: Any) -> Any:
+    """Continue a solve after its basis has grown."""
+    solver, ops = subproblem_at(problem, state)
+    return solver.run(backend, problem.space, ops, state.g, carry)
+
+
+def step_grow(problem: CoreProblem, backend: Backend, state: OuterState, carry: Any, *,
+              capacity: int) -> Any:
+    """The same solve with room for capacity basis vectors (copies only)."""
+    solver, _ = subproblem_at(problem, state)
+    return solver.grow(backend, problem.space, carry, capacity)
+
+
+def step_finish(problem: CoreProblem, backend: Backend, state: OuterState, carry: Any, radius: Any,
+                gnorm0: Any) -> tuple[OuterState, RawIteration]:
+    """The rest of the iteration once the solve has stopped: the step, the
+    trial point, rho, the new radius, and the state at the next point (the
+    trial point if accepted, else the same)."""
+    xp = backend.xp
+    solver, ops = subproblem_at(problem, state)
+    s, sub = solver.result(backend, problem.space, ops, carry)
+    x_trial = problem.retract(state.x, s)
     f_trial = problem.fun(x_trial)
     predicted = -sub.model_value
     rho = reduction_ratio(xp, state.f, f_trial, predicted)
@@ -287,6 +318,7 @@ def iterate(problem: CoreProblem, backend: Backend, state: OuterState, radius: A
         return state
 
     new_state = run_cond(backend, accepted, move, stay, None)
+    forcing = forcing_term(xp, state.gnorm, gnorm0, problem.forcing_max)
     return new_state, RawIteration(forcing=forcing, predicted=predicted, actual=state.f - f_trial,
                                    rho=rho, accepted=accepted, new_radius=new_radius,
                                    subproblem=sub, step=s)

@@ -24,6 +24,13 @@ a framework can compile them. A Backend record says how:
                                        is compiled (arrays are then padded to
                                        a capacity); False for numpy
 
+Computed indices (in index_update and in reads) may fall out of range only
+on carries the core discards: a loop body run on a finished carry, as under
+vmap or when a scan skips finished steps by evaluating both branches of a
+cond. A compiling backend must not fail then; JAX clamps such reads and
+drops such writes. With numpy nothing is ever evaluated on a discarded
+carry, so an out-of-range index there is an error.
+
 numpy_backend is the default. loop_from_scan and loop_from_while build the
 bounded loop from either primitive of a framework, e.g. for JAX
 

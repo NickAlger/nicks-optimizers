@@ -39,7 +39,7 @@ SRC = pathlib.Path(__file__).resolve().parent.parent / "src" / "nicks_optimizers
 
 # Core modules: everything in them runs inside compiled pieces, so they use
 # the backend's xp and never numpy. Grows as the refactor converts modules.
-NUMPY_FREE: list[str] = ["trust_region_core", "dense"]
+NUMPY_FREE: list[str] = ["trust_region_core", "dense", "krylov", "trust_region_subproblem"]
 
 
 def modules() -> dict[str, ast.Module]:

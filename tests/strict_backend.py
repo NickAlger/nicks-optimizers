@@ -12,6 +12,9 @@ could be compiled (dev/jit_backends_plan.md, "Guarding against drift").
   * cond evaluates both branches and selects, as vmap does: a branch must
     not raise on the other case's data, and both must return the same
     structure, shapes and dtypes.
+  * computed indices out of range are clamped in reads and dropped in
+    index_update, as JAX does (the core uses them only on discarded
+    carries).
   * static_shapes is True, so the padded code paths run.
   * jit makes the arguments of a compiled piece Strict, as tracing would.
 
@@ -48,7 +51,16 @@ class Strict(np.ndarray):
         return np.asarray(obj).view(Strict)
 
     def __getitem__(self, index: Any) -> Any:
-        return strict(np.ndarray.__getitem__(self.view(np.ndarray), plain(index)))
+        base, index = self.view(np.ndarray), plain(index)
+        try:
+            return strict(np.ndarray.__getitem__(base, index))
+        except IndexError:
+            # A computed index out of range: clamped, as JAX does (the core
+            # reads out of range only on carries it discards).
+            if np.ndim(index) == 0 and np.issubdtype(np.asarray(index).dtype, np.integer):
+                clamped = min(max(int(index), -base.shape[0]), base.shape[0] - 1)
+                return strict(np.ndarray.__getitem__(base, clamped))
+            raise
 
     def __setitem__(self, index: Any, value: Any) -> None:
         np.ndarray.__setitem__(self.view(np.ndarray), plain(index), plain(value))
@@ -166,8 +178,14 @@ def select(take: bool, a: Any, b: Any) -> Any:
 
 
 def strict_index_update(a: Any, index: Any, value: Any) -> Any:
+    """Out-of-range writes are dropped, as JAX does: the core issues them only
+    on carries it discards (this backend runs loop bodies on finished
+    carries, since its cond evaluates both branches)."""
     out = np.array(plain(a), copy=True)
-    out[plain(index)] = plain(value)
+    try:
+        out[plain(index)] = plain(value)
+    except IndexError:
+        pass
     return out.view(Strict)
 
 

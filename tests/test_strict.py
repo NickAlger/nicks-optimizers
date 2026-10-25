@@ -7,7 +7,7 @@ control flow on data), as they must be for a compiling backend.
 """
 
 import dataclasses
-from typing import Any
+from typing import Any, Optional
 
 import numpy as np
 import pytest
@@ -16,7 +16,10 @@ import matrix_completion as mc
 from helpers import without_times
 from nicks_optimizers import (
     array_space,
+    euclidean_metric_apply,
     euclidean_metric_solve,
+    solve_tr_subproblem,
+    solve_tr_subproblem_flexible,
     flat_retraction,
     numpy_backend,
     numpy_space,
@@ -25,6 +28,7 @@ from nicks_optimizers import (
     tuple_tree_space,
 )
 from problems import (
+    rosen_hess_diag,
     pa_rosen_grad,
     pa_rosen_hessvec,
     rosen_grad,
@@ -33,7 +37,7 @@ from problems import (
     well_grad,
     well_hessvec,
 )
-from strict_backend import strict, strict_backend
+from strict_backend import plain, strict, strict_backend
 
 
 def rosen_fun(x: Any) -> Any:
@@ -174,14 +178,83 @@ def _ops(x: Any, d: Any) -> Any:
 
 @pytest.mark.filterwarnings("ignore:invalid value:RuntimeWarning")
 def test_errors_raise_after_the_compiled_piece() -> None:
-    """A metric that is not positive definite is reported as before, and the
-    solvers not converted yet refuse the strict backend."""
+    """A metric that is not positive definite is reported as before."""
     g = np.ones(6)
     for bk in (numpy_backend, strict_backend):
         with pytest.raises(ValueError, match="must be positive"):
             solve_tr_subproblem_cg(numpy_space, strict(g), lambda v: 2.0 * v, lambda w: -w, 1.0,
                                    1e-8, 10, backend=bk)
-    with pytest.raises(NotImplementedError):
-        x0: Any = np.tile([-1.2, 1.0], 5)
-        trust_region_newton(rosen_fun, rosen_grad, rosen_hessvec, x0, krylov="lanczos",
-                            backend=strict_backend)
+
+
+def jacobi(x: Any, w: Any) -> Any:
+    """P(x) = diag(max(|H_ii(x)|, 1)) of problems.jacobi_precond_solve."""
+    return w / np.maximum(np.abs(rosen_hess_diag(x)), 1.0)
+
+
+def agree(reference: Any, other: Any, first: int = 15) -> None:
+    """Runs that differ only by rounding (padded against cut-down projected
+    problems): the same counts, acceptances and stop reasons over the first
+    iterations, objective values equal to rounding there, and the same
+    outcome."""
+    a, b = reference.iterations[:first], other.iterations[:first]
+    assert [(r.accepted, r.subproblem.krylov_steps, r.subproblem.stop_reason) for r in a] == \
+        [(r.accepted, r.subproblem.krylov_steps, r.subproblem.stop_reason) for r in b]
+    assert all(abs(u.f - v.f) <= 1e-9 * max(abs(v.f), 1e-12) for u, v in zip(a, b))
+    assert other.reason == reference.reason == "converged"
+
+
+SOLVER_CASES: dict[str, dict[str, Any]] = {
+    "lanczos": dict(krylov="lanczos"),
+    "lanczos, separate P": dict(krylov="lanczos", precond_solve=jacobi,
+                                metric_apply=euclidean_metric_apply),
+    "lanczos, saddle-free": dict(saddle_free=True),
+    "flexible": dict(krylov="flexible", precond_solve=jacobi, metric_apply=euclidean_metric_apply),
+}
+
+
+@pytest.mark.parametrize("name", list(SOLVER_CASES))
+def test_lanczos_and_flexible_on_the_strict_backend(name: str) -> None:
+    """The Lanczos and flexible solvers on the code path of a compiling
+    backend: array_space, padded projected problems, and a basis that starts
+    with room for 1, 2 or 3 vectors and doubles whenever a solve fills it."""
+    options = SOLVER_CASES[name]
+    x0: Any = np.tile([-1.2, 1.0], 10)
+    _, reference = trust_region_newton(rosen_fun, rosen_grad, rosen_hessvec, x0,
+                                       metric_solve=euclidean_metric_solve, **options)
+    assert reference.capacity_growths == 0
+    for capacity in (1, 2, 3, 50):
+        space = array_space(strict_backend)
+        _, run = trust_region_newton(rosen_fun, rosen_grad, rosen_hessvec, x0, space=space,
+                                     retract=lambda x, s: x + s, metric_solve=euclidean_metric_solve,
+                                     backend=strict_backend, krylov_capacity=capacity, **options)
+        agree(reference, run)
+        most = max(r.subproblem.krylov_steps for r in run.iterations)
+        assert (run.capacity_growths > 0) == (capacity < min(most, 50))
+
+
+def test_subproblem_solvers_grow_their_basis() -> None:
+    """The subproblem solvers alone: a basis that starts with room for one
+    vector and doubles gives the solution of an unlimited basis."""
+    rng = np.random.default_rng(4)
+    n = 25
+    Q = np.linalg.qr(rng.standard_normal((n, n)))[0]
+    H = (Q * np.linspace(-1.0, 8.0, n)) @ Q.T
+    g = rng.standard_normal(n)
+    P = np.diag(np.abs(np.diag(H)) + 1.0)
+    def lanczos(bk: Any, cap: Optional[int], radius: float) -> Any:
+        return solve_tr_subproblem(array_space(bk), strict(g) if bk is strict_backend else g,
+                                   lambda v: H @ v, lambda w: w, radius, 1e-10, 40, backend=bk,
+                                   capacity=cap)
+
+    def flexible(bk: Any, cap: Optional[int], radius: float) -> Any:
+        return solve_tr_subproblem_flexible(
+            array_space(bk), strict(g) if bk is strict_backend else g, lambda v: H @ v,
+            lambda w: w, lambda v: v, lambda w: np.linalg.solve(P, w), radius, 1e-10, 40,
+            backend=bk, capacity=cap)
+    for radius in (0.3, 100.0):
+        for solve in (lanczos, flexible):
+            s_ref, st_ref = solve(numpy_backend, None, radius)
+            for cap in (1, 2, 5):
+                s, st = solve(strict_backend, cap, radius)
+                assert st.krylov_steps == st_ref.krylov_steps and st.stop_reason == st_ref.stop_reason
+                assert np.max(np.abs(np.asarray(plain(s)) - np.asarray(s_ref))) <= 1e-9 * np.max(np.abs(s_ref))

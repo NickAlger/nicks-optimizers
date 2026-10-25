@@ -97,7 +97,7 @@ resuming. The default numpy backend runs the pieces as plain Python. With a
 compiling backend, every function given (fun, grad, the operators,
 retract, project_covector, point_data, operators_at) must be traceable by
 it: no Python control flow on values, and arrays out (fun returns a 0-d
-array rather than a float). For now such backends run the CG path only.
+array rather than a float).
 """
 
 import time
@@ -117,7 +117,16 @@ from .spaces import (
     VectorT,
     numpy_space,
 )
-from .trust_region_core import CoreProblem, OuterState, PointOperators, RawIteration, init, iterate
+from .trust_region_core import (
+    CoreProblem,
+    OuterState,
+    PointOperators,
+    init,
+    step_continue,
+    step_finish,
+    step_grow,
+    step_start,
+)
 from .trust_region_diagnostics import (
     IterationInfo,
     IterationRecord,
@@ -128,7 +137,7 @@ from .trust_region_diagnostics import (
     display_iteration,
     format_summary,
 )
-from .trust_region_subproblem import SubproblemStats, subproblem_stats
+from .trust_region_subproblem import FULL, as_integer, subproblem_stats
 
 __all__ = ["PointOperators", "trust_region_newton", "update_radius", "check_resume_matches"]
 
@@ -183,6 +192,7 @@ def trust_region_newton(
         resume: Optional[ResumeState] = None,
         g0: Optional[CovectorT] = None,
         backend: Optional[Backend] = None,
+        krylov_capacity: Optional[int] = None,
         ) -> tuple[PointT, RunSummary]:
     """Inexact Newton trust-region method with an ellipsoidal trust region.
 
@@ -249,7 +259,14 @@ def trust_region_newton(
     evaluation; it must belong to x0.
 
     Backend: backend=None runs on numpy; another Backend compiles the
-    iterations (see the module docstring and backend).
+    iterations (see the module docstring and backend). With static shapes,
+    the Krylov basis of the Lanczos and flexible solvers is allocated in
+    full: it starts with room for krylov_capacity vectors (default
+    min(32, max_krylov)) and doubles, up to max_krylov, whenever a solve
+    fills it, continuing the solve without recomputing anything; the
+    capacity then stays for the rest of the run (summary.capacity_growths
+    counts the doublings). numpy ignores krylov_capacity: its blocks store
+    only the vectors in use.
 
     Returns (x, summary): the final iterate and a RunSummary, which holds the
     stopping reason, one IterationRecord per iteration, the work done and the
@@ -280,6 +297,8 @@ def trust_region_newton(
     if convergence_norm not in ("metric", "preconditioner"):
         raise ValueError(f"convergence_norm must be 'metric' or 'preconditioner', "
                          f"not {convergence_norm!r}")
+    if krylov_capacity is not None and krylov_capacity < 1:
+        raise ValueError(f"krylov_capacity must be positive, not {krylov_capacity}")
 
     bk = numpy_backend if backend is None else backend
     xp = bk.xp
@@ -294,7 +313,29 @@ def trust_region_newton(
         radius_max=radius_max, forcing_max=forcing_max, stall_tol=stall_tol,
         max_krylov=max_krylov)
     start_piece = compile_function(bk, partial(init, problem, bk))
-    step_piece = compile_function(bk, partial(iterate, problem, bk))
+    continue_piece = compile_function(bk, partial(step_continue, problem, bk))
+    finish_piece = compile_function(bk, partial(step_finish, problem, bk))
+    begin_pieces: dict[Optional[int], Callable[..., Any]] = {}
+    grow_pieces: dict[int, Callable[..., Any]] = {}
+
+    def begin_piece(c: Optional[int]) -> Callable[..., Any]:
+        """step_start compiled for basis capacity c (one version per capacity)."""
+        if c not in begin_pieces:
+            begin_pieces[c] = compile_function(bk, partial(step_start, problem, bk, capacity=c))
+        return begin_pieces[c]
+
+    def grow_piece(c: int) -> Callable[..., Any]:
+        if c not in grow_pieces:
+            grow_pieces[c] = compile_function(bk, partial(step_grow, problem, bk, capacity=c))
+        return grow_pieces[c]
+
+    # numpy stores only the basis vectors in use: room for max_krylov from the
+    # start. Static shapes allocate the capacity in full: start small, double
+    # when full (a high-water mark for the run).
+    capacity: Optional[int] = None
+    if bk.static_shapes:
+        capacity = min(32 if krylov_capacity is None else krylov_capacity, max_krylov)
+    growths = 0
 
     def number(v: Any) -> float:
         return float(np.asarray(v))
@@ -322,9 +363,15 @@ def trust_region_newton(
         if it >= max_iter:
             reason = "max_iter"
             break
-        new_state, raw = step_piece(state, xp.asarray(radius), xp.asarray(gnorm0))
-        stats = (raw.subproblem if isinstance(raw.subproblem, SubproblemStats)
-                 else subproblem_stats(raw.subproblem, "cg"))
+        radius_x, gnorm0_x = xp.asarray(radius), xp.asarray(gnorm0)
+        carry = begin_piece(capacity)(state, radius_x, gnorm0_x)
+        while as_integer(carry.status) == FULL:
+            assert capacity is not None
+            capacity = min(2 * capacity, max_krylov)
+            carry = continue_piece(state, grow_piece(capacity)(state, carry))
+            growths += 1
+        new_state, raw = finish_piece(state, carry, radius_x, gnorm0_x)
+        stats = subproblem_stats(raw.subproblem)
         fun_calls += 1
         accepted = bool(np.asarray(raw.accepted))
         new_radius = number(raw.new_radius)
@@ -356,7 +403,7 @@ def trust_region_newton(
     final_state = ResumeState(radius=radius, gnorm0=gnorm0, next_iteration=it, f=fx)
     summary = build_summary(reason, records, fx, gnorm, gnorm0, fun_calls, grad_calls,
                             metric_solves, precond_solves, time.perf_counter() - start,
-                            final_state)
+                            final_state, capacity_growths=growths)
     if display >= 1:
         print_fn(format_summary(summary))
     x: PointT = state.x

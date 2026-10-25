@@ -39,9 +39,7 @@ representatives, to remove them at every step.
 from dataclasses import dataclass
 from typing import Any, Callable, Generic, Optional
 
-import numpy as np
-
-from .backend import Backend, backend_state, numpy_backend
+from .backend import Backend, backend_state, numpy_backend, run_cond
 from .spaces import (
     Coords,
     CovectorBlockT,
@@ -52,30 +50,40 @@ from .spaces import (
 )
 
 
-def tridiagonal(diag: Coords, offdiag: Coords) -> Coords:
-    """Dense symmetric tridiagonal matrix. Uses the first len(diag)-1 off-diagonals."""
-    k = len(diag)
-    T: Coords = np.diag(np.asarray(diag, dtype=float))
-    if k > 1:
-        off = np.asarray(offdiag[: k - 1], dtype=float)
-        T = T + np.diag(off, 1) + np.diag(off, -1)
+def tridiagonal(diag: Coords, offdiag: Coords, *, backend: Backend = numpy_backend) -> Coords:
+    """The dense symmetric tridiagonal matrix with diagonal diag (length m)
+    and off-diagonal offdiag[:m - 1] (entries beyond are ignored)."""
+    xp = backend.xp
+    m = diag.shape[0]
+    index = xp.arange(m)
+    row, col = index[:, None], index[None, :]
+    off = offdiag[:m]
+    if off.shape[0] < m:                      # offdiag of length m - 1: one more, unused
+        off = xp.where(index < off.shape[0], xp.take(off, xp.minimum(index, off.shape[0] - 1)), 0.0) \
+            if off.shape[0] > 0 else xp.zeros(m)
+    within = index < m - 1
+    T: Coords = (xp.where(row == col, diag[None, :], 0.0)
+                 + xp.where((col == row + 1) & within[:, None], off[:, None], 0.0)
+                 + xp.where((row == col + 1) & within[None, :], off[None, :], 0.0))
     return T
 
 
 def lanczos_initial_pair(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
-                  g: CovectorT, precond_solve: Callable[[CovectorT], VectorT],
-                  precond_g: Optional[VectorT] = None) -> tuple[CovectorT, VectorT, float]:
+                         g: CovectorT, precond_solve: Callable[[CovectorT], VectorT],
+                         precond_g: Optional[VectorT] = None, *, backend: Backend = numpy_backend
+                         ) -> tuple[CovectorT, VectorT, Any]:
     """The first Lanczos pair, from g (and P^{-1} g, if already computed).
 
     Returns (v0, q0, gamma0) with g = gamma0 v0, q0 = P^{-1} v0 and
-    <v0, q0> = <P q0, q0> = 1. gamma0 = ||g||_{P^{-1}}.
+    <v0, q0> = <P q0, q0> = 1. gamma0 = ||g||_{P^{-1}}, which must be
+    positive (P positive definite, g nonzero); it is not checked here, so
+    callers test gamma0 > 0 (the solvers report it).
     """
+    xp = backend.xp
     y = precond_solve(g) if precond_g is None else precond_g
-    gPg = space.pair(g, y)
-    if not gPg > 0.0:
-        raise ValueError("<g, P^{-1} g> must be positive; is P positive definite and g nonzero?")
-    gamma0 = float(np.sqrt(gPg))
-    return space.scale_covector(1.0 / gamma0, g), space.scale_vector(1.0 / gamma0, y), gamma0
+    gamma0 = xp.sqrt(xp.maximum(space.pair(g, y), 0.0))
+    inverse = 1.0 / xp.where(gamma0 > 0.0, gamma0, 1.0)
+    return space.scale_covector(inverse, g), space.scale_vector(inverse, y), gamma0
 
 
 def reorthogonalize(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
@@ -97,10 +105,11 @@ def lanczos_step(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBl
                  hessvec: Callable[[VectorT], CovectorT],
                  precond_solve: Callable[[CovectorT], VectorT],
                  Q: VectorBlockT, V: CovectorBlockT, k: Any, q: VectorT, v: CovectorT,
-                 v_prev: Optional[CovectorT], gamma_prev: float,
+                 v_prev: Optional[CovectorT], gamma_prev: Any,
                  reorth_passes: int = 2,
-                 project_covector: Optional[Callable[[CovectorT], CovectorT]] = None
-                 ) -> tuple[float, float, CovectorT, VectorT]:
+                 project_covector: Optional[Callable[[CovectorT], CovectorT]] = None, *,
+                 backend: Backend = numpy_backend
+                 ) -> tuple[Any, Any, CovectorT, VectorT]:
     """One step of P-preconditioned Lanczos with full reorthogonalization.
 
     Q, V hold k members; q, v are the newest pair (the last members) and
@@ -113,6 +122,7 @@ def lanczos_step(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBl
     q_next = P^{-1} t / gamma_next. On exact breakdown the vectors are zero.
     Costs one Hessian-vector product and one preconditioner solve.
     """
+    xp = backend.xp
     h = hessvec(q)
     delta = space.pair(h, q)
     t = space.axpy_covector(-delta, v, h)
@@ -122,65 +132,105 @@ def lanczos_step(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBl
     if project_covector is not None:
         t = project_covector(t)
     y = precond_solve(t)
-    gamma_next = float(np.sqrt(max(space.pair(t, y), 0.0)))
-    if gamma_next == 0.0:
-        return delta, 0.0, space.scale_covector(0.0, t), space.scale_vector(0.0, y)
-    return (delta, gamma_next, space.scale_covector(1.0 / gamma_next, t),
-            space.scale_vector(1.0 / gamma_next, y))
+    gamma_next = xp.sqrt(xp.maximum(space.pair(t, y), 0.0))
+    positive = gamma_next > 0.0
+    inverse = xp.where(positive, 1.0 / xp.where(positive, gamma_next, 1.0), 0.0)
+    return delta, gamma_next, space.scale_covector(inverse, t), space.scale_vector(inverse, y)
 
 
+@backend_state
 @dataclass(frozen=True, kw_only=True)
 class LanczosState(Generic[VectorT, CovectorT, VectorBlockT, CovectorBlockT]):
     """A P-preconditioned Lanczos process after `steps` steps.
 
       steps          number of steps taken (= products with H)
       gamma0         ||g||_{P^{-1}}, with g = gamma0 v_0
-      Q, V           the basis q_0, ..., q_{m-1} (P-orthonormal) and v_i = P q_i,
-                     with m = max(steps, 1)
+      Q, V           blocks of the basis q_0, ..., q_{m-1} (P-orthonormal) and
+                     v_i = P q_i, with m = max(steps, 1), and room for
+                     `capacity` members (the process can take that many steps)
       q, v           the newest basis members q_{m-1}, v_{m-1}
-      deltas         diagonal of T (length steps)
-      gammas         off-diagonal of T within the basis (length steps - 1)
+      deltas         diagonal of T, an array of length capacity whose first
+                     `steps` entries are set
+      gammas         off-diagonal of T within the basis, length capacity, first
+                     steps - 1 entries set
       gamma_next, v_next, q_next
                      the pending next direction: H Q = V T + gamma_next
                      v_next e_k^T. Zero before the first step and on breakdown.
       breakdown      an invariant subspace was found: the Krylov space contains
                      the exact solution and cannot grow further
-      v_prev, hscale internal (the previous v, and the scale of T for the
-                     breakdown test)
+      v_prev, hscale internal (the previous v, None before the first step,
+                     and the scale of T for the breakdown test)
 
-    Frozen; lanczos_advance returns a new state and never modifies vectors.
+    The numbers are 0-d arrays of the backend. Frozen; lanczos_advance
+    returns a new state and never modifies vectors.
     """
-    steps: int
-    gamma0: float
+    steps: Any
+    gamma0: Any
     Q: VectorBlockT
     V: CovectorBlockT
     q: VectorT
     v: CovectorT
-    deltas: tuple[float, ...]
-    gammas: tuple[float, ...]
-    gamma_next: float
+    deltas: Any
+    gammas: Any
+    gamma_next: Any
     v_next: CovectorT
     q_next: VectorT
-    breakdown: bool
+    breakdown: Any
     v_prev: Optional[CovectorT]
-    hscale: float
+    hscale: Any
 
 
 def lanczos_start(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
                   g: CovectorT, precond_solve: Callable[[CovectorT], VectorT],
-                  precond_g: Optional[VectorT] = None, *, capacity: int
+                  precond_g: Optional[VectorT] = None, *, capacity: int,
+                  backend: Backend = numpy_backend
                   ) -> LanczosState[VectorT, CovectorT, VectorBlockT, CovectorBlockT]:
     """The process before its first step: the basis is q_0 = P^{-1} g / gamma0.
     Costs one preconditioner solve, unless precond_g = P^{-1} g is given. The
-    blocks Q and V have room for capacity members: the process can take
-    capacity steps."""
-    v0, q0, gamma0 = lanczos_initial_pair(space, g, precond_solve, precond_g)
+    blocks have room for capacity members, so the process can take capacity
+    steps (lanczos_grow makes room for more). gamma0 must be positive (see
+    lanczos_initial_pair)."""
+    xp = backend.xp
+    v0, q0, gamma0 = lanczos_initial_pair(space, g, precond_solve, precond_g, backend=backend)
+    zero = xp.asarray(0.0)
     return LanczosState(
-        steps=0, gamma0=gamma0, Q=space.vector_block(q0, capacity),
-        V=space.covector_block(v0, capacity),
-        q=q0, v=v0, deltas=(), gammas=(), gamma_next=0.0,
-        v_next=space.scale_covector(0.0, v0), q_next=space.scale_vector(0.0, q0),
-        breakdown=False, v_prev=None, hscale=0.0)
+        steps=xp.asarray(0), gamma0=gamma0, Q=space.vector_block(q0, capacity),
+        V=space.covector_block(v0, capacity), q=q0, v=v0, deltas=xp.zeros(capacity),
+        gammas=xp.zeros(capacity), gamma_next=zero, v_next=space.scale_covector(0.0, v0),
+        q_next=space.scale_vector(0.0, q0), breakdown=xp.asarray(False), v_prev=None,
+        hscale=zero)
+
+
+def lanczos_step_state(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
+                       state: LanczosState[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
+                       hessvec: Callable[[VectorT], CovectorT],
+                       precond_solve: Callable[[CovectorT], VectorT],
+                       breakdown_tol: float = 1e-12, reorth_passes: int = 2,
+                       project_covector: Optional[Callable[[CovectorT], CovectorT]] = None, *,
+                       backend: Backend = numpy_backend
+                       ) -> LanczosState[VectorT, CovectorT, VectorBlockT, CovectorBlockT]:
+    """lanczos_advance without the check for breakdown: the state must not
+    have broken down, and its blocks need room for the pending vector."""
+    xp = backend.xp
+    if state.v_prev is None:                  # the first step (static: v_prev is None only before it)
+        Q, V, gammas, q, v = state.Q, state.V, state.gammas, state.q, state.v
+        v_prev, gamma_prev = None, xp.asarray(0.0)
+    else:                                     # the pending vector joins the basis
+        Q = space.set_vector(state.Q, state.steps, state.q_next)
+        V = space.set_covector(state.V, state.steps, state.v_next)
+        gammas = backend.index_update(state.gammas, state.steps - 1, state.gamma_next)
+        v_prev, gamma_prev = state.v, state.gamma_next
+        q, v = state.q_next, state.v_next
+    delta, gamma_next, v_next, q_next = lanczos_step(
+        space, hessvec, precond_solve, Q, V, state.steps + 1, q, v, v_prev, gamma_prev,
+        reorth_passes, project_covector, backend=backend)
+    hscale = xp.maximum(xp.maximum(state.hscale, xp.abs(delta)), gamma_prev)
+    breakdown = gamma_next <= breakdown_tol * hscale
+    return LanczosState(
+        steps=state.steps + 1, gamma0=state.gamma0, Q=Q, V=V, q=q, v=v,
+        deltas=backend.index_update(state.deltas, state.steps, delta), gammas=gammas,
+        gamma_next=xp.where(breakdown, 0.0, gamma_next), v_next=v_next, q_next=q_next,
+        breakdown=breakdown, v_prev=state.v if v_prev is None else v_prev, hscale=hscale)
 
 
 def lanczos_advance(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
@@ -188,7 +238,8 @@ def lanczos_advance(space: VectorSpace[VectorT, CovectorT, VectorBlockT, Covecto
                     hessvec: Callable[[VectorT], CovectorT],
                     precond_solve: Callable[[CovectorT], VectorT],
                     breakdown_tol: float = 1e-12, reorth_passes: int = 2,
-                    project_covector: Optional[Callable[[CovectorT], CovectorT]] = None
+                    project_covector: Optional[Callable[[CovectorT], CovectorT]] = None, *,
+                    backend: Backend = numpy_backend
                     ) -> LanczosState[VectorT, CovectorT, VectorBlockT, CovectorBlockT]:
     """One more Lanczos step.
 
@@ -196,37 +247,48 @@ def lanczos_advance(space: VectorSpace[VectorT, CovectorT, VectorBlockT, Covecto
     the basis; then H is applied to the newest basis vector, the result is
     reorthogonalized, and the new pending direction is formed. Breakdown is
     declared when gamma_next <= breakdown_tol times the largest entry of T
-    seen so far; a broken-down process cannot be advanced. Costs one product
-    with H and one solve with P. project_covector, for redundant
-    representations, is applied to each new covector (see the module
-    docstring).
+    seen so far; a broken-down process does not advance (the state comes
+    back unchanged). Costs one product with H and one solve with P.
+    project_covector, for redundant representations, is applied to each new
+    covector (see the module docstring). The blocks need room for the
+    pending vector (capacity > steps after the first step).
     """
-    if state.breakdown:
-        raise ValueError("the Lanczos process has broken down (invariant subspace); it cannot grow")
-    if state.steps > 0:
-        Q = space.set_vector(state.Q, state.steps, state.q_next)
-        V = space.set_covector(state.V, state.steps, state.v_next)
-        gammas = state.gammas + (state.gamma_next,)
-        v_prev: Optional[CovectorT] = state.v
-        q, v = state.q_next, state.v_next
-    else:
-        Q, V, gammas, v_prev, q, v = state.Q, state.V, state.gammas, state.v_prev, state.q, state.v
-    gamma_prev = gammas[-1] if gammas else 0.0
-    delta, gamma_next, v_next, q_next = lanczos_step(
-        space, hessvec, precond_solve, Q, V, state.steps + 1, q, v, v_prev, gamma_prev,
-        reorth_passes, project_covector)
-    hscale = max(state.hscale, abs(delta), gamma_prev)
-    breakdown = gamma_next <= breakdown_tol * hscale
+    def advance(s: LanczosState[VectorT, CovectorT, VectorBlockT, CovectorBlockT]
+                ) -> LanczosState[VectorT, CovectorT, VectorBlockT, CovectorBlockT]:
+        return lanczos_step_state(space, s, hessvec, precond_solve, breakdown_tol, reorth_passes,
+                                  project_covector, backend=backend)
+    if state.v_prev is None:                  # before the first step nothing has broken down
+        return advance(state)
+    return run_cond(backend, state.breakdown, lambda s: s, advance, state)
+
+
+def lanczos_grow(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
+                 state: LanczosState[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
+                 capacity: int, *, backend: Backend = numpy_backend
+                 ) -> LanczosState[VectorT, CovectorT, VectorBlockT, CovectorBlockT]:
+    """The same process with room for capacity steps: the blocks and the
+    arrays of T are copied into larger ones; nothing is recomputed."""
+    def longer(a: Any) -> Any:
+        return backend.index_update(backend.xp.zeros(capacity), slice(0, a.shape[0]), a)
     return LanczosState(
-        steps=state.steps + 1, gamma0=state.gamma0, Q=Q, V=V, q=q, v=v,
-        deltas=state.deltas + (delta,), gammas=gammas,
-        gamma_next=0.0 if breakdown else gamma_next, v_next=v_next, q_next=q_next,
-        breakdown=breakdown, v_prev=v_prev, hscale=hscale)
+        steps=state.steps, gamma0=state.gamma0, Q=space.grow_vector_block(state.Q, capacity),
+        V=space.grow_covector_block(state.V, capacity), q=state.q, v=state.v,
+        deltas=longer(state.deltas), gammas=longer(state.gammas), gamma_next=state.gamma_next,
+        v_next=state.v_next, q_next=state.q_next, breakdown=state.breakdown,
+        v_prev=state.v_prev, hscale=state.hscale)
 
 
-def lanczos_tridiagonal(state: LanczosState[VectorT, CovectorT, VectorBlockT, CovectorBlockT]) -> Coords:
-    """T = <H Q, Q> for the current basis (k x k after k steps)."""
-    return tridiagonal(np.array(state.deltas, dtype=float), np.array(state.gammas, dtype=float))
+def lanczos_tridiagonal(state: LanczosState[VectorT, CovectorT, VectorBlockT, CovectorBlockT], *,
+                        backend: Backend = numpy_backend) -> Coords:
+    """T = <H Q, Q> for the current basis: k x k after k steps with numpy;
+    with static shapes, capacity x capacity, zero beyond the leading k x k
+    block."""
+    T = tridiagonal(state.deltas, state.gammas, backend=backend)
+    if backend.static_shapes:
+        return T
+    k = int(state.steps)
+    trimmed: Coords = T[:k, :k]
+    return trimmed
 
 
 # --- conjugate gradients ---------------------------------------------------------
