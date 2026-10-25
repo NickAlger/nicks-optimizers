@@ -287,8 +287,9 @@ solver: safe, homogeneous, nearly linear with cyclic batches, but a weak
 approximate inverse at 4 samples per degree of freedom (minibatch Hessians
 are singular), and 1.4 to 4.2 times the data passes of plain CG overall. Block
 Jacobi on the factor rows cut passes by 32% with power-law sampling. No
-preconditioner rescued a cold start at full rank. Details:
-`experiments/sgd_preconditioner/README.md`.
+preconditioner rescued a cold start at full rank. Write-up:
+`dev/matrix_completion_preconditioners.md`; code and full tables:
+`experiments/sgd_preconditioner/`.
 
 ## Communication per Lanczos step
 
