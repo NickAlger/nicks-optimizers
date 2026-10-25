@@ -44,7 +44,7 @@ your own representation if you define NewTypes over it.
 
 import dataclasses
 from dataclasses import dataclass
-from typing import Any, Callable, Generic, NewType, Optional, TypeVar, overload
+from typing import Any, Callable, Generic, NewType, Optional, TypeVar, cast, overload
 
 import numpy as np
 import numpy.typing as npt
@@ -76,7 +76,8 @@ class VectorSpace(Generic[VectorT, CovectorT, VectorBlockT, CovectorBlockT]):
       scale_covector(a, w) -> Covector       a w
       axpy_vector(a, v, z) -> Vector         a v + z
       axpy_covector(a, w, z) -> Covector     a w + z
-      pair(w, v) -> float                    the duality pairing <w, v>
+      pair(w, v) -> Scalar                   the duality pairing <w, v>: a 0-d
+                                             array (a numpy scalar for numpy)
       pair_block(B, w) -> Coords             <w, b_i> for each vector b_i in B
       vector_block(v) -> VectorBlock         the one-vector block [v]
       covector_block(w) -> CovectorBlock     the one-covector block [w]
@@ -89,6 +90,9 @@ class VectorSpace(Generic[VectorT, CovectorT, VectorBlockT, CovectorBlockT]):
 
     The method never modifies an object in place, and it only calls these
     functions; pairings are the only places where numbers come out of vectors.
+    They return arrays rather than Python floats, so that a backend can
+    compile the method (see backend); a space that returns floats still
+    works with the numpy backend.
     """
     scale_vector: Callable[[float, VectorT], VectorT]
     scale_covector: Callable[[float, CovectorT], CovectorT]
@@ -151,7 +155,7 @@ def _np_axpy_covector(a: float, w: Covector, z: Covector) -> Covector:
 
 
 def _np_pair(w: Covector, v: Vector) -> float:
-    return float(w.ravel() @ v.ravel())
+    return cast(float, w.ravel() @ v.ravel())        # a numpy scalar, or a 0-d array
 
 
 def _np_pair_block(B: VectorBlock, w: Covector) -> Coords:
@@ -214,7 +218,7 @@ def numpy_space_with_reductions(allreduce: Callable[[Coords], Coords]) -> NumpyS
     pairings that turn their results into numbers are reduced here.
     """
     def pair(w: Covector, v: Vector) -> float:
-        return float(allreduce(np.array([_np_pair(w, v)]))[0])
+        return cast(float, allreduce(np.array([_np_pair(w, v)]))[0])
 
     def pair_block(B: VectorBlock, w: Covector) -> Coords:
         return allreduce(_np_pair_block(B, w))
@@ -273,7 +277,11 @@ def tuple_tree_space(leaf_space: Any = None) -> Any:
     leaf = numpy_space if leaf_space is None else leaf_space
 
     def pair(w: Any, v: Any) -> float:
-        return float(sum(leaf.pair(wl, vl) for wl, vl in tree_leaf_pairs(w, v)))
+        pairs = [leaf.pair(wl, vl) for wl, vl in tree_leaf_pairs(w, v)]
+        total = pairs[0]
+        for p in pairs[1:]:
+            total = total + p
+        return total
 
     def pair_block(B: Any, w: Any) -> Coords:
         total: Optional[Coords] = None

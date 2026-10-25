@@ -13,6 +13,7 @@ could be compiled (dev/jit_backends_plan.md, "Guarding against drift").
     not raise on the other case's data, and both must return the same
     structure, shapes and dtypes.
   * static_shapes is True, so the padded code paths run.
+  * jit makes the arguments of a compiled piece Strict, as tracing would.
 
 The user's functions receive Strict arrays too, so test problems used here
 must be traceable (no float() on values, no ifs on data), as with JAX.
@@ -123,6 +124,8 @@ def layout(value: Any) -> Any:
         return ("dict", tuple((k, layout(value[k])) for k in sorted(value)))
     if value is None:
         return None
+    if isinstance(value, np.generic):                # a numpy scalar: a 0-d array
+        return ((), value.dtype.str)
     if isinstance(value, (bool, int, float)):
         raise StrictError(f"a Python number ({value!r}) in a carry or a branch result: "
                           f"make it an array with xp.asarray")
@@ -168,6 +171,11 @@ def strict_index_update(a: Any, index: Any, value: Any) -> Any:
     return out.view(Strict)
 
 
-strict_backend = Backend(jit=lambda f: f, loop=loop_from_scan(strict_scan, strict_cond),
+def strict_jit(f: Callable[..., Any]) -> Callable[..., Any]:
+    """Arguments become Strict, as they become tracers under compilation."""
+    return lambda *args: f(*strict(args))
+
+
+strict_backend = Backend(jit=strict_jit, loop=loop_from_scan(strict_scan, strict_cond),
                          cond=strict_cond, index_update=strict_index_update, xp=strict_xp,
                          static_shapes=True)

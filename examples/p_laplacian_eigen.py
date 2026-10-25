@@ -162,7 +162,7 @@ def solve(loc: pl.Local, e: Eigen, u0: Point, precond: str = "amg", saddle_free:
         lambda u: gradient(loc, e, u),
         None, u0,
         space=pl.distributed_space(loc), retract=lambda u, s: Point(u + s),
-        operators_at=lambda u: operators_at(loc, e, precond, u),
+        point_data=lambda u: operators_at(loc, e, precond, u), operators_at=lambda u, ops: ops,
         saddle_free=saddle_free, rtol=1e-10, max_iter=max_iter, max_krylov=max_krylov,
         display=display, print_fn=print if root else (lambda line: None))
 

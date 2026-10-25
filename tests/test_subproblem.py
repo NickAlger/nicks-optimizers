@@ -280,7 +280,8 @@ def test_outer_loop_checks_the_structure_arguments() -> None:
     also with a separate preconditioner. It refuses: a space without
     metric_solve or without retract; metric_apply without metric_solve; a
     user metric_solve with a separate preconditioner but no metric_apply;
-    operators_at together with operator arguments; krylov='cg' with a
+    operators_at together with operator arguments; point_data without
+    operators_at; krylov='cg' with a
     separate preconditioner or saddle_free; unknown options."""
     x0 = Point(np.ones(4))
     pieces = (rosen_fun, rosen_grad, rosen_hessvec, x0)
@@ -297,7 +298,9 @@ def test_outer_loop_checks_the_structure_arguments() -> None:
                             precond_solve=jacobi_precond_solve)
     with pytest.raises(ValueError):
         trust_region_newton(rosen_fun, rosen_grad, None, x0, precond_solve=jacobi_precond_solve,
-                            operators_at=lambda x: PointOperators(hessvec=lambda v: rosen_hessvec(x, v)))
+                            operators_at=lambda x, _: PointOperators(hessvec=lambda v: rosen_hessvec(x, v)))
+    with pytest.raises(ValueError):
+        trust_region_newton(*pieces, point_data=lambda x: x)
     with pytest.raises(ValueError):
         trust_region_newton(*pieces, krylov="cg", precond_solve=jacobi_precond_solve)
     with pytest.raises(ValueError):

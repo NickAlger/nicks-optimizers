@@ -178,8 +178,10 @@ show the Krylov state being copied between pieces.
 `xp`, a subset common to numpy >= 1.24, `jax.numpy` and the array API
 standard:
 
-- creation: `asarray`, `zeros`, `ones`, `full`, `eye`, `arange`
-- elementwise: `sqrt`, `abs`, `maximum`, `minimum`, `where`, `isfinite`
+- creation: `asarray`, `zeros`, `ones`, `full`, `eye`, `arange`, `stack`
+- elementwise: `sqrt`, `abs`, `maximum`, `minimum`, `where`, `isfinite`,
+  `logical_and`, `logical_or`, `logical_not`
+- constants: `inf`, `nan`
 - reductions and sorting: `sum`, `max`, `min`, `argsort`, `take`
 - linear algebra: `matmul` (and `@`), `linalg.eigh`, `linalg.cholesky`,
   `linalg.solve`
@@ -616,6 +618,16 @@ New: `backend=`, `point_data=` and `krylov_capacity=` keywords; `Backend`,
 - **numpy overhead.** Python loop closures, dataclass rebuilding and
   flattening cost microseconds per Krylov step: negligible against a Hessian
   product except on toy problems. Measured in phase 0 and after phase 6.
+  *Measured after phase 2* (CG, numpy): the numpy primitives skip the
+  flattening (it cost more than everything else on small problems); what
+  remains is about 15 to 110 µs per Krylov step (0-d array operations,
+  carries, trace updates, and more temporaries alive at once), growing much
+  more slowly than n: Rosenbrock CG steps cost 1.35 to 2.4 times as much for
+  n = 20 to 20,000 (a step there costs 37 to 350 µs) and 1.02 times at
+  n = 200,000. The matrix-completion and p-Laplacian examples, the
+  Lanczos runs and every problem whose Hessian product costs a millisecond
+  or more show no difference; the toy examples quickstart and checkpointing
+  take 1.3 and 2 times as long (under a second either way).
 - **Leaks in the strict backend.** numpy subclasses can lose their class
   (numpy scalars from indexing, 0-d results of ufuncs); the subclass must
   override `__getitem__` and `__array_wrap__`. If it proves leaky, the JAX

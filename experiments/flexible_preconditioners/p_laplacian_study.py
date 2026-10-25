@@ -132,7 +132,8 @@ def main() -> None:
                 u, summary = trust_region_newton(
                     lambda u: pl.objective(loc, e, u), lambda u: pl.gradient(loc, e, u), None,
                     Point(np.zeros(loc.n_owned)), space=space, retract=lambda u, s: Point(u + s),
-                    operators_at=lambda u: operators_at(loc, e, name, as_metric, rng, u),
+                    point_data=lambda u: operators_at(loc, e, name, as_metric, rng, u),
+                    operators_at=lambda u, ops: ops,
                     krylov="auto" if as_metric else solver,  # type: ignore[arg-type]
                     rtol=1e-10, max_iter=args.max_iter, max_krylov=100)
                 error = pl.l2_error(loc, u, u_star)

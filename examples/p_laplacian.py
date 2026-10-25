@@ -26,7 +26,8 @@ metric_solve (w / m) and metric_apply (m v). The preconditioner P is
 different: block Jacobi over the MPI ranks, each block being the rank's
 diagonal block of the Hessian at the current point, applied by one algebraic
 multigrid V-cycle (pyamg). The Hessian and the multigrid hierarchy are built
-once per iterate through operators_at. With --precond jacobi, P is the
+once per iterate, as the point data (point_data, here the operators
+themselves; operators_at only hands them over). With --precond jacobi, P is the
 diagonal of the Hessian instead, which does not depend on the partition, so
 runs on any number of ranks follow the same iterates (up to the order of
 floating-point sums). With --metric precond, the preconditioner is the
@@ -418,7 +419,8 @@ def solve(loc: Local, e: Energy, precond: str, metric: str = "l2", display: int 
         None,
         Point(np.zeros(loc.n_owned)),
         space=distributed_space(loc), retract=lambda u, s: Point(u + s),
-        operators_at=lambda u: operators_at(loc, e, precond, u, metric, fixed),
+        point_data=lambda u: operators_at(loc, e, precond, u, metric, fixed),
+        operators_at=lambda u, ops: ops,
         rtol=1e-10, max_iter=max_iter, max_krylov=max_krylov, krylov=krylov,
         display=display, print_fn=print if root else (lambda line: None))
 

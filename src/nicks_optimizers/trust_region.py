@@ -51,16 +51,25 @@ Hessian explicitly, so P may be nonsymmetric, nonlinear or stochastic (see
 solve_tr_subproblem_flexible).
 
 Per-point setup, instead of the operator arguments:
-  operators_at(x) -> PointOperators    all the operators at x, frozen
-                                       (hessvec, metric_solve, and optionally
-                                       precond_solve and metric_apply).
-                                       Called once per new iterate, so
-                                       expensive setup (assembling a Hessian,
-                                       building a multigrid hierarchy)
-                                       happens once per point and can be
-                                       shared. Pass hessvec=None and none of
-                                       metric_solve, metric_apply,
-                                       precond_solve with it.
+  operators_at(x, data) -> PointOperators
+                                       all the operators at x (hessvec,
+                                       metric_solve, and optionally
+                                       precond_solve and metric_apply). Pass
+                                       hessvec=None and none of metric_solve,
+                                       metric_apply, precond_solve with it.
+  point_data(x) -> data                optional: the setup at x (assembled
+                                       matrices, a multigrid hierarchy, ...),
+                                       computed once per new iterate and
+                                       passed to operators_at, which may be
+                                       called several times per point and
+                                       should only wrap data in functions.
+                                       Without point_data, data is None.
+                                       With the numpy backend data may be
+                                       any object, e.g. the PointOperators
+                                       themselves (point_data=setup,
+                                       operators_at=lambda x, ops: ops); with
+                                       a compiling backend it must be arrays
+                                       in tuples or dicts.
 
 Optional for representations with redundant components (e.g. gauged
 tangent vectors of a low-rank manifold):
@@ -80,15 +89,25 @@ Each iteration computes a step with solve_tr_subproblem,
 solve_tr_subproblem_cg or solve_tr_subproblem_flexible (see
 trust_region_subproblem) and records what happened (see
 trust_region_diagnostics).
+
+Backends: the iterations are pure pieces (trust_region_core) that a
+Backend (see backend) may compile; this function is the Python driver
+around them, and keeps the stopping tests, records, display, callback and
+resuming. The default numpy backend runs the pieces as plain Python. With a
+compiling backend, every function given (fun, grad, the operators,
+retract, project_covector, point_data, operators_at) must be traceable by
+it: no Python control flow on values, and arrays out (fun returns a 0-d
+array rather than a float). For now such backends run the CG path only.
 """
 
 import time
-from dataclasses import dataclass
-from typing import Any, Callable, Generic, Literal, Optional, cast
+from functools import partial
+from typing import Any, Callable, Literal, Optional, cast
 
 import numpy as np
 
-from .criteria import forcing_term, gradient_converged, reduction_ratio
+from .backend import Backend, compile_function, numpy_backend
+from .criteria import gradient_converged
 from .spaces import (
     CovectorBlockT,
     CovectorT,
@@ -98,6 +117,7 @@ from .spaces import (
     VectorT,
     numpy_space,
 )
+from .trust_region_core import CoreProblem, OuterState, PointOperators, RawIteration, init, iterate
 from .trust_region_diagnostics import (
     IterationInfo,
     IterationRecord,
@@ -108,29 +128,9 @@ from .trust_region_diagnostics import (
     display_iteration,
     format_summary,
 )
-from .trust_region_subproblem import (
-    solve_tr_subproblem,
-    solve_tr_subproblem_cg,
-    solve_tr_subproblem_flexible,
-)
+from .trust_region_subproblem import SubproblemStats, subproblem_stats
 
-
-@dataclass(frozen=True, kw_only=True)
-class PointOperators(Generic[VectorT, CovectorT]):
-    """The linear operators at one point, frozen: what operators_at(x)
-    returns, everything the method uses at that point.
-
-      hessvec(v) -> Covector         H v
-      metric_solve(w) -> Vector      M^{-1} w (None: M = I, for numpy arrays
-                                     without a space only)
-      precond_solve(w) -> Vector     P^{-1} w (None: P = M)
-      metric_apply(v) -> Covector    M v, the inverse of metric_solve (needed
-                                     only with precond_solve)
-    """
-    hessvec: Callable[[VectorT], CovectorT]
-    metric_solve: Optional[Callable[[CovectorT], VectorT]] = None
-    precond_solve: Optional[Callable[[CovectorT], VectorT]] = None
-    metric_apply: Optional[Callable[[VectorT], CovectorT]] = None
+__all__ = ["PointOperators", "trust_region_newton", "update_radius", "check_resume_matches"]
 
 
 def update_radius(radius: float, rho: float, step_norm: float, radius_max: float) -> float:
@@ -167,7 +167,8 @@ def trust_region_newton(
         metric_solve: Optional[Callable[[PointT, CovectorT], VectorT]] = None,
         metric_apply: Optional[Callable[[PointT, VectorT], CovectorT]] = None,
         precond_solve: Optional[Callable[[PointT, CovectorT], VectorT]] = None,
-        operators_at: Optional[Callable[[PointT], PointOperators[VectorT, CovectorT]]] = None,
+        operators_at: Optional[Callable[[PointT, Any], PointOperators[VectorT, CovectorT]]] = None,
+        point_data: Optional[Callable[[PointT], Any]] = None,
         project_covector: Optional[Callable[[PointT, CovectorT], CovectorT]] = None,
         saddle_free: bool = False,
         krylov: Literal["auto", "cg", "lanczos", "flexible"] = "auto",
@@ -181,6 +182,7 @@ def trust_region_newton(
         callback: Optional[Callable[[PointT, IterationInfo[VectorT, CovectorT]], Optional[bool]]] = None,
         resume: Optional[ResumeState] = None,
         g0: Optional[CovectorT] = None,
+        backend: Optional[Backend] = None,
         ) -> tuple[PointT, RunSummary]:
     """Inexact Newton trust-region method with an ellipsoidal trust region.
 
@@ -246,6 +248,9 @@ def trust_region_newton(
     gradient at x0 (e.g. info.g saved with x), skips the initial gradient
     evaluation; it must belong to x0.
 
+    Backend: backend=None runs on numpy; another Backend compiles the
+    iterations (see the module docstring and backend).
+
     Returns (x, summary): the final iterate and a RunSummary, which holds the
     stopping reason, one IterationRecord per iteration, the work done and the
     ResumeState at x. history_array(summary) gives the iterations as a numeric
@@ -257,6 +262,8 @@ def trust_region_newton(
                              "and no metric_solve, metric_apply or precond_solve")
     elif hessvec is None:
         raise ValueError("pass hessvec, or operators_at")
+    elif point_data is not None:
+        raise ValueError("point_data is passed to operators_at: give operators_at too")
     elif metric_apply is not None and metric_solve is None:
         raise ValueError("metric_apply needs metric_solve (its inverse)")
     numpy_default = space is None
@@ -274,84 +281,34 @@ def trust_region_newton(
         raise ValueError(f"convergence_norm must be 'metric' or 'preconditioner', "
                          f"not {convergence_norm!r}")
 
+    bk = numpy_backend if backend is None else backend
+    xp = bk.xp
     sp = space if space is not None else cast(
         VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT], numpy_space)
+    problem = CoreProblem(
+        fun=fun, grad=grad, hessvec=hessvec, space=sp, numpy_default=numpy_default,
+        retract=retract if retract is not None else (lambda x, s: cast(Any, x) + s),
+        metric_solve=metric_solve, metric_apply=metric_apply, precond_solve=precond_solve,
+        operators_at=operators_at, point_data=point_data, project_covector=project_covector,
+        saddle_free=saddle_free, krylov=krylov, convergence_norm=convergence_norm, eta=eta,
+        radius_max=radius_max, forcing_max=forcing_max, stall_tol=stall_tol,
+        max_krylov=max_krylov)
+    start_piece = compile_function(bk, partial(init, problem, bk))
+    step_piece = compile_function(bk, partial(iterate, problem, bk))
 
-    def identity_solve(w: CovectorT) -> VectorT:
-        """M = I for numpy arrays: the same array, as a vector."""
-        return cast(VectorT, w)
-
-    def identity_apply(v: VectorT) -> CovectorT:
-        return cast(CovectorT, v)
-
-    def operators(x: PointT) -> PointOperators[VectorT, CovectorT]:
-        """All the operators at x, from operators_at or the keyword arguments,
-        with the numpy default M = I filled in and the combination checked."""
-        if operators_at is not None:
-            given = operators_at(x)
-        else:
-            assert hessvec is not None
-            hv, ms, ma, ps = hessvec, metric_solve, metric_apply, precond_solve
-            given = PointOperators(
-                hessvec=lambda v: hv(x, v),
-                metric_solve=None if ms is None else (lambda w: ms(x, w)),
-                metric_apply=None if ma is None else (lambda v: ma(x, v)),
-                precond_solve=None if ps is None else (lambda w: ps(x, w)))
-        Ms, Ma = given.metric_solve, given.metric_apply
-        if Ms is None:
-            if Ma is not None:
-                raise ValueError("metric_apply needs metric_solve (its inverse)")
-            if not numpy_default:
-                raise ValueError("with a space, give metric_solve")
-            Ms, Ma = identity_solve, identity_apply
-        if given.precond_solve is not None and Ma is None:
-            raise ValueError("a separate preconditioner needs metric_apply (M)")
-        if krylov == "cg" and given.precond_solve is not None:
-            raise ValueError("krylov='cg' needs P = M (no precond_solve)")
-        if krylov == "flexible" and given.precond_solve is None:
-            raise ValueError("krylov='flexible' needs a separate precond_solve, and metric_apply")
-        return PointOperators(hessvec=given.hessvec, metric_solve=Ms,
-                              precond_solve=given.precond_solve, metric_apply=Ma)
-
-    def gradient_norms(g: CovectorT, ops: PointOperators[VectorT, CovectorT]
-                       ) -> tuple[float, float, Optional[VectorT], int, int]:
-        """(convergence norm, ||g||_{M^{-1}}, start vector, M^{-1} solves,
-        P^{-1} solves). The start vector is what the subproblem solver starts
-        from, when it was computed anyway: M^{-1} g for CG and the flexible
-        solver, P^{-1} g for Lanczos (M^{-1} g when P = M)."""
-        assert ops.metric_solve is not None
-        Mg = ops.metric_solve(g)
-        m_norm = float(np.sqrt(max(sp.pair(g, Mg), 0.0)))
-        if ops.precond_solve is None or krylov == "flexible":
-            if convergence_norm == "preconditioner" and ops.precond_solve is not None:
-                Pg = ops.precond_solve(g)
-                return float(np.sqrt(max(sp.pair(g, Pg), 0.0))), m_norm, Mg, 1, 1
-            return m_norm, m_norm, Mg, 1, 0
-        if convergence_norm == "preconditioner":
-            Pg = ops.precond_solve(g)
-            return float(np.sqrt(max(sp.pair(g, Pg), 0.0))), m_norm, Pg, 1, 1
-        return m_norm, m_norm, None, 1, 0
+    def number(v: Any) -> float:
+        return float(np.asarray(v))
 
     start = time.perf_counter()
-    retraction: Callable[[PointT, VectorT], PointT] = (
-        retract if retract is not None else (lambda x, s: cast(PointT, cast(Any, x) + s)))
-    x = x0
-    fx = float(fun(x))                          # records hold Python floats
-    fun_calls = 1
+    state: OuterState = start_piece(x0, g0)
+    fx = number(state.f)                        # records hold Python floats
+    fun_calls, grad_calls = 1, (0 if g0 is not None else 1)
     it = 0
     if resume is not None:
         check_resume_matches(resume, fx)
         radius, gnorm0, it = resume.radius, resume.gnorm0, resume.next_iteration
-
-    def canonical(x: PointT, w: CovectorT) -> CovectorT:
-        return w if project_covector is None else project_covector(x, w)
-
-    if g0 is not None:
-        g, grad_calls = canonical(x, g0), 0
-    else:
-        g, grad_calls = canonical(x, grad(x)), 1
-    ops = operators(x)
-    gnorm, metric_gnorm, start_vector, metric_solves, precond_solves = gradient_norms(g, ops)
+    gnorm = number(state.gnorm)
+    metric_solves, precond_solves = int(np.asarray(state.metric_solves)), int(np.asarray(state.precond_solves))
     if gnorm0 is None:
         gnorm0 = gnorm
     records: list[IterationRecord] = []
@@ -365,56 +322,34 @@ def trust_region_newton(
         if it >= max_iter:
             reason = "max_iter"
             break
-        forcing = forcing_term(gnorm, gnorm0, forcing_max)
-        project = None if project_covector is None else (lambda w: project_covector(x, w))
-        assert ops.metric_solve is not None
-        use_cg = krylov == "cg" or (krylov == "auto" and ops.precond_solve is None
-                                    and not saddle_free)
-        if use_cg:
-            s, stats = solve_tr_subproblem_cg(
-                sp, g, ops.hessvec, ops.metric_solve, radius, forcing * metric_gnorm, max_krylov,
-                project_covector=project, start_vector=start_vector)
-        elif krylov == "flexible":
-            assert ops.precond_solve is not None and ops.metric_apply is not None
-            s, stats = solve_tr_subproblem_flexible(
-                sp, g, ops.hessvec, ops.metric_solve, ops.metric_apply, ops.precond_solve,
-                radius, forcing * metric_gnorm, max_krylov, saddle_free=saddle_free,
-                project_covector=project, start_vector=start_vector)
-        else:
-            s, stats = solve_tr_subproblem(
-                sp, g, ops.hessvec, ops.metric_solve, radius, forcing * metric_gnorm, max_krylov,
-                precond_solve=ops.precond_solve, metric_apply=ops.metric_apply,
-                stall_tol=stall_tol, saddle_free=saddle_free, project_covector=project,
-                start_vector=start_vector)
-
-        x_trial = retraction(x, s)
-        f_trial = float(fun(x_trial))
+        new_state, raw = step_piece(state, xp.asarray(radius), xp.asarray(gnorm0))
+        stats = (raw.subproblem if isinstance(raw.subproblem, SubproblemStats)
+                 else subproblem_stats(raw.subproblem, "cg"))
         fun_calls += 1
-        predicted = -stats.model_value
-        rho = reduction_ratio(fx, f_trial, predicted)
-        accepted = bool(rho > eta)
-        new_radius = update_radius(radius, rho, stats.step_norm, radius_max)
+        accepted = bool(np.asarray(raw.accepted))
+        new_radius = number(raw.new_radius)
         record = IterationRecord(
             iteration=it, f=fx, gnorm=gnorm,
             gnorm_ratio=gnorm / gnorm0 if gnorm0 > 0.0 else 0.0,
-            radius=radius, new_radius=new_radius, forcing=forcing,
-            predicted=predicted, actual=fx - f_trial, rho=rho, accepted=accepted,
-            elapsed=time.perf_counter() - start, subproblem=stats)
+            radius=radius, new_radius=new_radius, forcing=number(raw.forcing),
+            predicted=number(raw.predicted), actual=number(raw.actual), rho=number(raw.rho),
+            accepted=accepted, elapsed=time.perf_counter() - start, subproblem=stats)
         records.append(record)
+        state = new_state
         if accepted:
-            x, fx = x_trial, f_trial
-            g = canonical(x, grad(x))
+            fx, gnorm = number(state.f), number(state.gnorm)
             grad_calls += 1
-            ops = operators(x)
-            gnorm, metric_gnorm, start_vector, a, b = gradient_norms(g, ops)
-            metric_solves, precond_solves = metric_solves + a, precond_solves + b
+            metric_solves += int(np.asarray(state.metric_solves))
+            precond_solves += int(np.asarray(state.precond_solves))
         radius = new_radius
         it += 1
         if display >= 1:
             display_iteration(record, display, print_fn)
         if callback is not None:
-            state = ResumeState(radius=radius, gnorm0=gnorm0, next_iteration=it, f=fx)
-            if callback(x, IterationInfo(record=record, f=fx, g=g, step=s, resume=state)):
+            resume_state = ResumeState(radius=radius, gnorm0=gnorm0, next_iteration=it, f=fx)
+            info: IterationInfo[VectorT, CovectorT] = IterationInfo(
+                record=record, f=fx, g=state.g, step=raw.step, resume=resume_state)
+            if callback(state.x, info):
                 reason = "callback"
                 break
 
@@ -424,4 +359,5 @@ def trust_region_newton(
                             final_state)
     if display >= 1:
         print_fn(format_summary(summary))
+    x: PointT = state.x
     return x, summary

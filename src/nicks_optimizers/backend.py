@@ -43,7 +43,8 @@ framework can only carry containers it knows, so the backend never sees
 them: run_loop, run_cond and compile_function flatten states to plain
 tuples (recursively, through tuples and nested states; everything else,
 such as arrays and the user's vectors, is left as it is) and rebuild them
-on the other side.
+on the other side. The plain Python primitives of numpy_backend carry any
+object, so for them nothing is flattened.
 """
 
 import dataclasses
@@ -65,7 +66,7 @@ Cond = Callable[[Any, Callable[[Any], Any], Callable[[Any], Any], Any], Any]
 # (dev/jit_backends_plan.md); tests/test_backend.py checks the core against it.
 CONTRACT: frozenset[str] = frozenset({
     # creation
-    "asarray", "zeros", "ones", "full", "eye", "arange",
+    "asarray", "zeros", "ones", "full", "eye", "arange", "stack",
     # elementwise
     "sqrt", "abs", "maximum", "minimum", "where", "isfinite",
     "logical_and", "logical_or", "logical_not",
@@ -203,17 +204,22 @@ def _check_structure(value: Any, expected: Structure, what: str) -> Any:
 def run_loop(backend: Backend, done: Callable[[T], Any], body: Callable[[T], T], carry: T,
              max_steps: int) -> T:
     """backend.loop on a carry that may contain states."""
+    if backend.loop is python_loop:
+        out: T = python_loop(done, body, carry, max_steps)
+        return out
     s = structure_of(carry)
     result = backend.loop(lambda c: done(unflatten(c, s)),
                           lambda c: _check_structure(body(unflatten(c, s)), s, "a loop body"),
                           flatten(carry), max_steps)
-    out: T = unflatten(result, s)
-    return out
+    flat_out: T = unflatten(result, s)
+    return flat_out
 
 
 def run_cond(backend: Backend, pred: Any, true_fun: Callable[[Any], T],
              false_fun: Callable[[Any], T], operand: Any) -> T:
     """backend.cond on operands and results that may contain states."""
+    if backend.cond is python_cond:
+        return true_fun(operand) if pred else false_fun(operand)
     s_in = structure_of(operand)
     found: list[Structure] = []
 
@@ -234,6 +240,8 @@ def run_cond(backend: Backend, pred: Any, true_fun: Callable[[Any], T],
 def compile_function(backend: Backend, f: Callable[..., T]) -> Callable[..., T]:
     """backend.jit(f) for arguments and results that may contain states. One
     compiled version per structure of the arguments."""
+    if backend.jit is _identity:
+        return f
     compiled: dict[tuple[Structure, ...], tuple[Callable[..., Any], list[Structure]]] = {}
 
     def call(*args: Any) -> T:

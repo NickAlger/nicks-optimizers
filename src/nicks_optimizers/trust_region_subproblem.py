@@ -44,11 +44,13 @@ along -P^{-1} g, so global convergence is unaffected, but boundary solves stop
 when the model stops improving (stall_tol) rather than on the residual.
 """
 
+import dataclasses
 from dataclasses import dataclass
-from typing import Callable, Literal, Optional
+from typing import Any, Callable, Generic, Literal, Optional
 
 import numpy as np
 
+from .backend import Backend, backend_state, numpy_backend, run_cond, run_loop
 from .dense import grow_gram, pencil_ritz, solve_sphere_trs_eig
 from .krylov import (
     CGState,
@@ -131,6 +133,71 @@ class SubproblemStats:
     trace_lam: tuple[float, ...]
     trace_negative: tuple[int, ...]
     fallbacks: int = 0
+
+
+# Status codes of the solvers written for the backend (see backend): RUNNING
+# while the loop goes on, then the stop reason; INVALID when the solve could
+# not start (<g, P^{-1} g> not positive).
+RUNNING, TOL, STALL, BREAKDOWN, MAX, BOUNDARY, NEGATIVE, INVALID = range(8)
+STOP_REASONS: dict[int, StopReason] = {TOL: "tol", STALL: "stall", BREAKDOWN: "breakdown",
+                                       MAX: "max", BOUNDARY: "boundary", NEGATIVE: "negative"}
+INVALID_START = "<g, P^{-1} g> must be positive; is P positive definite and g nonzero?"
+
+
+@backend_state
+@dataclass(frozen=True, kw_only=True)
+class RawSubproblem:
+    """SubproblemStats as the backend computes them: 0-d arrays, an integer
+    status instead of the stop reason, and traces as arrays of fixed length
+    whose first krylov_steps entries are filled. subproblem_stats converts
+    them (outside compiled code)."""
+    krylov_steps: Any
+    status: Any
+    step_norm: Any
+    lam: Any
+    model_value: Any
+    true_model_value: Any
+    resid: Any
+    resid_tol: Any
+    n_negative: Any
+    theta_min: Any
+    hessvec_calls: Any
+    metric_solve_calls: Any
+    precond_solve_calls: Any
+    metric_apply_calls: Any
+    trace_model: Any
+    trace_resid: Any
+    trace_lam: Any
+    trace_negative: Any
+    fallbacks: Any
+
+
+def subproblem_stats(raw: RawSubproblem, krylov: KrylovMethod) -> SubproblemStats:
+    """SubproblemStats (Python numbers and tuples) from the raw statistics.
+    Raises ValueError for status INVALID."""
+    def number(v: Any) -> float:
+        return float(np.asarray(v))
+
+    def integer(v: Any) -> int:
+        return int(np.asarray(v))
+    status = integer(raw.status)
+    if status == INVALID:
+        raise ValueError(INVALID_START)
+    k = integer(raw.krylov_steps)
+    return SubproblemStats(
+        krylov=krylov, krylov_steps=k, stop_reason=STOP_REASONS[status],
+        step_norm=number(raw.step_norm), lam=number(raw.lam), model_value=number(raw.model_value),
+        true_model_value=number(raw.true_model_value), resid=number(raw.resid),
+        resid_tol=number(raw.resid_tol), n_negative=integer(raw.n_negative),
+        theta_min=number(raw.theta_min), hessvec_calls=integer(raw.hessvec_calls),
+        metric_solve_calls=integer(raw.metric_solve_calls),
+        precond_solve_calls=integer(raw.precond_solve_calls),
+        metric_apply_calls=integer(raw.metric_apply_calls),
+        trace_model=tuple(float(v) for v in np.asarray(raw.trace_model)[:k]),
+        trace_resid=tuple(float(v) for v in np.asarray(raw.trace_resid)[:k]),
+        trace_lam=tuple(float(v) for v in np.asarray(raw.trace_lam)[:k]),
+        trace_negative=tuple(int(v) for v in np.asarray(raw.trace_negative)[:k]),
+        fallbacks=integer(raw.fallbacks))
 
 
 def solve_projected_trs(T: Coords, G: Coords, gamma0: float, radius: float,
@@ -319,12 +386,105 @@ def solve_tr_subproblem(space: VectorSpace[VectorT, CovectorT, VectorBlockT, Cov
     raise AssertionError("unreachable: the loop returns at k == max_iter")
 
 
-def boundary_fraction(s_norm2: float, sp: float, p_norm2: float, radius: float) -> float:
+def boundary_fraction(xp: Any, s_norm2: Any, sp: Any, p_norm2: Any, radius: Any) -> Any:
     """The tau >= 0 with ||s + tau p||_M = radius, from ||s||_M^2, (s, p)_M and
-    ||p||_M^2 (s inside the ball). Written to avoid cancellation."""
-    gap = max(radius ** 2 - s_norm2, 0.0)
-    root = float(np.sqrt(sp ** 2 + p_norm2 * gap))
-    return gap / (sp + root) if sp > 0.0 else (root - sp) / p_norm2
+    ||p||_M^2 (s inside the ball), in the array namespace xp. Written to
+    avoid cancellation."""
+    gap = xp.maximum(radius ** 2 - s_norm2, 0.0)
+    root = xp.sqrt(sp ** 2 + p_norm2 * gap)
+    positive = sp > 0.0
+    return xp.where(positive, gap / xp.where(positive, sp + root, 1.0), (root - sp) / p_norm2)
+
+
+@backend_state
+@dataclass(frozen=True, kw_only=True)
+class _CGCarry(Generic[VectorT, CovectorT]):
+    """The truncated CG loop's carry: the CG state (whose s and model are the
+    final step's once the step stops on the boundary), the number of trace
+    entries k, the status, and what the statistics need."""
+    state: CGState[VectorT, CovectorT]
+    k: Any
+    status: Any
+    theta_min: Any
+    lam: Any
+    resid: Any
+    n_negative: Any
+    trace_model: Any
+    trace_resid: Any
+    trace_lam: Any
+    trace_negative: Any
+
+
+def truncated_cg(backend: Backend, space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
+                 g: CovectorT, hessvec: Callable[[VectorT], CovectorT],
+                 metric_solve: Callable[[CovectorT], VectorT], radius: Any, resid_tol: Any,
+                 max_iter: int, *, project_covector: Optional[Callable[[CovectorT], CovectorT]] = None,
+                 start_vector: Optional[VectorT] = None) -> tuple[VectorT, RawSubproblem]:
+    """solve_tr_subproblem_cg as a pure function of the backend: a bounded
+    loop with status codes, returning the step and RawSubproblem statistics
+    (status INVALID when <g, M^{-1} g> is not positive)."""
+    bk, xp = backend, backend.xp
+    state: CGState[VectorT, CovectorT] = cg_start(space, g, metric_solve, start_vector, backend=bk)
+    nan, zero = xp.asarray(xp.nan), xp.asarray(0.0)
+    carry = _CGCarry(
+        state=state, k=xp.asarray(0), status=xp.where(state.rz > 0.0, RUNNING, INVALID),
+        theta_min=xp.asarray(xp.inf), lam=zero, resid=xp.sqrt(xp.maximum(state.rz, 0.0)),
+        n_negative=xp.asarray(0), trace_model=xp.zeros(max_iter), trace_resid=xp.zeros(max_iter),
+        trace_lam=xp.zeros(max_iter), trace_negative=xp.zeros(max_iter))
+    put = bk.index_update
+
+    def step(c: _CGCarry[VectorT, CovectorT]) -> _CGCarry[VectorT, CovectorT]:
+        st = c.state
+        Hp, curvature = cg_curvature(space, st, hessvec)
+        theta_min = xp.minimum(c.theta_min, curvature / st.p_norm2)
+        positive = curvature > 0.0
+        safe_curvature = xp.where(positive, curvature, 1.0)
+        alpha = st.rz / safe_curvature
+        leaves = (curvature <= 0.0) | (positive & (st.s_norm2 + 2.0 * alpha * st.sp
+                                                    + alpha ** 2 * st.p_norm2 >= radius ** 2))
+
+        def to_boundary(_: Any) -> _CGCarry[VectorT, CovectorT]:
+            """Stop where the segment crosses the boundary (or follow negative
+            curvature to it)."""
+            tau = boundary_fraction(xp, st.s_norm2, st.sp, st.p_norm2, radius)
+            model = st.model - tau * st.rz + 0.5 * tau ** 2 * curvature
+            negative = curvature <= 0.0
+            n_negative = xp.where(negative, 1, 0)
+            stopped = CGState(steps=st.steps, s=space.axpy_vector(tau, st.p, st.s), r=st.r, z=st.z,
+                              p=st.p, rz=st.rz, s_norm2=st.s_norm2, sp=st.sp, p_norm2=st.p_norm2,
+                              model=model)
+            return _CGCarry(state=stopped, k=c.k + 1, status=xp.where(negative, NEGATIVE, BOUNDARY),
+                            theta_min=theta_min, lam=nan, resid=nan, n_negative=n_negative,
+                            trace_model=put(c.trace_model, c.k, model),
+                            trace_resid=put(c.trace_resid, c.k, nan),
+                            trace_lam=put(c.trace_lam, c.k, nan),
+                            trace_negative=put(c.trace_negative, c.k, n_negative))
+
+        def advance(_: Any) -> _CGCarry[VectorT, CovectorT]:
+            new = cg_advance(space, st, Hp, safe_curvature, metric_solve, project_covector)
+            resid = xp.sqrt(xp.maximum(new.rz, 0.0))
+            return _CGCarry(state=new, k=c.k + 1, status=xp.where(resid <= resid_tol, TOL, RUNNING),
+                            theta_min=theta_min, lam=zero, resid=resid, n_negative=xp.asarray(0),
+                            trace_model=put(c.trace_model, c.k, new.model),
+                            trace_resid=put(c.trace_resid, c.k, resid),
+                            trace_lam=put(c.trace_lam, c.k, zero),
+                            trace_negative=put(c.trace_negative, c.k, zero))
+
+        return run_cond(bk, leaves, to_boundary, advance, None)
+
+    final = run_loop(bk, lambda c: c.status != RUNNING, step, carry, max_iter)
+    st = final.state
+    on_boundary = (final.status == BOUNDARY) | (final.status == NEGATIVE)
+    raw = RawSubproblem(
+        krylov_steps=final.k, status=xp.where(final.status == RUNNING, MAX, final.status),
+        step_norm=xp.where(on_boundary, radius, xp.sqrt(xp.maximum(st.s_norm2, 0.0))),
+        lam=final.lam, model_value=st.model, true_model_value=st.model, resid=final.resid,
+        resid_tol=xp.asarray(resid_tol), n_negative=final.n_negative, theta_min=final.theta_min,
+        hessvec_calls=final.k, metric_solve_calls=st.steps + (1 if start_vector is None else 0),
+        precond_solve_calls=xp.asarray(0), metric_apply_calls=xp.asarray(0),
+        trace_model=final.trace_model, trace_resid=final.trace_resid, trace_lam=final.trace_lam,
+        trace_negative=final.trace_negative, fallbacks=xp.asarray(0))
+    return st.s, raw
 
 
 def solve_tr_subproblem_cg(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
@@ -332,7 +492,8 @@ def solve_tr_subproblem_cg(space: VectorSpace[VectorT, CovectorT, VectorBlockT, 
                            metric_solve: Callable[[CovectorT], VectorT],
                            radius: float, resid_tol: float, max_iter: int, *,
                            project_covector: Optional[Callable[[CovectorT], CovectorT]] = None,
-                           start_vector: Optional[VectorT] = None
+                           start_vector: Optional[VectorT] = None,
+                           backend: Optional[Backend] = None
                            ) -> tuple[VectorT, SubproblemStats]:
     """Steihaug-Toint truncated CG for  min <g, s> + 0.5 <H s, s>
     s.t.  ||s||_M <= radius, preconditioned by M itself (P = M).
@@ -355,56 +516,14 @@ def solve_tr_subproblem_cg(space: VectorSpace[VectorT, CovectorT, VectorBlockT, 
 
     project_covector maps each residual to its canonical representative,
     for redundant representations (see krylov). start_vector = M^{-1} g, if
-    already computed, saves one solve. Returns (s, stats).
+    already computed, saves one solve. Raises ValueError if <g, M^{-1} g> is
+    not positive. Returns (s, stats). The computation is truncated_cg on the
+    backend (numpy by default).
     """
-    state: CGState[VectorT, CovectorT] = cg_start(space, g, metric_solve, start_vector)
-    # No cap at the dimension: without reorthogonalization, CG can need more
-    # than n steps in floating point.
-    trace_model: list[float] = []
-    trace_resid: list[float] = []
-    trace_lam: list[float] = []
-    trace_negative: list[int] = []
-    theta_min = float("inf")
-    s, model = state.s, 0.0
-    reason: StopReason = "max"
-    lam, resid, n_negative = 0.0, float(np.sqrt(state.rz)), 0
-
-    for k in range(1, max_iter + 1):
-        Hp, curvature = cg_curvature(space, state, hessvec)
-        theta_min = min(theta_min, curvature / state.p_norm2)
-        alpha = state.rz / curvature if curvature > 0.0 else float("inf")
-        if curvature <= 0.0 or (state.s_norm2 + 2.0 * alpha * state.sp
-                                + alpha ** 2 * state.p_norm2 >= radius ** 2):
-            tau = boundary_fraction(state.s_norm2, state.sp, state.p_norm2, radius)
-            s = space.axpy_vector(tau, state.p, state.s)
-            model = state.model - tau * state.rz + 0.5 * tau ** 2 * curvature
-            reason = "negative" if curvature <= 0.0 else "boundary"
-            lam, resid, n_negative = float("nan"), float("nan"), int(curvature <= 0.0)
-            trace_model.append(model)
-            trace_resid.append(resid)
-            trace_lam.append(lam)
-            trace_negative.append(n_negative)
-            break
-        state = cg_advance(space, state, Hp, curvature, metric_solve, project_covector)
-        s, model, resid = state.s, state.model, float(np.sqrt(max(state.rz, 0.0)))
-        trace_model.append(model)
-        trace_resid.append(resid)
-        trace_lam.append(0.0)
-        trace_negative.append(0)
-        if resid <= resid_tol:
-            reason = "tol"
-            break
-    k_done = len(trace_model)
-    on_boundary = reason in ("boundary", "negative")
-    step_norm = radius if on_boundary else float(np.sqrt(max(state.s_norm2, 0.0)))
-    stats = SubproblemStats(
-        krylov="cg", krylov_steps=k_done, stop_reason=reason, step_norm=step_norm, lam=lam,
-        model_value=model, true_model_value=model, resid=resid, resid_tol=resid_tol,
-        n_negative=n_negative, theta_min=theta_min, hessvec_calls=k_done,
-        metric_solve_calls=state.steps + (1 if start_vector is None else 0),
-        precond_solve_calls=0, metric_apply_calls=0,
-        trace_model=tuple(trace_model), trace_resid=tuple(trace_resid),
-        trace_lam=tuple(trace_lam), trace_negative=tuple(trace_negative))
+    s, raw = truncated_cg(numpy_backend if backend is None else backend, space, g, hessvec,
+                          metric_solve, radius, resid_tol, max_iter,
+                          project_covector=project_covector, start_vector=start_vector)
+    stats = subproblem_stats(raw, "cg")
     return s, stats
 
 

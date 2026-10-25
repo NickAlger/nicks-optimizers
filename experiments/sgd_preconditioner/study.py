@@ -100,7 +100,8 @@ def solve(samples: mc.Samples, x0: mc.LowRank, name: str, seed: int, radius: flo
                               metric_solve=lambda w: mc.Tangent(w), metric_apply=lambda v: mc.Cotangent(v),
                               precond_solve=P)
 
-    return trust_region_newton(fun, grad, None, x0, operators_at=operators_at, krylov="flexible", **common)
+    return trust_region_newton(fun, grad, None, x0, point_data=operators_at,
+                               operators_at=lambda x, ops: ops, krylov="flexible", **common)
 
 
 def run(samples: mc.Samples, a: mc.LowRank, best: float, strategy: str, name: str, seed: int,

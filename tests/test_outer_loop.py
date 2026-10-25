@@ -228,10 +228,11 @@ def jacobi_metric_apply(x: Point, v: Vector) -> Covector:
     return Covector(jacobi_diagonal(x) * v)
 
 
-def test_operators_at_matches_and_runs_once_per_point() -> None:
-    """operators_at(x) gives the same run as the keyword operators, and is
-    called exactly once per new iterate (rejected steps reuse the
-    operators), for P = M and for a separate preconditioner."""
+def test_point_data_matches_and_runs_once_per_point() -> None:
+    """operators_at(x, data) gives the same run as the keyword operators, and
+    point_data(x) is called exactly once per new iterate (rejected steps
+    reuse it), for P = M and for a separate preconditioner. Without
+    point_data, operators_at receives data None."""
     x0 = Point(np.tile([-1.2, 1.0], 25))
     for separate in (False, True):
         if separate:
@@ -242,36 +243,48 @@ def test_operators_at_matches_and_runs_once_per_point() -> None:
                                                metric_solve=jacobi_precond_solve)
         points: list[Point] = []
 
-        def operators_at(x: Point) -> PointOperators[Vector, Covector]:
+        def point_data(x: Point) -> Array:
             points.append(x)
-            P_solve: Callable[[Covector], Vector] = lambda w: jacobi_precond_solve(x, w)  # noqa: E731
-            H: Callable[[Vector], Covector] = lambda v: rosen_hessvec(x, v)               # noqa: E731
+            return jacobi_diagonal(x)
+
+        def operators_at(x: Point, diagonal: Array) -> PointOperators[Vector, Covector]:
+            P_solve: Callable[[Covector], Vector] = lambda w: Vector(w / diagonal)  # noqa: E731
+            H: Callable[[Vector], Covector] = lambda v: rosen_hessvec(x, v)         # noqa: E731
             if separate:
                 return PointOperators(hessvec=H, precond_solve=P_solve)
             return PointOperators(hessvec=H, metric_solve=P_solve)
 
         # With a separate P and no metric, M = I (the numpy default).
-        x, summary = trust_region_newton(rosen_fun, rosen_grad, None, x0, operators_at=operators_at)
+        x, summary = trust_region_newton(rosen_fun, rosen_grad, None, x0, point_data=point_data,
+                                         operators_at=operators_at)
         assert without_times(summary.iterations) == without_times(reference.iterations)
         records = summary.iterations
         assert any(not r.accepted for r in records)             # rejections did happen
         assert len(points) == 1 + summary.accepted_steps
         assert len({id(p) for p in points}) == len(points)
 
+    seen: list[object] = []
+
+    def recording(x: Point, data: object) -> PointOperators[Vector, Covector]:
+        seen.append(data)
+        return PointOperators(hessvec=lambda v: rosen_hessvec(x, v))
+    trust_region_newton(rosen_fun, rosen_grad, None, x0, operators_at=recording, max_iter=3)
+    assert seen and all(d is None for d in seen)
+
 
 def test_operator_arguments_are_checked() -> None:
     x0 = Point(np.zeros(4))
 
-    def hv_ops(x: Point) -> PointOperators[Vector, Covector]:
+    def hv_ops(x: Point, data: object) -> PointOperators[Vector, Covector]:
         return PointOperators(hessvec=lambda v: rosen_hessvec(x, v))
 
-    def p_ops(x: Point) -> PointOperators[Vector, Covector]:
+    def p_ops(x: Point, data: object) -> PointOperators[Vector, Covector]:
         """A metric and a separate preconditioner, but no metric_apply."""
         return PointOperators(hessvec=lambda v: rosen_hessvec(x, v),
                               metric_solve=lambda w: smoothing_metric_solve(x, w),
                               precond_solve=lambda w: jacobi_precond_solve(x, w))
 
-    def ma_ops(x: Point) -> PointOperators[Vector, Covector]:
+    def ma_ops(x: Point, data: object) -> PointOperators[Vector, Covector]:
         """metric_apply without metric_solve."""
         return PointOperators(hessvec=lambda v: rosen_hessvec(x, v),
                               metric_apply=lambda v: smoothing_metric_apply(x, v))

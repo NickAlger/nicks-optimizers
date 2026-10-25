@@ -147,6 +147,9 @@ def operators_at_case(pkg: Any) -> Run:
     def operators_at(x: Any) -> Any:
         return pkg.PointOperators(hessvec=lambda v: rosen_hessvec(x, v),
                                   precond_solve=lambda w: jacobi_precond_solve(x, w))
+    if is_new(pkg):                    # the setup is point data, operators_at(x, data) wraps it
+        return pkg.trust_region_newton(rosen_fun, rosen_grad, None, x0, point_data=operators_at,
+                                       operators_at=lambda x, ops: ops)
     return pkg.trust_region_newton(rosen_fun, rosen_grad, None, x0, operators_at=operators_at)
 
 

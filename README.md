@@ -108,7 +108,8 @@ as well.
 ```python
 trust_region_newton(fun, grad, hessvec, x0, *, space=None, retract=None,
                     metric_solve=None, metric_apply=None, precond_solve=None,
-                    operators_at=None, project_covector=None, ...)
+                    operators_at=None, point_data=None, project_covector=None,
+                    backend=None, ...)
 ```
 
 | argument | signature | meaning |
@@ -130,13 +131,21 @@ builds the M-Gram matrix of its basis with `metric_apply` and measures
 residuals with `metric_solve`. When both are given they must be inverse to
 each other.
 
-`operators_at(x) -> PointOperators` gives all the operators at a point
-instead, `PointOperators(hessvec=..., metric_solve=..., precond_solve=...,
-metric_apply=...)` (pass `hessvec=None` and none of the operator keywords).
-It is called once per new iterate and the operators are reused after
-rejected steps, so setup they share (assembling a Hessian, building a
-multigrid hierarchy) happens once per point. `project_covector` is for
-redundant representations (see [Manifolds](#manifolds)).
+`operators_at(x, data) -> PointOperators` gives all the operators at a
+point instead, `PointOperators(hessvec=..., metric_solve=...,
+precond_solve=..., metric_apply=...)` (pass `hessvec=None` and none of the
+operator keywords). Setup the operators share (assembling a Hessian,
+building a multigrid hierarchy) goes into `point_data(x) -> data`, which is
+called once per new iterate and reused after rejected steps; `operators_at`
+may be called several times per point and should only wrap `data` in
+functions. Without `point_data`, `data` is `None`. With the default numpy
+backend `data` can be any object, including the operators themselves
+(`point_data=setup, operators_at=lambda x, ops: ops`, as the p-Laplacian
+example does). `project_covector` is for redundant representations (see
+[Manifolds](#manifolds)).
+
+`backend` (see [Backends](#backends)) says how the iterations are computed;
+the default runs them as plain Python on numpy.
 
 The initial `radius` (default 1.0) is an absolute length in the M-norm, so
 scale it to the problem when you know the size of a sensible first step. The
@@ -288,7 +297,7 @@ mpiexec -n 4 python examples/p_laplacian.py --p 1.5 3 5
   and `metric_apply` (both diagonal).
 - **Preconditioner:** separate from the metric. It is block Jacobi over the
   ranks, each block being the rank's part of the current Hessian, applied by
-  one pyamg V-cycle. It is built once per iterate through `operators_at`.
+  one pyamg V-cycle. It is built once per iterate, as the point data.
   `--metric precond` uses it as the metric instead (`M = P`, CG).
 - **Distribution:** vectors are `numpy_space_with_reductions` arrays of each
   rank's nodal values. Ghost values come in by halo exchange, and reductions
@@ -383,13 +392,33 @@ With the same options and deterministic functions, the resumed run reproduces
 the uninterrupted one exactly. A state saved at a different point than `x` is
 detected and rejected. See [`examples/checkpointing.py`](examples/checkpointing.py).
 
+## Backends
+
+The iterations are pure pieces (`trust_region_core`) under a Python driver
+(`trust_region_newton`), which keeps the stopping tests, records, display,
+callback and resuming. A `Backend` record says how the pieces run: how they
+are compiled (`jit`), how they loop (a bounded loop, built from a
+framework's `scan` or `while_loop` by `loop_from_scan` or
+`loop_from_while`), how they branch (`cond`), how arrays are updated
+(`index_update`) and which array namespace they use (`xp`, through a fixed
+list of names common to numpy, `jax.numpy` and the array API standard).
+`numpy_backend`, the default, runs everything as plain Python. The library
+imports no framework; a backend for one is a few lines in the user's code.
+
+With a compiling backend, the functions given to `trust_region_newton` must
+be traceable by it: no Python control flow on computed values, and arrays
+out (`fun` returns a 0-d array rather than a float). Compiled backends run
+the CG path for now; the Lanczos and flexible solvers follow
+([`dev/jit_backends_plan.md`](dev/jit_backends_plan.md)).
+
 ## Package layout
 
-Modules in dependency order. The first six do not depend on the trust-region
-code and are meant to be reused by other optimizers.
+Modules in dependency order. The first seven do not depend on the
+trust-region code and are meant to be reused by other optimizers.
 
 | module | contents |
 |---|---|
+| `backend` | how loops, branches and arrays are computed: `Backend`, `numpy_backend`, `loop_from_scan`, `loop_from_while` |
 | `trees` | tuple trees: `Tree`, `as_tuple_tree`, `tree_map`, `tree_map2`, `tree_leaves` |
 | `spaces` | the vector space structure: `VectorSpace`, `numpy_space`, `numpy_space_with_reductions`, `tuple_tree_space`, `tuple_block_space`, `flat_retraction`, `check_space` |
 | `metrics` | the Hilbert structure, the metric given by operators: `euclidean_metric_solve`, `euclidean_metric_apply`, `direct_sum`, `vector_norm`, `covector_norm`, M-Gram matrix growth |
@@ -398,7 +427,8 @@ code and are meant to be reused by other optimizers.
 | `criteria` | tests shared by inexact Newton methods: `gradient_converged`, `forcing_term`, `reduction_ratio` |
 | `trust_region_subproblem` | the trust-region subproblem over a Krylov space: `solve_tr_subproblem` (Lanczos, any M, saddle-free), `solve_tr_subproblem_cg` (Steihaug-Toint, M = P) and `solve_tr_subproblem_flexible` (any preconditioner) |
 | `trust_region_diagnostics` | records, `ResumeState`, and text output |
-| `trust_region` | `trust_region_newton`, `PointOperators` |
+| `trust_region_core` | one iteration as pure pieces a backend can compile; `PointOperators` |
+| `trust_region` | `trust_region_newton`, the driver |
 
 The Lanczos process knows nothing about trust regions or the metric, so the
 same `lanczos_advance` loop serves other consumers, e.g. Ritz values of the

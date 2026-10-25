@@ -38,7 +38,7 @@ SRC = pathlib.Path(__file__).resolve().parent.parent / "src" / "nicks_optimizers
 
 # Core modules: everything in them runs inside compiled pieces, so they use
 # the backend's xp and never numpy. Grows as the refactor converts modules.
-NUMPY_FREE: list[str] = []
+NUMPY_FREE: list[str] = ["trust_region_core"]
 
 
 def modules() -> dict[str, ast.Module]:
@@ -113,6 +113,10 @@ def python_while(cond_fun: Callable[[Any], Any], body_fun: Callable[[Any], Any],
 LOOPS = {"python": python_loop, "from scan": loop_from_scan(python_scan, python_cond),
          "from while": loop_from_while(python_while)}
 
+# Python primitives that are not numpy_backend's own: states get flattened.
+FLATTENING = dataclasses.replace(numpy_backend, jit=lambda f: f, loop=LOOPS["from while"],
+                                 cond=lambda p, t, f, x: t(x) if p else f(x))
+
 
 @pytest.mark.parametrize("which", list(LOOPS))
 def test_bounded_loops_agree(which: str) -> None:
@@ -165,7 +169,8 @@ def test_flatten_round_trip() -> None:
     assert structure_of(np.ones(2)) is None
 
 
-@pytest.mark.parametrize("backend", [numpy_backend, strict_backend], ids=["numpy", "strict"])
+@pytest.mark.parametrize("backend", [numpy_backend, FLATTENING, strict_backend],
+                         ids=["numpy", "flattening", "strict"])
 def test_states_through_loops_branches_and_compilation(backend: Any) -> None:
     xp = backend.xp
     s = Outer(inner=Inner(a=xp.asarray(0.0), b=xp.zeros(3)), vec=(xp.ones(2),))
@@ -186,7 +191,7 @@ def test_states_through_loops_branches_and_compilation(backend: Any) -> None:
 def test_loop_bodies_must_keep_the_structure() -> None:
     s = Outer(inner=Inner(a=np.asarray(0.0), b=None), vec=None)
     with pytest.raises(TypeError):
-        run_loop(numpy_backend, lambda c: c.inner.a > 1.0,
+        run_loop(FLATTENING, lambda c: c.inner.a > 1.0,
                  lambda c: dataclasses.replace(c, vec=(c.inner.a,)), s, 3)
 
 

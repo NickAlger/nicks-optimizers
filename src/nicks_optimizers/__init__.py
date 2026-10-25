@@ -16,9 +16,10 @@ Modules, in dependency order:
                             (Lanczos, CG, and a flexible solver for
                             unconventional preconditioners)
   trust_region_diagnostics  records, resumption state and text output
-  trust_region              trust_region_newton
+  trust_region_core         one iteration as pure pieces a backend can compile
+  trust_region              trust_region_newton, the driver around them
 
-trees, spaces, metrics, dense, krylov and criteria do not depend on the trust-region
+backend, trees, spaces, metrics, dense, krylov and criteria do not depend on the trust-region
 modules and are meant to be reused by other optimizers. The names below are
 the public interface; lower-level pieces are available from their modules.
 """

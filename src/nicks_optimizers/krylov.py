@@ -37,10 +37,11 @@ representatives, to remove them at every step.
 """
 
 from dataclasses import dataclass
-from typing import Callable, Generic, Optional
+from typing import Any, Callable, Generic, Optional
 
 import numpy as np
 
+from .backend import Backend, backend_state, numpy_backend
 from .dense import tridiagonal
 from .spaces import (
     Coords,
@@ -218,6 +219,7 @@ def lanczos_tridiagonal(state: LanczosState[VectorT, CovectorT, VectorBlockT, Co
 # --- conjugate gradients ---------------------------------------------------------
 
 
+@backend_state
 @dataclass(frozen=True, kw_only=True)
 class CGState(Generic[VectorT, CovectorT]):
     """Preconditioned conjugate gradients for H s = -g after `steps` steps.
@@ -234,31 +236,37 @@ class CGState(Generic[VectorT, CovectorT]):
 
     In exact arithmetic ||s_k||_P increases with k (Steihaug), which is what
     makes stopping on the trust-region boundary meaningful. Frozen;
-    cg_advance returns a new state.
+    cg_advance returns a new state. The numbers are 0-d arrays of the
+    backend (numpy scalars for numpy), so the state can be carried through a
+    compiled loop (see backend).
     """
-    steps: int
+    steps: Any
     s: VectorT
     r: CovectorT
     z: VectorT
     p: VectorT
-    rz: float
-    s_norm2: float
-    sp: float
-    p_norm2: float
-    model: float
+    rz: Any
+    s_norm2: Any
+    sp: Any
+    p_norm2: Any
+    model: Any
 
 
 def cg_start(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
              g: CovectorT, precond_solve: Callable[[CovectorT], VectorT],
-             precond_g: Optional[VectorT] = None) -> CGState[VectorT, CovectorT]:
+             precond_g: Optional[VectorT] = None, *, backend: Backend = numpy_backend
+             ) -> CGState[VectorT, CovectorT]:
     """CG before its first step: s_0 = 0, r_0 = g, p_0 = -P^{-1} g. Costs one
-    preconditioner solve, unless precond_g = P^{-1} g is given."""
+    preconditioner solve, unless precond_g = P^{-1} g is given. CG needs
+    rz = <g, P^{-1} g> > 0 (P positive definite, g nonzero); the state does
+    not check it, so callers test state.rz (solve_tr_subproblem_cg raises)."""
+    xp = backend.xp
     z = precond_solve(g) if precond_g is None else precond_g
     rz = space.pair(g, z)
-    if not rz > 0.0:
-        raise ValueError("<g, P^{-1} g> must be positive; is P positive definite and g nonzero?")
-    return CGState(steps=0, s=space.scale_vector(0.0, z), r=g, z=z, p=space.scale_vector(-1.0, z),
-                   rz=rz, s_norm2=0.0, sp=0.0, p_norm2=rz, model=0.0)
+    zero = xp.asarray(0.0)
+    return CGState(steps=xp.asarray(0), s=space.scale_vector(0.0, z), r=g, z=z,
+                   p=space.scale_vector(-1.0, z), rz=rz, s_norm2=zero, sp=zero, p_norm2=rz,
+                   model=zero)
 
 
 def cg_curvature(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
@@ -276,7 +284,8 @@ def cg_advance(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBloc
                project_covector: Optional[Callable[[CovectorT], CovectorT]] = None
                ) -> CGState[VectorT, CovectorT]:
     """The CG step s_{k+1} = s_k + alpha p_k, alpha = rz_k / <H p_k, p_k>, given
-    (H p_k, <H p_k, p_k>) from cg_curvature; the curvature must be positive.
+    (H p_k, <H p_k, p_k>) from cg_curvature; the curvature must be positive
+    (not checked: with a compiled backend nothing can raise on values).
     One preconditioner solve.
 
     The P-norm recurrences use <r_{k+1}, p_j> = 0 for j <= k (so
@@ -288,8 +297,6 @@ def cg_advance(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBloc
     redundant representations, is applied to the new residual (see the
     module docstring).
     """
-    if not curvature > 0.0:
-        raise ValueError("cg_advance needs positive curvature along p")
     alpha = state.rz / curvature
     s = space.axpy_vector(alpha, state.p, state.s)
     r = space.axpy_covector(alpha, Hp, state.r)
