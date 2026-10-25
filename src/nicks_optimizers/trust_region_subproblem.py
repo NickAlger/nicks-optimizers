@@ -452,7 +452,7 @@ def lanczos_solver(max_iter: int, *, saddle_free: bool = False, stall_tol: float
         applies = xp.asarray(0)
         if ops.precond_solve is not None:
             assert ops.metric_apply is not None
-            G = put(G, (0, 0), space.pair(ops.metric_apply(state.q), state.q))   # (q0, q0)_M
+            G = put(G, (0, 0), space.pair_block(state.Q, ops.metric_apply(state.q), 1)[0])  # (q0, q0)_M
             applies = xp.asarray(1)
         zero = xp.asarray(0.0)
         c = _LanczosCarry(
@@ -478,14 +478,16 @@ def lanczos_solver(max_iter: int, *, saddle_free: bool = False, stall_tol: float
         def step(c: _LanczosCarry[Any, Any, Any, Any]) -> _LanczosCarry[Any, Any, Any, Any]:
             state, G, applies = c.state, c.G, c.metric_applies
             k = state.steps
-            if ops.precond_solve is not None:      # the pending vector's row of G
-                assert ops.metric_apply is not None
-                Mq = ops.metric_apply(state.q_next)
-                column = put(space.pair_block(state.Q, Mq, k), k, space.pair(Mq, state.q_next))
-                G = put(put(G, (slice(None), k), column), k, column)
-                applies = applies + 1
             stepped = lanczos_step_state(space, state, ops.hessvec, precond, breakdown_tol,
                                          project_covector=ops.project_covector, backend=backend)
+            if ops.precond_solve is not None:      # the row of G of the vector that joined the basis
+                assert ops.metric_apply is not None
+                # Paired with the new basis (member k is that vector): reading the old
+                # block too would keep it alive next to the updated one, and a compiler
+                # would copy the basis to update it.
+                column = space.pair_block(stepped.Q, ops.metric_apply(state.q_next), k + 1)
+                G = put(put(G, (slice(None), k), column), k, column)
+                applies = applies + 1
             return after_step(backend, space, ops,
                               dataclasses.replace(c, G=G, metric_applies=applies), stepped)
 

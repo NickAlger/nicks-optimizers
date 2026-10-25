@@ -103,5 +103,4 @@ def extend_metric_gram(space: VectorSpace[VectorT, CovectorT, VectorBlockT, Cove
                        metric_apply: Callable[[VectorT], CovectorT]) -> Coords:
     """Grow G = [(q_i, q_j)_M] by the row and column for q_new: one product
     with M and one block pairing."""
-    Mq = metric_apply(q_new)
-    return grow_gram(G, np.append(space.pair_block(Q, Mq), space.pair(Mq, q_new)))
+    return grow_gram(G, space.pair_block(space.append_vector(Q, q_new), metric_apply(q_new)))

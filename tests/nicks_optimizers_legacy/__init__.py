@@ -1,11 +1,11 @@
 """nicks_optimizers: matrix-free optimization methods.
 
 (Test copy of the package before the backend refactor, see
-tests/test_legacy.py. Changed since it was vendored, to follow deliberate
-rounding-level changes of the refactor so that the comparison stays bit for
-bit: numpy blocks store their members along the leading axis, and the
-M-Gram matrix of a Lanczos basis gets its new diagonal entry from a pairing
-rather than from a block pairing that includes the new member (phase 7).)
+tests/test_legacy.py. Changed since it was vendored in one respect, to
+follow a deliberate rounding-level change of the refactor so that the
+comparison stays bit for bit: numpy blocks store their members along the
+leading axis, as they do since phase 7, which changes the BLAS calls of the
+block products.)
 
 Modules, in dependency order:
 
