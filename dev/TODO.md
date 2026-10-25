@@ -280,6 +280,16 @@ Lanczos failed with nonsymmetric and stochastic ones; with a good fixed SPD
 P, Lanczos was as fast or faster in the outer loop. Details, results and
 open questions: `experiments/flexible_preconditioners/README.md`.
 
+## SGD as a preconditioner for matrix completion (2026-10-24)
+
+Cauchy-step minibatch SGD on the Gauss-Newton quadratic, with the flexible
+solver: safe, homogeneous, nearly linear with cyclic batches, but a weak
+approximate inverse at 4 samples per degree of freedom (minibatch Hessians
+are singular), and 1.4 to 4.2 times the data passes of plain CG overall. Block
+Jacobi on the factor rows cut passes by 32% with power-law sampling. No
+preconditioner rescued a cold start at full rank. Details:
+`experiments/sgd_preconditioner/README.md`.
+
 ## Communication per Lanczos step
 
 The CG path for M = P needs only two reductions per step (<H p, p> and
