@@ -1,0 +1,371 @@
+[
+ {
+  "kind": "products",
+  "variant": "full",
+  "n": 16129,
+  "capacity": 32,
+  "k": 15,
+  "seconds": 0.00100491349985532
+ },
+ {
+  "kind": "products",
+  "variant": "chunks (take)",
+  "n": 16129,
+  "capacity": 32,
+  "k": 15,
+  "seconds": 0.002259380000168676
+ },
+ {
+  "kind": "products",
+  "variant": "chunks (dynamic_slice)",
+  "n": 16129,
+  "capacity": 32,
+  "k": 15,
+  "seconds": 0.0011872230002154538
+ },
+ {
+  "kind": "products",
+  "variant": "classes",
+  "n": 16129,
+  "capacity": 32,
+  "k": 15,
+  "seconds": 0.0010856500000500091
+ },
+ {
+  "kind": "products",
+  "variant": "full",
+  "n": 16129,
+  "capacity": 100,
+  "k": 15,
+  "seconds": 0.001917925500038109
+ },
+ {
+  "kind": "products",
+  "variant": "chunks (take)",
+  "n": 16129,
+  "capacity": 100,
+  "k": 15,
+  "seconds": 0.0015467560001525271
+ },
+ {
+  "kind": "products",
+  "variant": "chunks (dynamic_slice)",
+  "n": 16129,
+  "capacity": 100,
+  "k": 15,
+  "seconds": 0.0014914134999344242
+ },
+ {
+  "kind": "products",
+  "variant": "classes",
+  "n": 16129,
+  "capacity": 100,
+  "k": 15,
+  "seconds": 0.0010988529998030572
+ },
+ {
+  "kind": "products",
+  "variant": "full",
+  "n": 16129,
+  "capacity": 100,
+  "k": 60,
+  "seconds": 0.0023118799999792827
+ },
+ {
+  "kind": "products",
+  "variant": "chunks (take)",
+  "n": 16129,
+  "capacity": 100,
+  "k": 60,
+  "seconds": 0.00463722850031445
+ },
+ {
+  "kind": "products",
+  "variant": "chunks (dynamic_slice)",
+  "n": 16129,
+  "capacity": 100,
+  "k": 60,
+  "seconds": 0.004159922000098959
+ },
+ {
+  "kind": "products",
+  "variant": "classes",
+  "n": 16129,
+  "capacity": 100,
+  "k": 60,
+  "seconds": 0.00611335649978173
+ },
+ {
+  "kind": "products",
+  "variant": "full",
+  "n": 16129,
+  "capacity": 128,
+  "k": 100,
+  "seconds": 0.0026331800002026284
+ },
+ {
+  "kind": "products",
+  "variant": "chunks (take)",
+  "n": 16129,
+  "capacity": 128,
+  "k": 100,
+  "seconds": 0.009280202500121959
+ },
+ {
+  "kind": "products",
+  "variant": "chunks (dynamic_slice)",
+  "n": 16129,
+  "capacity": 128,
+  "k": 100,
+  "seconds": 0.010821796999834987
+ },
+ {
+  "kind": "products",
+  "variant": "classes",
+  "n": 16129,
+  "capacity": 128,
+  "k": 100,
+  "seconds": 0.0015943534999678377
+ },
+ {
+  "kind": "products",
+  "variant": "full",
+  "n": 262144,
+  "capacity": 32,
+  "k": 15,
+  "seconds": 0.01904229700016913
+ },
+ {
+  "kind": "products",
+  "variant": "chunks (take)",
+  "n": 262144,
+  "capacity": 32,
+  "k": 15,
+  "seconds": 0.039028526999800306
+ },
+ {
+  "kind": "products",
+  "variant": "chunks (dynamic_slice)",
+  "n": 262144,
+  "capacity": 32,
+  "k": 15,
+  "seconds": 0.04045572550012366
+ },
+ {
+  "kind": "products",
+  "variant": "classes",
+  "n": 262144,
+  "capacity": 32,
+  "k": 15,
+  "seconds": 0.02637359750019641
+ },
+ {
+  "kind": "products",
+  "variant": "full",
+  "n": 262144,
+  "capacity": 100,
+  "k": 15,
+  "seconds": 0.05707278050022069
+ },
+ {
+  "kind": "products",
+  "variant": "chunks (take)",
+  "n": 262144,
+  "capacity": 100,
+  "k": 15,
+  "seconds": 0.03752033099999608
+ },
+ {
+  "kind": "products",
+  "variant": "chunks (dynamic_slice)",
+  "n": 262144,
+  "capacity": 100,
+  "k": 15,
+  "seconds": 0.03735788850008248
+ },
+ {
+  "kind": "products",
+  "variant": "classes",
+  "n": 262144,
+  "capacity": 100,
+  "k": 15,
+  "seconds": 0.039886627999976554
+ },
+ {
+  "kind": "products",
+  "variant": "full",
+  "n": 262144,
+  "capacity": 100,
+  "k": 60,
+  "seconds": 0.05955240000002959
+ },
+ {
+  "kind": "products",
+  "variant": "chunks (take)",
+  "n": 262144,
+  "capacity": 100,
+  "k": 60,
+  "seconds": 0.15446397849996174
+ },
+ {
+  "kind": "products",
+  "variant": "chunks (dynamic_slice)",
+  "n": 262144,
+  "capacity": 100,
+  "k": 60,
+  "seconds": 0.1407028349999564
+ },
+ {
+  "kind": "products",
+  "variant": "classes",
+  "n": 262144,
+  "capacity": 100,
+  "k": 60,
+  "seconds": 0.1521293999999216
+ },
+ {
+  "kind": "products",
+  "variant": "full",
+  "n": 262144,
+  "capacity": 128,
+  "k": 100,
+  "seconds": 0.07650400000011359
+ },
+ {
+  "kind": "products",
+  "variant": "chunks (take)",
+  "n": 262144,
+  "capacity": 128,
+  "k": 100,
+  "seconds": 0.2552046760001758
+ },
+ {
+  "kind": "products",
+  "variant": "chunks (dynamic_slice)",
+  "n": 262144,
+  "capacity": 128,
+  "k": 100,
+  "seconds": 0.26099235899982887
+ },
+ {
+  "kind": "products",
+  "variant": "classes",
+  "n": 262144,
+  "capacity": 128,
+  "k": 100,
+  "seconds": 0.07390068850008902
+ },
+ {
+  "kind": "dense",
+  "variant": "G = I",
+  "capacity": 16,
+  "k": 15,
+  "seconds": 0.0002977955002734234
+ },
+ {
+  "kind": "dense",
+  "variant": "G = None",
+  "capacity": 16,
+  "k": 15,
+  "seconds": 0.0001426289998107677
+ },
+ {
+  "kind": "eigh",
+  "capacity": 16,
+  "seconds": 6.16805000390741e-05
+ },
+ {
+  "kind": "dense",
+  "variant": "G = I",
+  "capacity": 32,
+  "k": 15,
+  "seconds": 0.000238444999922649
+ },
+ {
+  "kind": "dense",
+  "variant": "G = None",
+  "capacity": 32,
+  "k": 15,
+  "seconds": 0.00017644600006860856
+ },
+ {
+  "kind": "eigh",
+  "capacity": 32,
+  "seconds": 0.0003738700002031692
+ },
+ {
+  "kind": "dense",
+  "variant": "G = I",
+  "capacity": 64,
+  "k": 15,
+  "seconds": 0.0009076215001186938
+ },
+ {
+  "kind": "dense",
+  "variant": "G = None",
+  "capacity": 64,
+  "k": 15,
+  "seconds": 0.00057328899993081
+ },
+ {
+  "kind": "eigh",
+  "capacity": 64,
+  "seconds": 0.0009705630002372345
+ },
+ {
+  "kind": "dense",
+  "variant": "G = I",
+  "capacity": 100,
+  "k": 15,
+  "seconds": 0.001896135000151844
+ },
+ {
+  "kind": "dense",
+  "variant": "G = None",
+  "capacity": 100,
+  "k": 15,
+  "seconds": 0.0009714349998830585
+ },
+ {
+  "kind": "eigh",
+  "capacity": 100,
+  "seconds": 0.0013864679999642249
+ },
+ {
+  "kind": "dense",
+  "variant": "G = I",
+  "capacity": 128,
+  "k": 15,
+  "seconds": 0.0030392065000341972
+ },
+ {
+  "kind": "dense",
+  "variant": "G = None",
+  "capacity": 128,
+  "k": 15,
+  "seconds": 0.0013157310002043232
+ },
+ {
+  "kind": "eigh",
+  "capacity": 128,
+  "seconds": 0.0020471420000376384
+ },
+ {
+  "kind": "cond",
+  "capacity": 100,
+  "n": 16129,
+  "plain": 0.0005999014999815699,
+  "read_in_branch": 0.000442533000068579,
+  "returned": 0.002710835000016232,
+  "block_copy": 0.0017170329999771639
+ },
+ {
+  "kind": "cond",
+  "capacity": 100,
+  "n": 262144,
+  "plain": 0.00550300400004744,
+  "read_in_branch": 0.005676531500057536,
+  "returned": 0.13684703449985136,
+  "block_copy": 0.12580801449985302
+ }
+]
