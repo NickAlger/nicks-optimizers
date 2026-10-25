@@ -155,27 +155,27 @@ def _np_pair(w: Covector, v: Vector) -> float:
 
 
 def _np_pair_block(B: VectorBlock, w: Covector) -> Coords:
-    return B.reshape(-1, B.shape[-1]).T @ w.ravel()
+    return B.reshape(B.shape[0], -1) @ w.ravel()
 
 
 def _np_vector_block(v: Vector) -> VectorBlock:
-    return VectorBlock(v[..., None])
+    return VectorBlock(v[None, ...])
 
 
 def _np_covector_block(w: Covector) -> CovectorBlock:
-    return CovectorBlock(w[..., None])
+    return CovectorBlock(w[None, ...])
 
 
 def _np_append_vector(B: VectorBlock, v: Vector) -> VectorBlock:
-    return VectorBlock(np.concatenate((B, v[..., None]), axis=-1))
+    return VectorBlock(np.concatenate((B, v[None, ...]), axis=0))
 
 
 def _np_append_covector(C: CovectorBlock, w: Covector) -> CovectorBlock:
-    return CovectorBlock(np.concatenate((C, w[..., None]), axis=-1))
+    return CovectorBlock(np.concatenate((C, w[None, ...]), axis=0))
 
 
 def _np_combine(B: Array, c: Coords) -> Array:
-    combined: Array = (B.reshape(-1, B.shape[-1]) @ c).reshape(B.shape[:-1])
+    combined: Array = (c @ B.reshape(B.shape[0], -1)).reshape(B.shape[1:])
     return combined
 
 

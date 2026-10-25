@@ -6,6 +6,8 @@ compares the runs. The default is bit for bit: the records, the summary and
 the final point compared through repr. A case marked exact=False (after a
 deliberate, numerically sound change that alters rounding) is compared with
 tolerances instead, with identical counts, stop reasons and acceptances.
+Rounding-level changes to the block layout were made in the vendored copy
+too (see its docstring), so that every case stays bit for bit.
 This file and the vendored copy go away when the refactor is done.
 """
 

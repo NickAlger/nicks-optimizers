@@ -127,8 +127,8 @@ class RunSummary:
       elapsed       seconds
       resume        the ResumeState at the returned point, for continuing the
                     run (e.g. after max_iter) with resume=summary.resume
-      capacity_growths  how often the Krylov basis doubled its capacity (only
-                    with static shapes, see trust_region_newton)
+      capacity_growths  how often a Krylov basis doubled its capacity, over
+                    all the solves (see krylov_capacity in trust_region_newton)
     """
     reason: RunReason
     iterations: tuple[IterationRecord, ...]

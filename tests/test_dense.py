@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 import pytest
 
-from nicks_optimizers import numpy_backend, solve_projected_trs, solve_sphere_trs_eig
+from nicks_optimizers import numpy_backend, pencil_ritz, solve_projected_trs, solve_sphere_trs_eig
 from strict_backend import plain, strict, strict_backend
 
 
@@ -67,6 +67,28 @@ def test_padding_does_not_change_the_solution(k: int, seed: int, hard: bool, sad
                 assert np.max(np.abs(theta[:k] - ref[5])) <= 1e-9 * max(1.0, float(np.max(np.abs(ref[5]))))
                 if capacity > k:
                     assert np.min(theta[k:]) > np.max(np.abs(theta[:k]))     # pads last, and not negative
+
+
+@pytest.mark.parametrize("k,seed,hard", CASES)
+def test_identity_gram_factors_nothing(k: int, seed: int, hard: bool) -> None:
+    """G = None stands for G = I (an M-orthonormal basis, as with P = M):
+    nothing is factored, and the result is that of G = I, exactly on numpy
+    and to rounding when padded on the strict backend."""
+    T, _ = projected_problem(k, seed, hard)
+    identity = np.eye(k)
+    for saddle_free in (False, True):
+        for radius in (1e-2, 1.0, 1e3):
+            ref = solve_projected_trs(T, identity, 1.3, radius, saddle_free)
+            out = solve_projected_trs(T, None, 1.3, radius, saddle_free)
+            assert all(np.asarray(a).tobytes() == np.asarray(b).tobytes() for a, b in zip(ref, out))
+            Tp, _ = pad(T, identity, 2 * k + 1, garbage=5.0)
+            padded = solve_projected_trs(strict(Tp), None, strict(1.3), strict(radius), saddle_free,
+                                         backend=strict_backend, k=strict(k))
+            y = np.asarray(plain(padded[0]))
+            scale = max(1.0, float(np.max(np.abs(ref[0]))))
+            assert np.max(np.abs(y[:k] - ref[0])) <= 1e-9 * scale and np.all(y[k:] == 0.0)
+    L, theta, Z = pencil_ritz(T, None)
+    assert L is None and np.array_equal(theta, np.linalg.eigh(0.5 * (T + T.T))[0])
 
 
 @pytest.mark.parametrize("k,seed,hard", CASES)

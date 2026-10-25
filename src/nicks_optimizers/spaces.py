@@ -130,14 +130,40 @@ class VectorSpace(Generic[VectorT, CovectorT, VectorBlockT, CovectorBlockT]):
 # --- numpy representation ---------------------------------------------------
 
 
-@dataclass(frozen=True)
+class _Rows:
+    """The storage of NumpyBlocks: an array of shape (capacity,) + the shape
+    of a vector, and how many of its rows have been written (the high-water
+    mark), so that blocks sharing it can tell whether a row is free."""
+    __slots__ = ("array", "filled")
+
+    def __init__(self, array: Array, filled: int) -> None:
+        self.array = array
+        self.filled = filled
+
+
+@dataclass(frozen=True, eq=False)
 class NumpyBlock:
-    """A block of numpy_space: the members set so far, stacked along a
-    trailing axis (the shape of a vector plus (m,)), and the capacity. The
-    other members are zero and not stored, so memory follows the number of
-    members in use (numpy has dynamic shapes)."""
-    columns: Array
-    capacity: int
+    """A block of numpy_space: its first `count` members, along the leading
+    axis of a preallocated array (room for the capacity), the rest zero.
+
+    Setting the next member writes it in place when no other block on the
+    same storage has written that row, so building a basis copies nothing;
+    otherwise the members are copied first, and the block it came from is
+    unchanged either way (blocks are values). Memory is that of the capacity,
+    committed by the operating system as rows are written (np.zeros), and the
+    method keeps the capacity within a factor of two of the members in use
+    (see trust_region_newton's krylov_capacity)."""
+    storage: _Rows
+    count: int
+
+    @property
+    def capacity(self) -> int:
+        return int(self.storage.array.shape[0])
+
+    @property
+    def members(self) -> Array:
+        """The members set, stacked along the leading axis (a view)."""
+        return self.storage.array[:self.count]
 
 
 Point = NewType("Point", Array)
@@ -176,10 +202,9 @@ def _np_axpy_covector(a: float, w: Covector, z: Covector) -> Covector:
     return Covector(a * w + z)
 
 
-# Vectors may have any shape; the stored members of a block have the shape
-# of a vector plus a trailing axis (a matrix of columns for 1-D vectors).
-# Products flatten the vector axes, so an array of any shape computes exactly
-# what its flattened 1-D version would.
+# Vectors may have any shape; a block stores its members along a leading
+# axis. Products flatten the vector axes, so an array of any shape computes
+# exactly what its flattened 1-D version would.
 
 
 def _np_pair(w: Covector, v: Vector) -> float:
@@ -187,46 +212,55 @@ def _np_pair(w: Covector, v: Vector) -> float:
 
 
 def _np_block(v: Array, capacity: int) -> NumpyBlock:
-    return NumpyBlock(v[..., None], capacity)
+    dtype = v.dtype if np.issubdtype(v.dtype, np.inexact) else np.float64
+    array = np.zeros((capacity,) + v.shape, dtype=dtype)
+    array[0] = v
+    return NumpyBlock(_Rows(array, 1), 1)
 
 
 def _np_set(B: NumpyBlock, j: Any, v: Array) -> NumpyBlock:
-    m = B.columns.shape[-1]
     j = int(j)
     if not 0 <= j < B.capacity:
         raise IndexError(f"member {j} of a block of capacity {B.capacity}")
-    if j == m:                                       # the usual case: the next member
-        return NumpyBlock(np.concatenate((B.columns, v[..., None]), axis=-1), B.capacity)
-    if j > m:
-        gap = np.zeros(B.columns.shape[:-1] + (j - m,))
-        return NumpyBlock(np.concatenate((B.columns, gap, v[..., None]), axis=-1), B.capacity)
-    columns = B.columns.copy()
-    columns[..., j] = v
-    return NumpyBlock(columns, B.capacity)
+    rows = B.storage
+    if j >= B.count and rows.filled <= B.count:     # rows from B.count on are free (zero)
+        rows.array[j] = v
+        rows.filled = j + 1
+        return NumpyBlock(rows, j + 1)
+    array = np.zeros_like(rows.array)               # in use by another block: copy
+    array[:B.count] = rows.array[:B.count]
+    array[j] = v
+    count = max(B.count, j + 1)
+    return NumpyBlock(_Rows(array, count), count)
 
 
 def _np_active(B: NumpyBlock, k: Any) -> Array:
-    """The first k stored members (all of them when k is their number)."""
-    k = int(k)
-    return B.columns if k == B.columns.shape[-1] else B.columns[..., :k]
+    """The first k members (k is at most the capacity; members beyond those
+    set are zero, so they are left out)."""
+    m = min(int(k), B.count)
+    active: Array = B.storage.array[:m]
+    return active.reshape(m, -1)
 
 
 def _np_pair_block(B: NumpyBlock, w: Covector, k: Any) -> Coords:
     active = _np_active(B, k)
     out: Coords = np.zeros(B.capacity)
-    out[:active.shape[-1]] = active.reshape(-1, active.shape[-1]).T @ w.ravel()
+    out[:active.shape[0]] = active @ w.ravel()
     return out
 
 
 def _np_combine(B: NumpyBlock, c: Coords, k: Any) -> Array:
     active = _np_active(B, k)
-    m = active.shape[-1]
-    combined: Array = (active.reshape(-1, m) @ c[:m]).reshape(active.shape[:-1])
+    combined: Array = (c[:active.shape[0]] @ active).reshape(B.storage.array.shape[1:])
     return combined
 
 
 def _np_grow(B: NumpyBlock, capacity: int) -> NumpyBlock:
-    return NumpyBlock(B.columns, capacity)
+    if capacity == B.capacity:
+        return B
+    array = np.zeros((capacity,) + B.storage.array.shape[1:], dtype=B.storage.array.dtype)
+    array[:B.count] = B.storage.array[:B.count]
+    return NumpyBlock(_Rows(array, B.count), B.count)
 
 
 def _np_dimension(v: Vector) -> int:

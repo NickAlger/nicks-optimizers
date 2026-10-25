@@ -111,8 +111,9 @@ def extend_metric_gram(space: VectorSpace[VectorT, CovectorT, VectorBlockT, Cove
                        G: Coords, Q: VectorBlockT, q_new: VectorT,
                        metric_apply: Callable[[VectorT], CovectorT]) -> Coords:
     """Grow G = [(q_i, q_j)_M] of the k = G.shape[0] members of Q by the row
-    and column for q_new: one product with M and one block pairing. Q needs
-    room for k + 1 members."""
+    and column for q_new: one product with M, one block pairing and one
+    pairing."""
     k = G.shape[0]
-    with_new = space.set_vector(Q, k, q_new)
-    return grow_gram(G, space.pair_block(with_new, metric_apply(q_new), k + 1)[:k + 1])
+    Mq = metric_apply(q_new)
+    column = np.append(space.pair_block(Q, Mq, k)[:k], space.pair(Mq, q_new))
+    return grow_gram(G, column)

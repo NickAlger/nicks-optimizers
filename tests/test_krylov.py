@@ -50,7 +50,7 @@ def test_lanczos_as_eigensolver() -> None:
     for k, earlier in enumerate(history):
         assert earlier.steps == k
         assert np.count_nonzero(earlier.deltas) == k and lanczos_tridiagonal(earlier).shape == (k, k)
-        assert earlier.Q.columns.shape[1] == max(k, 1)
+        assert earlier.Q.count == max(k, 1)
 
 
 def test_extreme_ritz_values_converge_early() -> None:

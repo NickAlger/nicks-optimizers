@@ -271,9 +271,9 @@ def subproblem_at(problem: CoreProblem, state: OuterState
 
 
 def step_start(problem: CoreProblem, backend: Backend, state: OuterState, radius: Any,
-               gnorm0: Any, *, capacity: Optional[int]) -> Any:
+               gnorm0: Any, *, capacity: int) -> Any:
     """Start the subproblem solve at state with the given radius, and run it
-    until it stops or its basis (of the given capacity; None: max_krylov)
+    until it stops or its basis (of the given capacity)
     is full. Returns the solver's carry."""
     solver, ops = subproblem_at(problem, state)
     forcing = forcing_term(backend.xp, state.gnorm, gnorm0, problem.forcing_max)

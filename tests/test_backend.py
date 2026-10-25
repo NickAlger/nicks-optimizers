@@ -274,16 +274,39 @@ def test_array_space_blocks_have_fixed_shapes() -> None:
     assert np.asarray(space.combine_vectors(B, np.array([1.0, 1.0, 9.0, 9.0]), 2)).tolist() == [3.0] * 3
 
 
-def test_numpy_blocks_store_the_members_in_use() -> None:
-    """numpy_space keeps only the members set; it replaces or fills members
-    out of order, and refuses members beyond the capacity."""
+def test_numpy_blocks_store_the_members_along_the_leading_axis() -> None:
+    """numpy_space blocks preallocate their capacity and track the members
+    set; they replace or fill members out of order, and refuse members
+    beyond the capacity."""
     B = numpy_space.vector_block(Vector(np.ones(2)), 3)
-    assert B.columns.shape == (2, 1) and B.capacity == 3
-    B = numpy_space.set_vector(B, 2, Vector(np.full(2, 3.0)))         # fills member 1 with zeros
-    assert B.columns.tolist() == [[1.0, 0.0, 3.0], [1.0, 0.0, 3.0]]
+    assert B.members.tolist() == [[1.0, 1.0]] and B.capacity == 3 and B.count == 1
+    B = numpy_space.set_vector(B, 2, Vector(np.full(2, 3.0)))         # member 1 stays zero
+    assert B.members.tolist() == [[1.0, 1.0], [0.0, 0.0], [3.0, 3.0]]
     B = numpy_space.set_vector(B, 1, Vector(np.full(2, 2.0)))
-    assert B.columns[:, 1].tolist() == [2.0, 2.0]
+    assert B.members[1].tolist() == [2.0, 2.0]
     assert numpy_space.pair_block(B, Covector(np.ones(2)), 2).tolist() == [2.0, 4.0, 0.0]
     with pytest.raises(IndexError):
         numpy_space.set_vector(B, 3, Vector(np.ones(2)))
-    assert numpy_space.grow_vector_block(B, 5).capacity == 5
+    grown = numpy_space.grow_vector_block(B, 5)
+    assert grown.capacity == 5 and np.array_equal(grown.members, B.members)
+
+
+def test_numpy_blocks_are_values() -> None:
+    """Appending writes in place only while no other block owns the row: a
+    block never changes, however many blocks are built from it."""
+    base = numpy_space.vector_block(Vector(np.zeros(3)), 4)
+    a = numpy_space.set_vector(base, 1, Vector(np.ones(3)))          # in place
+    b = numpy_space.set_vector(base, 1, Vector(np.full(3, 2.0)))     # row 1 is a's: a copy
+    c = numpy_space.set_vector(a, 2, Vector(np.full(3, 3.0)))        # a's next row: in place
+    assert a.storage is base.storage and b.storage is not base.storage and c.storage is a.storage
+    assert base.count == 1 and base.members.tolist() == [[0.0] * 3]
+    assert a.members.tolist() == [[0.0] * 3, [1.0] * 3]
+    assert b.members.tolist() == [[0.0] * 3, [2.0] * 3]
+    assert c.members.tolist() == [[0.0] * 3, [1.0] * 3, [3.0] * 3]
+    w = Covector(np.ones(3))                                          # k beyond the members: zeros
+    assert numpy_space.pair_block(a, w, 4).tolist() == [0.0, 3.0, 0.0, 0.0]
+    assert numpy_space.combine_vectors(a, np.ones(4), 4).tolist() == [1.0] * 3
+    shaped = numpy_space.vector_block(Vector(np.ones((2, 3))), 2)     # vectors of any shape
+    shaped = numpy_space.set_vector(shaped, 1, Vector(np.full((2, 3), 2.0)))
+    assert numpy_space.pair_block(shaped, Covector(np.ones((2, 3))), 2).tolist() == [6.0, 12.0]
+    assert numpy_space.combine_vectors(shaped, np.array([1.0, 1.0]), 2).shape == (2, 3)

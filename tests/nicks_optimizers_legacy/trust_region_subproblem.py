@@ -270,7 +270,7 @@ def solve_tr_subproblem(space: VectorSpace[VectorT, CovectorT, VectorBlockT, Cov
     if metric_apply is None or matched:
         G = np.ones((1, 1))                                     # M-orthonormal basis
     else:
-        G = space.pair_block(state.Q, metric_apply(state.q)).reshape(1, 1)   # (q0, q0)_M
+        G = np.array([[space.pair(metric_apply(state.q), state.q)]])   # (q0, q0)_M
         applies += 1
     prev_model_value: Optional[float] = None
     trace_model: list[float] = []

@@ -23,13 +23,15 @@ from .backend import Backend, backend_state, numpy_backend, run_loop
 from .spaces import Coords
 
 
-def pencil_ritz(T: Coords, G: Coords, *, backend: Backend = numpy_backend,
-                k: Optional[Any] = None) -> tuple[Coords, Coords, Coords]:
+def pencil_ritz(T: Coords, G: Optional[Coords], *, backend: Backend = numpy_backend,
+                k: Optional[Any] = None) -> tuple[Optional[Coords], Coords, Coords]:
     """Rayleigh-Ritz for the pencil H u = theta M u on the Krylov space.
 
     With G = L L^T, Q L^{-T} is an M-orthonormal basis of the space and
     A = L^{-1} T L^{-T} is H in that basis. Returns (L, theta, Z): the
     M-Ritz values theta (ascending) and the M-Ritz vectors Z in z-coordinates.
+    G = None stands for the identity (an M-orthonormal basis, as with P = M):
+    nothing is factored, A = T, and L is None.
 
     Padding (k given, static shapes): only the leading k x k blocks of T and
     G are used. The inactive part becomes G = I and A = pad I, with pad above
@@ -39,8 +41,8 @@ def pencil_ritz(T: Coords, G: Coords, *, backend: Backend = numpy_backend,
     """
     xp = backend.xp
     if k is None or not backend.static_shapes:
-        L = xp.linalg.cholesky(G)
-        A = xp.linalg.solve(L, xp.linalg.solve(L, T).T)
+        L = None if G is None else xp.linalg.cholesky(G)
+        A = T if L is None else xp.linalg.solve(L, xp.linalg.solve(L, T).T)
         theta, Z = xp.linalg.eigh(0.5 * (A + A.T))
         return L, theta, Z
     m = T.shape[0]
@@ -48,8 +50,11 @@ def pencil_ritz(T: Coords, G: Coords, *, backend: Backend = numpy_backend,
     active = index < k
     both = active[:, None] & active[None, :]
     diagonal = index[:, None] == index[None, :]
-    L = xp.linalg.cholesky(xp.where(both, G, xp.where(diagonal, 1.0, 0.0)))
-    A = xp.linalg.solve(L, xp.linalg.solve(L, xp.where(both, T, 0.0)).T)
+    A = xp.where(both, T, 0.0)
+    L = None
+    if G is not None:
+        L = xp.linalg.cholesky(xp.where(both, G, xp.where(diagonal, 1.0, 0.0)))
+        A = xp.linalg.solve(L, xp.linalg.solve(L, A).T)
     A = 0.5 * (A + A.T)
     pad = 1.0 + 2.0 * xp.max(xp.sum(xp.abs(A), axis=1))
     A = A + xp.where(diagonal & ~active[None, :], pad, 0.0)
@@ -151,7 +156,8 @@ def solve_sphere_trs(A: Coords, b: Coords, radius: Any, *, backend: Backend = nu
     return solve_sphere_trs_eig(evals, U, b, radius, backend=backend)
 
 
-def solve_projected_trs(T: Coords, G: Coords, gamma0: Any, radius: Any, saddle_free: bool = False,
+def solve_projected_trs(T: Coords, G: Optional[Coords], gamma0: Any, radius: Any,
+                        saddle_free: bool = False,
                         *, backend: Backend = numpy_backend, k: Optional[Any] = None
                         ) -> tuple[Coords, Coords, Any, Any, Any, Coords]:
     """Solve the small trust-region problem of a Krylov method in
@@ -173,7 +179,8 @@ def solve_projected_trs(T: Coords, G: Coords, gamma0: Any, radius: Any, saddle_f
                    (equal to model_value unless saddle_free)
       theta        M-Ritz values, ascending
 
-    T and G may be padded (see the module docstring): with k active
+    G = None stands for the identity (an M-orthonormal basis): no
+    factorization, z = y. T and G may be padded (see the module docstring): with k active
     coordinates, y and y_flip vanish beyond k, and theta holds the k M-Ritz
     values first, then values that are neither negative nor smallest (pad
     values, or +inf when the problem was cut down to the active block).
@@ -183,14 +190,15 @@ def solve_projected_trs(T: Coords, G: Coords, gamma0: Any, radius: Any, saddle_f
     if k is not None and not backend.static_shapes and int(k) < m:
         kk = int(k)
         y, y_flip, lam, model_value, true_model_value, theta = solve_projected_trs(
-            T[:kk, :kk], G[:kk, :kk], gamma0, radius, saddle_free, backend=backend)
+            T[:kk, :kk], None if G is None else G[:kk, :kk], gamma0, radius, saddle_free,
+            backend=backend)
         return (_pad(backend, y, m), _pad(backend, y_flip, m), lam, model_value,
                 true_model_value, _pad(backend, theta, m, xp.inf))
     L, theta, Z = pencil_ritz(T, G, backend=backend, k=k)
     curvature = xp.abs(theta) if saddle_free else theta
     order = xp.argsort(curvature)
     e1 = xp.where(xp.arange(m) == 0, 1.0, 0.0)
-    b = gamma0 * xp.linalg.solve(L, e1)
+    b = gamma0 * (e1 if L is None else xp.linalg.solve(L, e1))
     # The Ritz vectors in curvature order (as rows of Z^T, which keeps numpy's
     # memory layout, and with it the rounding, of Z[:, order]).
     z, lam = solve_sphere_trs_eig(xp.take(curvature, order), xp.take(Z.T, order, axis=0).T, b,
@@ -198,10 +206,11 @@ def solve_projected_trs(T: Coords, G: Coords, gamma0: Any, radius: Any, saddle_f
     zh = Z.T @ z                                     # M-Ritz coordinates
     model_value = b @ z + 0.5 * xp.sum(curvature * zh ** 2)
     true_model_value = b @ z + 0.5 * xp.sum(theta * zh ** 2)
-    y = xp.linalg.solve(L.T, z)
+    y = z if L is None else xp.linalg.solve(L.T, z)
     if saddle_free:
         signs = xp.where(theta < 0.0, -1.0, 1.0)
-        y_flip = xp.linalg.solve(L.T, Z @ (signs * zh))
+        flipped = Z @ (signs * zh)
+        y_flip = flipped if L is None else xp.linalg.solve(L.T, flipped)
     else:
         y_flip = y
     return y, y_flip, lam, model_value, true_model_value, theta

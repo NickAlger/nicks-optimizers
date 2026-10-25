@@ -56,7 +56,7 @@ def check_lanczos_relations(rng: Rng) -> bool:
     ok = True
     for passes in (2, 0):
         state, T, G = run_lanczos(H, P, M, g, k, passes)
-        Q, V = state.Q.columns, state.V.columns
+        Q, V = state.Q.members.T, state.V.members.T
         gamma0, gamma_next, v_next = state.gamma0, state.gamma_next, state.v_next
         e1 = np.zeros(k); e1[0] = 1.0
         ek = np.zeros(k); ek[-1] = 1.0
@@ -111,7 +111,7 @@ def check_explicit_residual(rng: Rng) -> bool:
     P, M = random_spd(n, 30.0, rng), random_spd(n, 30.0, rng)
     g = rng.standard_normal(n)
     state, T, G = run_lanczos(H, P, M, g, k)
-    Q = state.Q.columns
+    Q = state.Q.members.T
     ok = True
     for radius in (0.3, 1e4):
         for saddle_free in (False, True):
@@ -144,7 +144,7 @@ def check_matched_residual(rng: Rng) -> bool:
         y, y_flip, lam, _, _, _ = solve_projected_trs(T, np.eye(k), state.gamma0, 0.3, saddle_free)
         resid, applies, solves = krylov_residual_norm(
             numpy_space, state, y, float(y_flip[-1]), lam, np.eye(k), None, dense_solve(M))
-        s, s_flip = state.Q.columns @ y, state.Q.columns @ y_flip
+        s, s_flip = state.Q.members.T @ y, state.Q.members.T @ y_flip
         dense = dense_dual_norm(H @ s_flip + lam * M @ s + g, M)
         label = "saddle-free" if saddle_free else "plain"
         ok &= report(f"{label}: |gamma_next |y_k| - dense| / ||g||", abs(resid - dense) / gn, 1e-12)

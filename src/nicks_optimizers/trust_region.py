@@ -137,7 +137,7 @@ from .trust_region_diagnostics import (
     display_iteration,
     format_summary,
 )
-from .trust_region_subproblem import FULL, as_integer, subproblem_stats
+from .trust_region_subproblem import DEFAULT_CAPACITY, FULL, as_integer, subproblem_stats
 
 __all__ = ["PointOperators", "trust_region_newton", "update_radius", "check_resume_matches"]
 
@@ -259,14 +259,16 @@ def trust_region_newton(
     evaluation; it must belong to x0.
 
     Backend: backend=None runs on numpy; another Backend compiles the
-    iterations (see the module docstring and backend). With static shapes,
-    the Krylov basis of the Lanczos and flexible solvers is allocated in
-    full: it starts with room for krylov_capacity vectors (default
-    min(32, max_krylov)) and doubles, up to max_krylov, whenever a solve
-    fills it, continuing the solve without recomputing anything; the
-    capacity then stays for the rest of the run (summary.capacity_growths
-    counts the doublings). numpy ignores krylov_capacity: its blocks store
-    only the vectors in use.
+    iterations (see the module docstring and backend). Each Lanczos or
+    flexible solve starts with room for krylov_capacity basis vectors
+    (default min(32, max_krylov)) and doubles it, up to max_krylov, whenever
+    the basis fills, continuing the solve without recomputing anything
+    (summary.capacity_growths counts the doublings). The room is allocated
+    in full, and with static shapes the block products and small dense
+    problems run over all of it, so restarting every solve at
+    krylov_capacity keeps the work and memory within a factor of two of what
+    the solve uses. A compiling backend compiles the pieces once per
+    capacity, and keeps them for the run.
 
     Returns (x, summary): the final iterate and a RunSummary, which holds the
     stopping reason, one IterationRecord per iteration, the work done and the
@@ -315,10 +317,10 @@ def trust_region_newton(
     start_piece = compile_function(bk, partial(init, problem, bk))
     continue_piece = compile_function(bk, partial(step_continue, problem, bk))
     finish_piece = compile_function(bk, partial(step_finish, problem, bk))
-    begin_pieces: dict[Optional[int], Callable[..., Any]] = {}
+    begin_pieces: dict[int, Callable[..., Any]] = {}
     grow_pieces: dict[int, Callable[..., Any]] = {}
 
-    def begin_piece(c: Optional[int]) -> Callable[..., Any]:
+    def begin_piece(c: int) -> Callable[..., Any]:
         """step_start compiled for basis capacity c (one version per capacity)."""
         if c not in begin_pieces:
             begin_pieces[c] = compile_function(bk, partial(step_start, problem, bk, capacity=c))
@@ -329,12 +331,10 @@ def trust_region_newton(
             grow_pieces[c] = compile_function(bk, partial(step_grow, problem, bk, capacity=c))
         return grow_pieces[c]
 
-    # numpy stores only the basis vectors in use: room for max_krylov from the
-    # start. Static shapes allocate the capacity in full: start small, double
-    # when full (a high-water mark for the run).
-    capacity: Optional[int] = None
-    if bk.static_shapes:
-        capacity = min(32 if krylov_capacity is None else krylov_capacity, max_krylov)
+    # Every solve starts small and doubles its basis when full (see Backend in
+    # the docstring).
+    initial_capacity = min(DEFAULT_CAPACITY if krylov_capacity is None else krylov_capacity,
+                           max_krylov)
     growths = 0
 
     def number(v: Any) -> float:
@@ -364,9 +364,9 @@ def trust_region_newton(
             reason = "max_iter"
             break
         radius_x, gnorm0_x = xp.asarray(radius), xp.asarray(gnorm0)
+        capacity = initial_capacity
         carry = begin_piece(capacity)(state, radius_x, gnorm0_x)
         while as_integer(carry.status) == FULL:
-            assert capacity is not None
             capacity = min(2 * capacity, max_krylov)
             carry = continue_piece(state, grow_piece(capacity)(state, carry))
             growths += 1

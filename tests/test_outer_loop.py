@@ -321,6 +321,32 @@ def test_matched_path_equals_explicit_metric() -> None:
     assert matched.metric_apply_calls == 0 and matched.precond_solve_calls == 0
 
 
+@pytest.mark.parametrize("krylov", ["lanczos", "flexible"])
+def test_krylov_capacity_changes_nothing_on_numpy(krylov: str) -> None:
+    """Each solve starts with room for krylov_capacity basis vectors and
+    doubles it whenever the basis fills up. On numpy the iterates are the
+    same bit for bit whatever the starting room, and the doublings are
+    counted over all the solves."""
+    x0 = Point(np.tile([-1.2, 1.0], 25))
+    options: dict[str, object] = dict(metric_solve=jacobi_precond_solve, krylov=krylov)
+    if krylov == "flexible":
+        options.update(metric_solve=smoothing_metric_solve, metric_apply=smoothing_metric_apply,
+                       precond_solve=jacobi_precond_solve)
+    runs = {c: trust_region_newton(rosen_fun, rosen_grad, rosen_hessvec, x0, krylov_capacity=c,
+                                   **options)[1]  # type: ignore[arg-type]
+            for c in (1, 3, 50)}
+    for c, run in runs.items():
+        assert without_times(run.iterations) == without_times(runs[50].iterations)
+        assert (run.reason, run.f, run.gnorm) == (runs[50].reason, runs[50].f, runs[50].gnorm)
+        expected = 0
+        for r in run.iterations:              # doublings until the basis holds the solve's steps
+            room = c
+            while room < r.subproblem.krylov_steps:
+                room, expected = min(2 * room, 50), expected + 1
+        assert run.capacity_growths == expected
+    assert runs[1].capacity_growths > runs[3].capacity_growths > runs[50].capacity_growths == 0
+
+
 def test_krylov_selection() -> None:
     """krylov="auto" uses CG when P = M without saddle_free, and Lanczos
     otherwise; every combination converges on Rosenbrock."""

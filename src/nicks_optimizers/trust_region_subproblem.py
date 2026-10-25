@@ -61,10 +61,10 @@ values (see backend), which a backend can compile.
                        RUNNING, and run continues where it stopped
   result(backend, space, ops, carry) -> (s, RawSubproblem)
 
-capacity bounds the basis (None: max_iter, which is what numpy uses; its
-blocks store only the members in use). The solve_tr_subproblem* functions
-run the pieces, doubling the capacity when the basis fills up, and return
-SubproblemStats.
+capacity is the room in the basis at the start (None: DEFAULT_CAPACITY,
+32, or max_iter if smaller). The solve_tr_subproblem* functions run the
+pieces, doubling the capacity when the basis fills up, and return
+SubproblemStats; trust_region_newton does the same for every solve.
 """
 
 import dataclasses
@@ -257,6 +257,17 @@ class KrylovSolver:
     capacity: Callable[[Any], Optional[int]]
 
 
+DEFAULT_CAPACITY = 32
+"""The room in a Krylov basis at the start of a solve, unless given: it
+doubles when the basis fills up."""
+
+
+def initial_capacity(capacity: Optional[int], max_iter: int) -> int:
+    """The room at the start of a solve: capacity (DEFAULT_CAPACITY if None),
+    at most max_iter."""
+    return min(DEFAULT_CAPACITY if capacity is None else capacity, max_iter)
+
+
 def solve_with(solver: KrylovSolver, backend: Optional[Backend],
                space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT], ops: SubproblemOperators[VectorT, CovectorT],
                g: CovectorT, radius: Any, resid_tol: Any, start_vector: Optional[VectorT] = None,
@@ -299,7 +310,7 @@ def _next_status(backend: Backend, done: Any, k: Any, bound: int, capacity: int)
 
 def krylov_residual_norm(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
                          state: LanczosState[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
-                         y: Coords, y_flip_last: Any, lam: Any, G: Coords,
+                         y: Coords, y_flip_last: Any, lam: Any, G: Optional[Coords],
                          metric_apply: Optional[Callable[[VectorT], CovectorT]],
                          metric_solve: Callable[[CovectorT], VectorT], *,
                          backend: Backend = numpy_backend, k: Optional[Any] = None
@@ -325,6 +336,7 @@ def krylov_residual_norm(space: VectorSpace[VectorT, CovectorT, VectorBlockT, Co
     xp = backend.xp
     if metric_apply is None:
         return state.gamma_next * xp.abs(y_flip_last), xp.asarray(0), xp.asarray(0)
+    assert G is not None
     m = y.shape[0] if k is None else k
     R = space.scale_covector(state.gamma_next * y_flip_last, state.v_next)
 
@@ -401,7 +413,7 @@ def lanczos_solver(max_iter: int, *, saddle_free: bool = False, stall_tol: float
         k = state.steps
         T = tridiagonal(leading(backend, state.deltas, k), leading(backend, state.gammas, k),
                         backend=backend)
-        G = leading(backend, c.G, k)
+        G = None if matched else leading(backend, c.G, k)      # None: the identity
         y, y_flip, lam, model_value, true_model_value, theta = solve_projected_trs(
             T, G, state.gamma0, c.radius, saddle_free, backend=backend, k=k)
         resid, applies, solves = krylov_residual_norm(
@@ -433,14 +445,14 @@ def lanczos_solver(max_iter: int, *, saddle_free: bool = False, stall_tol: float
         if ops.precond_solve is not None and ops.metric_apply is None:
             raise ValueError("a separate preconditioner needs metric_apply (M) for the Gram matrix")
         precond = precond_of(ops)
-        cap = max_iter if capacity is None else min(capacity, max_iter)
+        cap = initial_capacity(capacity, max_iter)
         state = lanczos_start(space, g, precond, start_vector, capacity=cap, backend=backend)
         bound = max_iter if space.dimension is None else min(max_iter, space.dimension(state.q))
         G = xp.eye(cap)
         applies = xp.asarray(0)
         if ops.precond_solve is not None:
             assert ops.metric_apply is not None
-            G = put(G, (0, 0), space.pair_block(state.Q, ops.metric_apply(state.q), 1)[0])  # (q0, q0)_M
+            G = put(G, (0, 0), space.pair(ops.metric_apply(state.q), state.q))   # (q0, q0)_M
             applies = xp.asarray(1)
         zero = xp.asarray(0.0)
         c = _LanczosCarry(
@@ -468,8 +480,8 @@ def lanczos_solver(max_iter: int, *, saddle_free: bool = False, stall_tol: float
             k = state.steps
             if ops.precond_solve is not None:      # the pending vector's row of G
                 assert ops.metric_apply is not None
-                with_next = space.set_vector(state.Q, k, state.q_next)
-                column = space.pair_block(with_next, ops.metric_apply(state.q_next), k + 1)
+                Mq = ops.metric_apply(state.q_next)
+                column = put(space.pair_block(state.Q, Mq, k), k, space.pair(Mq, state.q_next))
                 G = put(put(G, (slice(None), k), column), k, column)
                 applies = applies + 1
             stepped = lanczos_step_state(space, state, ops.hessvec, precond, breakdown_tol,
@@ -477,7 +489,10 @@ def lanczos_solver(max_iter: int, *, saddle_free: bool = False, stall_tol: float
             return after_step(backend, space, ops,
                               dataclasses.replace(c, G=G, metric_applies=applies), stepped)
 
-        return run_loop(backend, lambda c: c.status != RUNNING, step, c, bound_of(c))
+        # at most capacity steps before the basis is full (fewer skipped steps
+        # for a loop built from scan)
+        return run_loop(backend, lambda c: c.status != RUNNING, step, c,
+                        min(bound_of(c), int(c.G.shape[0])))
 
     def grow(backend: Backend, space: VectorSpace[Any, Any, Any, Any],
              c: _LanczosCarry[Any, Any, Any, Any], capacity: int) -> _LanczosCarry[Any, Any, Any, Any]:
@@ -552,7 +567,7 @@ def solve_tr_subproblem(space: VectorSpace[VectorT, CovectorT, VectorBlockT, Cov
     -P^{-1} g, since that point lies in K_1.
 
     backend (numpy by default) computes it; capacity, the initial room in
-    the basis, doubles when the basis fills up (None: max_iter). Raises
+    the basis (None: DEFAULT_CAPACITY), doubles when the basis fills up. Raises
     ValueError if <g, P^{-1} g> is not positive. Returns (s, stats): the step
     and its SubproblemStats.
     """
@@ -809,8 +824,8 @@ def flexible_solver(max_iter: int, *, saddle_free: bool = False,
         k = c.k
         cap = int(c.T.shape[0])
         y, y_flip, lam, model_value, true_model_value, theta = solve_projected_trs(
-            leading(backend, c.T, k), leading(backend, xp.eye(cap), k), c.gamma0, c.radius,
-            saddle_free, backend=backend, k=k)
+            leading(backend, c.T, k), None, c.gamma0, c.radius, saddle_free, backend=backend,
+            k=k)                                  # the basis is M-orthonormal: G = I
         R = space.axpy_covector(1.0, g, space.combine_covectors(c.HQ, y_flip, k))
         R = run_cond(backend, lam > 0.0,
                      lambda R: space.axpy_covector(lam, space.combine_covectors(c.MQ, y, k), R),
@@ -834,7 +849,7 @@ def flexible_solver(max_iter: int, *, saddle_free: bool = False,
               start_vector: Any, capacity: Optional[int]) -> _FlexibleCarry[Any, Any, Any, Any]:
         xp, put = backend.xp, backend.index_update
         assert ops.precond_solve is not None and ops.metric_apply is not None
-        cap = max_iter if capacity is None else min(capacity, max_iter)
+        cap = initial_capacity(capacity, max_iter)
         Mg = ops.metric_solve(g) if start_vector is None else start_vector
         gamma0 = xp.sqrt(xp.maximum(space.pair(g, Mg), 0.0))
         inverse = 1.0 / xp.where(gamma0 > 0.0, gamma0, 1.0)
@@ -910,7 +925,8 @@ def flexible_solver(max_iter: int, *, saddle_free: bool = False,
 
             return run_cond(backend, ok, add, broke_down, None)
 
-        return run_loop(backend, lambda c: c.status != RUNNING, step, carry, bound_of(carry))
+        return run_loop(backend, lambda c: c.status != RUNNING, step, carry,
+                        min(bound_of(carry), int(carry.T.shape[0])))
 
     def grow(backend: Backend, space: VectorSpace[Any, Any, Any, Any],
              c: _FlexibleCarry[Any, Any, Any, Any], capacity: int) -> _FlexibleCarry[Any, Any, Any, Any]:
@@ -993,8 +1009,8 @@ def solve_tr_subproblem_flexible(
     Stops at the first of ||R||_{M^{-1}} <= resid_tol ("tol"), a breakdown
     ("breakdown", not even M^{-1} R adds a direction), or max_iter steps
     (capped at the dimension when the space provides one, "max"). backend
-    (numpy by default) computes it; capacity, the initial room in the basis,
-    doubles when the basis fills up (None: max_iter). Raises ValueError if
+    (numpy by default) computes it; capacity, the initial room in the basis
+    (None: DEFAULT_CAPACITY), doubles when the basis fills up. Raises ValueError if
     g = 0. Returns (s, stats).
     """
     ops = SubproblemOperators(hessvec=hessvec, metric_solve=metric_solve,
