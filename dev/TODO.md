@@ -291,6 +291,14 @@ preconditioner rescued a cold start at full rank. Write-up:
 `dev/matrix_completion_preconditioners.md`; code and full tables:
 `experiments/sgd_preconditioner/`.
 
+## Compiled iterations with a pluggable backend (2026-10-25)
+
+Proposal under review: a `Backend` record (jit, while_loop, cond,
+index_update, an array namespace) so that each iteration can be compiled
+by JAX or another framework, with numpy as the default and reference and
+no framework imports in `src/`. Plan, decisions to review and phases:
+`dev/jit_backends_plan.md`.
+
 ## Communication per Lanczos step
 
 The CG path for M = P needs only two reductions per step (<H p, p> and
