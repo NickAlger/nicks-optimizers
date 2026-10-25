@@ -677,7 +677,10 @@ New: `backend=`, `point_data=` and `krylov_capacity=` keywords; `Backend`,
   objective values equal to rounding, one compilation per run, 1.6 to 2.3
   times faster per iteration on CPU at n = 4,000 to 16,000. While-built
   loops were 2 to 40% faster than scan-built ones there; the skipped steps
-  themselves are cheap.
+  themselves are cheap. Check-in decisions (2026-10-25): go ahead with
+  phases 4 to 6; the numpy overhead on small problems is acceptable for now;
+  scan stays the default loop (fewer limitations with automatic
+  differentiation, a moderate extra cost, and GPU timings still to come).
 
 ## Out of scope for now
 

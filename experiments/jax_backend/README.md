@@ -111,11 +111,12 @@ Krylov steps per iteration, so the scan skips the rest.
    compiled iterations pay off for runs longer than that.
 5. **While-built loops were faster than scan-built ones**: by 2 to 40% per
    iteration on the plaplace problems, and equal on Rosenbrock. The skipped
-   steps themselves are cheap:
-   scan time does not grow from 100 to 400 steps. What remains is a roughly
-   fixed extra cost once max_krylov is well above the steps used. Use
-   `loop_from_while` for speed and `loop_from_scan` for a known trip count or
-   reverse-mode differentiation.
+   steps themselves are cheap: scan time does not grow from 100 to 400
+   steps. What remains is a roughly fixed extra cost once max_krylov is well
+   above the steps used. **Scan stays the default** (decision of 2026-10-25):
+   it has fewer limitations with automatic differentiation (reverse mode
+   works through it), the extra cost is moderate, and GPU timings are needed
+   before recommending either; scan may do better there.
 6. **Requirements on user code, as expected**: functions must be traceable
    (no `float()` of values, no Python branches on data) and return arrays.
    x64 must be on.
