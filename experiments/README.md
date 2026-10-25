@@ -22,3 +22,4 @@ run it, the results so far, and its status.
 | experiment | question | status |
 |---|---|---|
 | [`flexible_preconditioners/`](flexible_preconditioners/) | Can the trust-region subproblem be made robust to preconditioners that are nonsymmetric, nonlinear (inexact inner solves) or stochastic? | in progress |
+| [`sgd_preconditioner/`](sgd_preconditioner/) | Can minibatch SGD with Cauchy steps precondition matrix completion, with nonuniform sampling or a cold start at full rank? | in progress |
