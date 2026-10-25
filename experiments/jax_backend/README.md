@@ -35,6 +35,7 @@ CG path, since it only uses arithmetic operators and `@`.
     python experiments/jax_backend/solvers.py [--sizes 63 127] [--json solvers.json]
     python experiments/jax_backend/capacity.py [--sizes 63 127] [--json capacity.json]
     python experiments/jax_backend/blocks.py [--json blocks.json]
+    python experiments/jax_backend/calls.py
 
 All need `pip install jax` (CPU here, JAX 0.12, a 2-core machine). The JSON
 files hold the raw numbers of the runs below (`capacity_phase6.json`: the
@@ -290,6 +291,14 @@ Findings:
     (rounding near a stopping test). A fixed room of 100 still costs 1.3 to
     2.6 times numpy's time, which is what `krylov_capacity = max_krylov`
     would buy.
+    **Nothing is recomputed** when a basis grows: `calls.py` counts the
+    executions of the user's operators inside the compiled code with host
+    callbacks. For Lanczos (P = M and P != M) and the flexible solver, with
+    loops from scan and from while, the counts equal the summary's and are
+    the same whether the basis starts with room for 2 vectors (up to 28
+    growths per run), 8 or 100; skipped scan steps run nothing. On numpy,
+    `test_growing_the_basis_repeats_no_user_operation` checks the same for
+    every solver with instrumented functions.
 14. **G = None** (an M-orthonormal basis: P = M, and the flexible solver)
     halves the padded small problem at capacity 100.
 15. **Copies.** The optimized HLO of the pieces has no copy of the basis

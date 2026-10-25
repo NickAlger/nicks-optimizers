@@ -1,7 +1,7 @@
 """The outer trust-region loop: operators, point-dependent metrics, the
 relative convergence test and its norm, and convergence on test problems."""
 
-from typing import Callable, Literal
+from typing import Any, Callable, Literal
 
 import numpy as np
 import pytest
@@ -345,6 +345,47 @@ def test_krylov_capacity_changes_nothing_on_numpy(krylov: str) -> None:
                 room, expected = min(2 * room, 50), expected + 1
         assert run.capacity_growths == expected
     assert runs[1].capacity_growths > runs[3].capacity_growths > runs[50].capacity_growths == 0
+
+
+CALL_CASES: dict[str, dict[str, object]] = {
+    "cg": dict(metric_solve=smoothing_metric_solve),
+    "lanczos": dict(metric_solve=smoothing_metric_solve, krylov="lanczos"),
+    "lanczos saddle-free": dict(metric_solve=smoothing_metric_solve, saddle_free=True),
+    "lanczos, separate P": dict(metric_solve=smoothing_metric_solve, metric_apply=smoothing_metric_apply,
+                                precond_solve=jacobi_precond_solve, krylov="lanczos"),
+    "flexible": dict(metric_solve=smoothing_metric_solve, metric_apply=smoothing_metric_apply,
+                     precond_solve=jacobi_precond_solve, krylov="flexible"),
+}
+
+
+@pytest.mark.parametrize("name", list(CALL_CASES))
+def test_growing_the_basis_repeats_no_user_operation(name: str) -> None:
+    """The user's functions, instrumented: a basis that starts with room for
+    one vector and doubles (many growths) makes exactly the calls of a basis
+    with room for every step, and the summary counts are the calls made."""
+    calls: dict[int, dict[str, int]] = {}
+    for capacity in (1, 2, 50):
+        count = dict.fromkeys(("fun", "grad", "hessvec", "metric_solve", "metric_apply",
+                               "precond_solve"), 0)
+
+        def counted(key: str, f: Callable[..., Any]) -> Callable[..., Any]:
+            def wrapper(*args: Any) -> Any:
+                count[key] += 1
+                return f(*args)
+            return wrapper
+        options = {key: counted(key, f) if callable(f) else f for key, f in CALL_CASES[name].items()}
+        _, summary = trust_region_newton(
+            counted("fun", rosen_fun), counted("grad", rosen_grad), counted("hessvec", rosen_hessvec),
+            Point(np.tile([-1.2, 1.0], 25)), krylov_capacity=capacity, **options)  # type: ignore[arg-type]
+        assert (summary.fun_calls, summary.grad_calls, summary.hessvec_calls,
+                summary.metric_solve_calls, summary.metric_apply_calls, summary.precond_solve_calls) == \
+            (count["fun"], count["grad"], count["hessvec"], count["metric_solve"],
+             count["metric_apply"], count["precond_solve"])
+        assert summary.hessvec_calls == sum(r.subproblem.krylov_steps for r in summary.iterations)
+        calls[capacity] = count
+        if capacity == 1 and name != "cg":
+            assert summary.capacity_growths >= len(summary.iterations)
+    assert calls[1] == calls[2] == calls[50]
 
 
 def test_krylov_selection() -> None:
