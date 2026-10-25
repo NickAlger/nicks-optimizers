@@ -2,6 +2,8 @@
 
 Modules, in dependency order:
 
+  backend                   how loops, branches and arrays are computed
+                            (Backend records; numpy by default)
   trees                     tuple trees (nested tuples) and maps over them
   spaces                    the vector space structure: how vectors and
                             covectors are represented (VectorSpace records)
@@ -21,6 +23,7 @@ modules and are meant to be reused by other optimizers. The names below are
 the public interface; lower-level pieces are available from their modules.
 """
 
+from .backend import Backend, loop_from_scan, loop_from_while, numpy_backend
 from .criteria import forcing_term, gradient_converged, reduction_ratio
 from .dense import pencil_ritz, solve_sphere_trs, solve_sphere_trs_eig, tridiagonal
 from .krylov import (
@@ -94,6 +97,11 @@ from .trust_region_subproblem import (
 )
 
 __all__ = [
+    # backend
+    "Backend",
+    "loop_from_scan",
+    "loop_from_while",
+    "numpy_backend",
     # spaces
     "Array",
     "Coords",

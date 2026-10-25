@@ -121,9 +121,10 @@ class Backend:
 
 **The bounded loop.** `loop(done, body, carry, max_steps)` applies `body` at
 most `max_steps` times (a Python int) and stops once `done(carry)` is true.
-The contract: when `done(carry)` is true, `body(carry)` returns the carry
-unchanged, so an implementation may stop early or keep going and the
-result is the same. Two helpers in `src/` build it from either primitive:
+The contract is the Python loop below: an implementation may keep running
+after the first finished carry (a scan does), but must then skip the body
+(`loop_from_scan` does it with `cond`), so loop bodies need no done checks of
+their own. Two helpers in `src/` build it from either primitive:
 
 ```python
 def loop_from_scan(scan, cond):
@@ -231,8 +232,10 @@ stays static under compilation.
 6. **Errors become status codes.** Today `lanczos_start` and `cg_start`
    raise when <g, P^{-1} g> <= 0. In the core this becomes a status the
    driver turns into the same `ValueError` after the piece returns.
-7. **Loop bodies are the identity on finished carries** (the bounded-loop
-   contract): every update is gated by the done flag.
+7. **Loop bodies need no done checks**: the bounded loop never applies a
+   body to a finished carry (or discards the result). Bodies must still not
+   fail on such carries, since under `vmap` or the strict backend's `cond`
+   they may run on them.
 8. **Peel the first step** of a loop when step 0 is special (Lanczos with
    no previous vector), instead of branching on the step number.
 9. **No hard-coded dtype.** Coordinate arrays take the dtype of the first
@@ -505,11 +508,11 @@ so drifting takes a deliberate change rather than a slip:
      the core fails an ordinary test;
    - its `xp` exposes only the contract names (anything else is an
      `AttributeError`);
-   - `loop` checks that the carry keeps its structure, shapes and dtypes from
-     one step to the next, and the bounded-loop contract (it applies the body
-     once more to a finished carry and checks nothing changed); `cond`
-     checks that both branches return the same structure. These are JAX's
-     rules plus ours, checked without JAX;
+   - `loop` is built with `loop_from_scan` from a scan that checks that the
+     carry keeps its structure, shapes and dtypes from one step to the next
+     and holds arrays rather than Python numbers; `cond` checks that both
+     branches return the same structure. These are JAX's rules, checked
+     without JAX;
    - `cond` evaluates both branches and selects, as `vmap` does, so a branch
      that raises or leaks nan on the data of the other case fails;
    - `static_shapes=True`, so the padded path runs, with capacity 1 or 2 so
@@ -556,8 +559,8 @@ so drifting takes a deliberate change rather than a slip:
   preserves the state exactly.
 - **Contract tests**: the import guard and the `xp` name check; tests of the
   strict backend itself (that it catches an `if` on data, a shape-changing
-  carry, a body that changes a finished carry, a branch that raises); the
-  dataclass flattening round trip.
+  carry, a Python number in a carry, a branch that raises); the dataclass
+  flattening round trip.
 - **Kernel tests**: padding invariance of the dense kernels; chunked block
   operations against full ones for every k and chunk size.
 - **Optional JAX job** in CI (`pip install jax[cpu]`, x64 on): the JAX example
