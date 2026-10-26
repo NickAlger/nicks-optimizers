@@ -44,6 +44,11 @@ vectors and covectors are added, scaled and paired), the Hilbert structure
   covector projection that keeps the Krylov process inside the tangent space.
   [`examples/matrix_completion.py`](examples/matrix_completion.py) completes a
   matrix on the manifold of rank-r matrices.
+- **Compiled iterations, optionally.** A `Backend` record lets a framework
+  such as JAX compile every iteration, your operators included, while
+  numpy stays the default and the library imports no framework.
+  [`examples/jax_p_laplacian.py`](examples/jax_p_laplacian.py) defines a
+  JAX backend in a few lines.
 - **Diagnostics, callback and exact resumption.** Per-iteration records, a
   readable iteration log, `callback(x, info)`, and a `ResumeState` that lets an
   interrupted run continue exactly as if it had not stopped.
@@ -66,13 +71,14 @@ pip install git+https://github.com/NickAlger/nicks-optimizers
 ```
 
 Requires Python 3.10+ and numpy. The distributed p-Laplacian examples also
-need `pip install -e ".[examples]"` and an MPI library (e.g. `pip install mpich`).
+need `pip install -e ".[examples]"` and an MPI library (e.g. `pip install mpich`);
+the JAX example needs `pip install -e ".[jax]"`.
 For development:
 
 ```bash
 git clone https://github.com/NickAlger/nicks-optimizers
 cd nicks-optimizers
-pip install -e ".[test,examples]" mpich   # without the extras, MPI tests are skipped
+pip install -e ".[test,examples,jax]" mpich   # without the extras, MPI and JAX tests are skipped
 pytest          # the test suite
 mypy            # strict type checking of src, tests and examples
 ```
@@ -144,8 +150,8 @@ backend `data` can be any object, including the operators themselves
 example does). `project_covector` is for redundant representations (see
 [Manifolds](#manifolds)).
 
-`backend` (see [Backends](#backends)) says how the iterations are computed;
-the default runs them as plain Python on numpy.
+`backend` (see [Backends](#backends-compiled-iterations)) says how the
+iterations are computed; the default runs them as plain Python on numpy.
 
 The initial `radius` (default 1.0) is an absolute length in the M-norm, so
 scale it to the problem when you know the size of a sensible first step. The
@@ -259,7 +265,7 @@ members in use. Ready-made spaces:
   `dataclasses.replace` for batched versions. Numpy backend only.
 - `array_space(backend)`: one array per vector, computed through the
   backend's array namespace, with blocks allocated at their full capacity:
-  the space for compiling backends (see [Backends](#backends)).
+  the space for compiling backends (see [Backends](#backends-compiled-iterations)).
 
 With a space, pass the metric and the retraction too. Helpers for the simple
 cases:
@@ -397,24 +403,69 @@ With the same options and deterministic functions, the resumed run reproduces
 the uninterrupted one exactly. A state saved at a different point than `x` is
 detected and rejected. See [`examples/checkpointing.py`](examples/checkpointing.py).
 
-## Backends
+## Backends: compiled iterations
 
 The iterations are pure pieces (`trust_region_core`) under a Python driver
 (`trust_region_newton`), which keeps the stopping tests, records, display,
-callback and resuming. A `Backend` record says how the pieces run: how they
-are compiled (`jit`), how they loop (a bounded loop, built from a
-framework's `scan` or `while_loop` by `loop_from_scan` or
-`loop_from_while`), how they branch (`cond`), how arrays are updated
-(`index_update`) and which array namespace they use (`xp`, through a fixed
-list of names common to numpy, `jax.numpy` and the array API standard).
-`numpy_backend`, the default, runs everything as plain Python. The library
-imports no framework; a backend for one is a few lines in the user's code.
+callback and resuming. A `Backend` record says how the pieces are computed:
+how they are compiled (`jit`), how they loop (a bounded loop, built from a
+framework's `scan` or `while_loop` by `loop_from_scan` or `loop_from_while`),
+how they branch (`cond`), how arrays are updated (`index_update`) and which
+array namespace they use (`xp`, through a fixed list of names common to
+numpy, `jax.numpy` and the array API standard). `numpy_backend`, the
+default, runs everything as plain Python. The library imports no
+framework: a backend is a few lines in your code. For JAX
+([`examples/jax_p_laplacian.py`](examples/jax_p_laplacian.py)):
 
-With a compiling backend, the functions given to `trust_region_newton` must
-be traceable by it: no Python control flow on computed values, and arrays
-out (`fun` returns a 0-d array rather than a float). Compiled backends run
-the CG path for now; the Lanczos and flexible solvers follow
-([`dev/jit_backends_plan.md`](dev/jit_backends_plan.md)).
+```python
+import jax
+import jax.numpy as jnp
+from nicks_optimizers import Backend, array_space, loop_from_scan, trust_region_newton
+
+jax.config.update("jax_enable_x64", True)            # the tolerances assume float64
+backend = Backend(jit=jax.jit, loop=loop_from_scan(jax.lax.scan, jax.lax.cond),
+                  cond=jax.lax.cond, index_update=lambda a, i, v: a.at[i].set(v),
+                  xp=jnp, static_shapes=True)
+x, summary = trust_region_newton(fun, grad, hessvec, x0, backend=backend,
+                                 space=array_space(backend), retract=lambda x, s: x + s,
+                                 metric_solve=metric_solve)
+```
+
+Every iteration is then compiled, the Krylov loops, the small dense problems
+and your operators included; the iterates are those of the numpy backend up
+to rounding. `array_space(backend)` stores one array per vector and Krylov
+bases as arrays of fixed capacity, since compiled code has fixed shapes
+(`tuple_tree_space(array_space(backend))` for trees of arrays). Each Lanczos
+or flexible solve starts with room for `krylov_capacity` basis vectors
+(default 32) and doubles it when the basis fills, continuing the solve
+without recomputing anything; the pieces are compiled once per capacity and
+kept for the run. Loops built with `loop_from_while(jax.lax.while_loop)`
+exit early; loops from `scan` run a fixed number of steps, skipping
+finished ones, and work with reverse-mode differentiation.
+
+**Your functions are traced, not called**: `fun`, `grad`, `hessvec`, the
+operators, `retract`, `project_covector`, `point_data` and `operators_at`
+must follow the compiler's rules.
+
+- No Python control flow on computed values: no `if` or `while` on arrays,
+  no `float()`, `int()` or `bool()` of them (use `jnp.where` or
+  `jax.lax.cond`).
+- Arrays out: `fun` returns a 0-d array, not a Python float.
+- `point_data(x)` returns arrays (in tuples or dicts), from which
+  `operators_at(x, data)` rebuilds the operators; objects such as a
+  multigrid hierarchy work with numpy only.
+- `callback(x, info)` is called by the driver between iterations, with
+  concrete arrays: it is not traced.
+
+Compiling takes a few seconds per run (and per new capacity), so compiled
+iterations pay off for long runs and large problems. On CPU
+([`experiments/jax_backend`](experiments/jax_backend/README.md)), compiled CG
+iterations were 1.6 to 2.3 times faster than numpy at n = 4,000 to 16,000,
+and compiled Lanczos and flexible iterations took 0.5 to 1.1 times numpy's
+time; GPUs are not measured yet. The design and the rules the core follows
+are in [`dev/jit_backends_plan.md`](dev/jit_backends_plan.md); a strict numpy
+backend in the tests checks that the core stays traceable without any
+framework installed.
 
 ## Package layout
 

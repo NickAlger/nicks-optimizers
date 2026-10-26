@@ -102,7 +102,7 @@ array rather than a float).
 
 import time
 from functools import partial
-from typing import Any, Callable, Literal, Optional, cast
+from typing import Any, Callable, Literal, Optional, SupportsFloat, cast
 
 import numpy as np
 
@@ -166,7 +166,7 @@ def check_resume_matches(state: ResumeState, f_x0: float, rtol: float = 1e-10) -
 
 
 def trust_region_newton(
-        fun: Callable[[PointT], float],
+        fun: Callable[[PointT], SupportsFloat],
         grad: Callable[[PointT], CovectorT],
         hessvec: Optional[Callable[[PointT, VectorT], CovectorT]],
         x0: PointT,

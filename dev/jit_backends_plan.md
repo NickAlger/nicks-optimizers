@@ -1,7 +1,8 @@
 # Plan: compiled iterations with a pluggable backend
 
-October 2026. **Status: plan agreed (2026-10-25); phases 0 to 7 done
-(2026-10-25), see [Progress](#progress); phase 8 to follow.**
+October 2026. **Status: done.** Plan agreed and all eight phases
+completed on 2026-10-25; see [Progress](#progress) for what was delivered
+and where it deviated from the plan.
 
 ## Summary
 
@@ -774,6 +775,19 @@ New: `backend=`, `point_data=` and `krylov_capacity=` keywords; `Backend`,
   unchanged up to rounding from the block layout; the vendored legacy copy
   stores blocks the same way, so the legacy comparison stays bit for bit.
   Examples on numpy: 0.94 to 1.01 times phase 6.
+- **Phase 8** (graduation): `examples/jax_p_laplacian.py` (the JAX backend
+  record in a dozen lines, a p-Laplacian energy with `jax.grad` and
+  `jax.jvp`, and the four solvers compiled and on numpy);
+  `tests/test_jax_example.py` (compiled runs against numpy for every solver
+  and both loop helpers, bases that grow, trace counts independent of the
+  number of iterations, no host callbacks in any compiled piece), run by a
+  CI job "jax" that installs JAX (the other jobs run without it, and the
+  types job installs it to check the example); a `jax` extra; the README's
+  backend section with the rules for user functions; `fun` typed as
+  returning `SupportsFloat` (a 0-d array under a compiling backend). The
+  vendored legacy copy and its comparison are deleted, as planned: it held
+  bit for bit through phase 7 (with the block layout mirrored). Open items
+  moved to `dev/TODO.md`.
 
 ## Out of scope for now
 

@@ -7,6 +7,11 @@ iteration compiled by JAX, through a `Backend` record written outside the
 library, and with the same results as the numpy backend? And what does it
 buy?
 
+**Graduated** (phase 8 of the plan): the backend record and a demonstration
+are in [`examples/jax_p_laplacian.py`](../../examples/jax_p_laplacian.py),
+tested in CI (`tests/test_jax_example.py`, job "jax"). This directory keeps
+the studies behind it.
+
 **Status.** CG path (phase 3): positive. It works unchanged, gives the same
 iterates, compiles once per run, and is up to 2.3 times faster per
 iteration on CPU. Lanczos and the flexible solver (phases 6 and 7):

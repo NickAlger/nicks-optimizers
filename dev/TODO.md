@@ -293,15 +293,29 @@ preconditioner rescued a cold start at full rank. Write-up:
 
 ## Compiled iterations with a pluggable backend (2026-10-25)
 
-Plan agreed; phases 0 to 7 done (every solver runs on compiling backends;
-each solve starts with a small basis and doubles it, which brings compiled
-Lanczos and flexible iterations to 0.5 to 1.1 times numpy's on CPU; JAX
-results in `experiments/jax_backend/`; phase 8, graduation, to follow): a `Backend` record (jit, a bounded loop
-built from scan or while_loop, cond, index_update, an array namespace) so
-that the pieces of each iteration can be compiled by JAX or another
-framework, with numpy as the default and reference and no framework imports
-in `src/`. Krylov bases double their capacity when full and continue the
-solve. Plan, decisions and phases: `dev/jit_backends_plan.md`.
+Done (all eight phases of `dev/jit_backends_plan.md`): a `Backend` record
+(jit, a bounded loop built from scan or while_loop, cond, index_update, an
+array namespace) lets JAX or another framework compile the pieces of each
+iteration, with numpy as the default and reference and no framework imports
+in `src/`. Every solver runs compiled; each Lanczos or flexible solve starts
+with room for 32 basis vectors and doubles when full, continuing without
+recomputing anything. The JAX backend and a demonstration are in
+`examples/jax_p_laplacian.py` (CI job "jax"); the studies in
+`experiments/jax_backend/`. On CPU, compiled CG iterations were 1.6 to 2.3
+times faster than numpy, Lanczos and flexible 0.5 to 1.1 times numpy's time.
+
+Open:
+
+- **GPU timings**: scan- against while-built loops, and whether XLA on GPU
+  fuses a slice into a matrix product, which would make chunked block
+  products pay (`experiments/jax_backend/blocks.py` has the variants).
+- **Compile once, solve many**: the pieces compile per
+  `trust_region_newton` call (4 to 9 s for Lanczos and flexible); a reusable
+  compiled solver would serve continuations and repeated solves.
+- **numpy overhead on toy problems**: quickstart and checkpointing take 1.6
+  to 1.7 times as long as before the refactor (under 3 s); realistic
+  problems are within a few percent.
+- `vmap` over problems and float32 are not goals so far (see the plan).
 
 ## Communication per Lanczos step
 
