@@ -319,16 +319,30 @@ Open:
 
 ## Metric-aware L-BFGS (in progress, 2026-10-26)
 
-Plan in `dev/lbfgs_plan.md`, all decisions settled. L-BFGS in the geometry
-of M:
+Plan in `dev/lbfgs_plan.md`, all decisions settled.
 
-- s as vectors and y as covectors, B0 = M / gamma, every fit and norm in M;
-- P as an accelerant whose proposals are safeguarded by an angle test in M;
-- user-supplied vector and covector transports;
-- the two-loop recursion in coordinates (batched pairings, positive
-  definite under any transport).
+Done:
 
-Experiments comparing the options follow the build.
+- `lbfgs` in the geometry of M (B0 = M / gamma, every fit and norm in M),
+  with the two-loop recursion in coordinates;
+- user-supplied transports;
+- the fixed paths for a constant metric and a constant preconditioner;
+- P as a safeguarded accelerant.
+
+Notes so far:
+
+- `experiments/lbfgs_checkin/`: the H^1 metric makes lbfgs nearly
+  mesh-independent.
+- `experiments/lbfgs_metrics/`, on one problem: a point-dependent metric
+  (or P) does best with memory 1, since older pairs conflict with a changing
+  base. Both constant and point-dependent metrics stay supported.
+
+Open:
+
+- phase 4 (manifolds, the "corrected" pairings) and phase 5 (JAX);
+- the README;
+- the option study (phase 8), including memory policies for changing
+  metrics.
 
 ## Compiled iterations with a pluggable backend (2026-10-25)
 
