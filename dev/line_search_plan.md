@@ -1,8 +1,9 @@
 # Plan: a line-search Newton-Krylov optimizer
 
-October 2026. **Status: agreed (2026-10-25).** Decisions D1 to D10 were
-settled on review: all as recommended, with step_max an option the user may
-set, off by default (D5).
+October 2026. **Status: agreed (2026-10-25); phases 0 to 5 done, see
+[Progress](#progress); phases 6 and 7 after the check-in.** Decisions D1 to
+D10 were settled on review: all as recommended, with step_max an option the
+user may set, off by default (D5).
 
 ## Goal
 
@@ -330,3 +331,41 @@ is committed separately.
   first one.
 - **Records and display** grow a second family of types; keeping their
   shared parts (SubproblemStats, the Krylov trace) common limits it.
+
+## Progress
+
+- **Phase 0** (24ce709): the package vendored as
+  `tests/nicks_optimizers_baseline/`, and `tests/test_baseline.py` (the
+  backend refactor's harness, restored) comparing 42 trust-region
+  configurations and the subproblem solvers bit for bit. It held through
+  every phase below.
+- **Phase 1** (4dc0513): `krylov_solvers` (the solver machinery and the three
+  solvers) out of `trust_region_subproblem`, which keeps the
+  `solve_tr_subproblem*` functions and re-exports; `newton_core` (the shared
+  outer pieces) out of `trust_region_core`, which keeps rho, the radius update
+  and `step_finish` (eta and radius_max in `TrustRegionOptions`). Addition: a
+  module `newton_driver` for the shared driver helpers (argument checks, the
+  CoreProblem, the compiled step-solve pieces with basis growth, the resume
+  check).
+- **Phase 2** (823bb1b): `dense.solve_projected_newton`, exported.
+- **Phase 3** (a709ece): the line-search mode (`trust_region=False`) of the
+  three solvers, the Gram matrix kept only when needed, and
+  `solve_newton_direction*`. Deviation: the flexible solver falls back to
+  -M^{-1} g, its first basis vector (P may be nonsymmetric, so -P^{-1} g need
+  not descend). With a separate P and truncation, theta are the eigenvalues
+  of T (same signs as the M-Ritz values). The truncating step measures no
+  residual (its M^{-1} solve is skipped under cond).
+- **Phase 4** (29b017d): `line_search.backtracking` (quadratic then cubic
+  interpolation, the rounding allowance, traces), exported.
+- **Phase 5** (185d930): `line_search_finish`, `line_search_newton`, the
+  records and display. Deviation: the line-search modules are
+  `newton_line_search` (the driver and the direction functions),
+  `newton_line_search_core` (the pure piece) and
+  `newton_line_search_diagnostics` (records and text, functions named
+  `format_ls_*`); a fourth direction kind, "fallback", marks the
+  replacement of a non-descent direction. Check-in comparison in
+  `experiments/line_search_vs_trust_region/` (6846513): the line search wins
+  on the convex p-Laplacian with a separate preconditioner (10 against 18
+  iterations, half the Hessian products, 10 products with M instead of 154)
+  or a weak one (up to 4.5 times fewer iterations), the trust region on
+  Rosenbrock's curved valley (half the Hessian products), close elsewhere.
