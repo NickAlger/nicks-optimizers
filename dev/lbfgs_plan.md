@@ -713,3 +713,16 @@ asks for it.
   - A quick check: compiled with JAX on the p-Laplacian (H^1 metric), the
     same 32 iterations as numpy, f to 1e-15. The full JAX tests come in
     phase 5.
+- **Check-in (2026-10-26)**, `experiments/lbfgs_checkin/`:
+  - **The metric.** With the H^1 metric lbfgs is nearly mesh-independent on
+    the p-Laplacian: 25, 33, 41 and 49 iterations for N = 15 to 127,
+    against 150 to 1750 with the Euclidean, L^2 or Jacobi metrics.
+  - **Against the Newton methods.** lbfgs spends the fewest derivative
+    evaluations: 2 to 4 times fewer on Rosenbrock and with the Jacobi
+    metric, 30-40% fewer with H^1. It spends the most solves, three per
+    iteration.
+  - **Safeguards.** No restarts or fallbacks at the defaults, and skipped
+    pairs only on two nonconvex runs. angle_tol has no effect up to 1e-2
+    and hurts at 0.1, so the default 1e-8 stays.
+  - **Scalings.** "y" is the best default; "none" fails with the Euclidean
+    metric but is the best with H^1.
