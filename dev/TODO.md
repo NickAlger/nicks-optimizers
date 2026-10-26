@@ -317,12 +317,18 @@ Open:
 - Wolfe and nonmonotone searches as options of the same loop.
 - The comparison under compilation and on GPUs.
 
-## Metric-aware L-BFGS (planned, 2026-10-25)
+## Metric-aware L-BFGS (in progress, 2026-10-26)
 
-Plan in `dev/lbfgs_plan.md`, decisions D1 to D11 open: L-BFGS with s as
-vectors and y as covectors, H0 = gamma P^{-1}, a user-supplied vector and
-covector transport, and the two-loop recursion in coordinates (three batched
-pairings, positive definite under any transport).
+Plan in `dev/lbfgs_plan.md`, all decisions settled. L-BFGS in the geometry
+of M:
+
+- s as vectors and y as covectors, B0 = M / gamma, every fit and norm in M;
+- P as an accelerant whose proposals are safeguarded by an angle test in M;
+- user-supplied vector and covector transports;
+- the two-loop recursion in coordinates (batched pairings, positive
+  definite under any transport).
+
+Experiments comparing the options follow the build.
 
 ## Compiled iterations with a pluggable backend (2026-10-25)
 

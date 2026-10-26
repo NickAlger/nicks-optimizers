@@ -1,14 +1,15 @@
 # Plan: metric-aware L-BFGS
 
-October 2026. **Status: revised after the first review (2026-10-25).**
+October 2026. **Status: all decisions settled (2026-10-26)**, in progress,
+see [Progress](#progress).
 
-- **Settled:** D2 (user-supplied transports), D4 (new space entries), D6
-  (every curvature test, as options), D7 (restarts), D8 (exact resumption),
-  D10 (fixed M and fixed P, independently), D11 (names).
-- **Reworked after the review** and open again: the role of M (now the
-  principle of the design), D1 and D5 (the initial guess, the scaling and
-  P), D3 (the transport of the stored pairings), D9 (how operators are
-  passed); new: D12 (M required), D13 (how P enters), D14 (the angle test).
+- **First review (2026-10-25)** settled D2, D4, D6 (every curvature test,
+  as options), D7, D8, D10 (fixed M and fixed P, independently) and D11. It
+  reworked the role of M (now the principle of the design), D1, D3, D5 and
+  D9, and added D12 to D14.
+- **Second review (2026-10-26)** agreed to the revised recommendations for
+  D1, D3, D5, D9 and D12 to D14. Several options are uncharted, so once
+  the code is built, experiments compare them (phase 8).
 
 ## Goal
 
@@ -493,7 +494,8 @@ lbfgs(fun, grad, x0, *, space=None, retract=None, transport=None,
 
 ## Decisions
 
-Settled on 2026-10-25:
+All settled: D2, D4, D6, D7, D8, D10 and D11 on 2026-10-25, the rest as
+recommended on 2026-10-26.
 
 - **D2.** User-supplied transports (vector and covector maps, block forms
   optional), `identity_transport`; the identity is the default without a
@@ -510,7 +512,7 @@ Settled on 2026-10-25:
 - **D11.** The names `lbfgs` (in `quasi_newton`), `transport`,
   `lbfgs_memory`, `lbfgs_core`, `lbfgs_diagnostics`; memory = 10.
 
-Open:
+Settled on 2026-10-26, as recommended:
 
 - **D1 (revised). The geometry of the method.** Steps as vectors, gradient
   changes as covectors (not the Riesz convention), base M^{-1}, every fit
@@ -606,6 +608,7 @@ is committed separately.
 | 5 | Compiled | the JAX example and tests extended to lbfgs | job "jax" |
 | 6 | Fixed paths | fixed_metric, fixed_preconditioner | same iterates; call counts |
 | 7 | Wrap-up | README section, a comparison example, TODO | CI |
+| 8 | Experiments | the options against each other: the scalings, gamma0 and initial_step, the pairing modes, the curvature tests, the P modes, angle_tol, the fixed paths; on the test problems, varying metrics, manifolds and unconventional preconditioners; written up in `experiments/lbfgs_options/` with recommended defaults | write-up |
 
 "subspace" (D13) is left for after phase 7, or earlier if the check-in
 asks for it.
