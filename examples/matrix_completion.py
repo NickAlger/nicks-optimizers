@@ -1,5 +1,5 @@
-"""Low-rank matrix completion: trust-region Newton on the manifold of
-rank-r matrices.
+"""Low-rank matrix completion: trust-region Newton and L-BFGS on the
+manifold of rank-r matrices.
 
 Recover an N x M matrix A from K randomly observed entries by fitting a
 rank-r matrix,
@@ -86,12 +86,23 @@ about 120 iterations and 300 CG steps and comes within 15% of it. (The
 Lanczos solver, krylov="lanczos", takes about 90 iterations for a similar
 number of Krylov steps and reaches the same fit.)
 
+Transport (for lbfgs). L-BFGS keeps steps and gradient changes from
+earlier points, so it needs to carry them to the current tangent space.
+The transport projects the ambient matrix xi = dU V^T + U dV^T onto the
+tangent space at the new point, ((I - U' U'^T) xi V', xi^T U'), computed from
+the factors in O((N + M) r^2). Canonical covectors stand for ambient
+functionals in the same way, so the same formula moves them (and returns
+canonical covectors). A projection preserves pairings and lengths only to
+second order in the step, which lbfgs reports as its transport and isometry
+defects. complete_lbfgs fits by L-BFGS: more iterations than the trust
+region, but no Hessian.
+
 Run:  python examples/matrix_completion.py
 """
 
 import dataclasses
 from dataclasses import dataclass
-from typing import NewType, cast
+from typing import Any, NewType, Optional, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -100,10 +111,14 @@ from typing import Literal
 
 from nicks_optimizers import (
     Array,
+    LbfgsSummary,
     RunSummary,
     NumpyBlock,
     VectorSpace,
+    VectorTransport,
+    euclidean_metric_apply,
     euclidean_metric_solve,
+    lbfgs,
     trust_region_newton,
     tuple_tree_space,
 )
@@ -221,6 +236,28 @@ def retract(x: LowRank, v: Tangent) -> LowRank:
     core = RU @ np.block([[np.diag(s), eye], [eye, zero]]) @ RV.T
     Y, sigma, Zt = np.linalg.svd(core)
     return LowRank((QU @ Y[:, :r], sigma[:r], QV @ Zt[:r].T))
+
+
+def transport(x: LowRank, x_new: LowRank, v: Tangent) -> Tangent:
+    """The tangent vector at x_new nearest (in the Frobenius norm) to the
+    matrix xi = dU V^T + U dV^T of v at x: ((I - U' U'^T) xi V', xi^T U'),
+    from the factors (nothing N x M is formed)."""
+    U, _, V = x
+    U1, _, V1 = x_new
+    dU, dV = v
+    xi_V1 = dU @ (V.T @ V1) + U @ (dV.T @ V1)
+    xi_t_U1 = V @ (dU.T @ U1) + dV @ (U.T @ U1)
+    return Tangent((project_out(U1, xi_V1), xi_t_U1))
+
+
+def transport_covector(x: LowRank, x_new: LowRank, w: Cotangent) -> Cotangent:
+    """A canonical covector stands for the ambient functional gU V^T + U gV^T,
+    so it moves by the same projection (and stays canonical)."""
+    return Cotangent(transport(x, x_new, Tangent(w)))
+
+
+fixed_rank_transport: VectorTransport[LowRank, Tangent, Cotangent, TangentBlock, CotangentBlock] = \
+    VectorTransport(vector=transport, covector=transport_covector)
 
 
 # --- the objective -----------------------------------------------------------------
@@ -349,6 +386,21 @@ def complete(samples: Samples, x0: LowRank, saddle_free: bool = False, curvature
         max_iter=max_iter, max_krylov=max_krylov, rtol=rtol)
 
 
+def complete_lbfgs(samples: Samples, x0: LowRank, initial_step: Optional[float] = None,
+                   pairings: Literal["stored", "recomputed", "corrected"] = "stored",
+                   memory: int = 10, display: int = 0, max_iter: int = 2000,
+                   rtol: float = 1e-10) -> tuple[LowRank, LbfgsSummary[Tangent, Cotangent]]:
+    """Fit by L-BFGS with the Frobenius metric (M = I in the components) and
+    the projection transport; initial_step, if given, is the Frobenius length
+    of the first step."""
+    return lbfgs(
+        lambda x: objective(samples, x), lambda x: gradient(samples, x), x0,
+        space=fixed_rank_space(), retract=retract, transport=fixed_rank_transport,
+        metric_solve=euclidean_metric_solve, metric_apply=euclidean_metric_apply,
+        project_covector=gauge_projection, initial_step=initial_step, pairings=pairings,
+        memory=memory, display=display, max_iter=max_iter, rtol=rtol)
+
+
 def add_zero_component(x: LowRank, rng: np.random.Generator) -> LowRank:
     """The same matrix as a point of rank r + 1: one more component of size
     zero, with arbitrary unit vectors u (orthogonal to U) and v (orthogonal
@@ -361,26 +413,32 @@ def add_zero_component(x: LowRank, rng: np.random.Generator) -> LowRank:
 
 
 def complete_by_rank_continuation(samples: Samples, r: int, rng: np.random.Generator,
-                                  stage_rtol: float = 1e-4, rtol: float = 1e-10,
-                                  display: int = 0) -> list[tuple[LowRank, RunSummary]]:
+                                  stage_rtol: float = 1e-4, rtol: float = 1e-10, display: int = 0,
+                                  method: Literal["trust-region", "lbfgs"] = "trust-region"
+                                  ) -> list[tuple[LowRank, Any]]:
     """Fit ranks 1, 2, ..., r in turn, starting from X = 0 and adding one zero
     component between stages. Intermediate ranks are solved to stage_rtol,
     the final one to rtol (with the given display level). Returns the point
     and summary of each stage.
 
-    Each stage after the first starts with the trust-region radius equal to
-    the smallest singular value found so far: the new component is not
-    expected to be larger, and while it is tiny the curvature term makes the
-    model unreliable over larger steps.
+    Each stage after the first starts with the trust-region radius (or, for
+    lbfgs, the length of the first step) equal to the smallest singular
+    value found so far: the new component is not expected to be larger, and
+    while it is tiny the curvature term makes the model unreliable over
+    larger steps.
     """
-    stages: list[tuple[LowRank, RunSummary]] = []
-    x, radius = zero_point(samples.shape, 1, rng), 1.0
+    stages: list[tuple[LowRank, Any]] = []
+    x, length = zero_point(samples.shape, 1, rng), 1.0
     for k in range(1, r + 1):
         if k > 1:
-            radius = float(x[1][-1])
+            length = float(x[1][-1])
             x = add_zero_component(x, rng)
-        x, summary = complete(samples, x, radius=radius, rtol=rtol if k == r else stage_rtol,
-                              display=display if k == r else 0)
+        tol, level = (rtol if k == r else stage_rtol), (display if k == r else 0)
+        summary: Any
+        if method == "lbfgs":
+            x, summary = complete_lbfgs(samples, x, initial_step=length, rtol=tol, display=level)
+        else:
+            x, summary = complete(samples, x, radius=length, rtol=tol, display=level)
         stages.append((x, summary))
     return stages
 
@@ -404,8 +462,11 @@ if __name__ == "__main__":
 
     print(f"\n=== rank continuation from X = 0 up to rank {r}; the last stage in full ===")
     stages = complete_by_rank_continuation(samples, r, rng, display=1)
-    print("\nrank  iterations  Krylov steps  ||X - A|| / ||A||  best rank-k error")
-    for k, (x, summary) in enumerate(stages, start=1):
+    quasi = complete_by_rank_continuation(samples, r, np.random.default_rng(1), method="lbfgs")
+    print("\n      trust region                    lbfgs")
+    print("rank  iterations  Krylov steps  error     iterations  gradients  error     best rank-k error")
+    for k, ((x, summary), (xq, sq)) in enumerate(zip(stages, quasi), start=1):
         steps = sum(rec.subproblem.krylov_steps for rec in summary.iterations)
-        print(f"{k:4d}  {len(summary.iterations):10d}  {steps:12d}  {relative_error(x, a):17.2e}"
-              f"  {best_error(k):17.2e}")
+        print(f"{k:4d}  {len(summary.iterations):10d}  {steps:12d}  {relative_error(x, a):8.2e}  "
+              f"{len(sq.iterations):10d}  {sq.grad_calls:9d}  {relative_error(xq, a):8.2e}  "
+              f"{best_error(k):17.2e}")

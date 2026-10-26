@@ -31,7 +31,7 @@ jobs:
           python quickstart.py > /dev/null
           python checkpointing.py
           python matched_vs_mismatched.py
-          python matrix_completion.py | tail -10
+          python matrix_completion.py | tail -12
           python line_search_vs_trust_region.py
           mpiexec -n 2 python p_laplacian.py --rings 25
           mpiexec -n 2 python p_laplacian.py --rings 25 --metric precond

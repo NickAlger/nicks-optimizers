@@ -4,6 +4,7 @@ examples/matrix_completion.py."""
 from typing import Callable, Literal, Optional
 
 import numpy as np
+import pytest
 
 import matrix_completion as mc
 from nicks_optimizers import (
@@ -159,3 +160,73 @@ def test_cg_and_lanczos_on_the_manifold() -> None:
         assert mc.relative_error(x, a) < 1.2 * best
         fits[krylov] = mc.relative_error(x, a)
     assert abs(fits["auto"] - fits["lanczos"]) < 1e-6 * fits["lanczos"]
+
+
+# --- L-BFGS on the manifold: the transport ---------------------------------------------
+
+
+def ambient(x: mc.LowRank, v: tuple[Array, Array]) -> Array:
+    """The N x M matrix dU V^T + U dV^T of a tangent vector (or of a canonical
+    covector, the ambient functional it stands for)."""
+    out: Array = v[0] @ x[2].T + x[0] @ v[1].T
+    return out
+
+
+def test_transport_is_the_projection_onto_the_new_tangent_space() -> None:
+    """The transport of a tangent vector is the Frobenius projection of its
+    matrix onto the tangent space at the new point, in gauge (U'^T dU' = 0);
+    covectors move the same way. It preserves pairings and lengths to second
+    order in the distance between the points."""
+    rng = np.random.default_rng(5)
+    shape, r = (14, 11), 3
+    x = mc.random_point(shape, r, rng)
+    v, w = mc.random_tangent(x, rng), mc.Cotangent(mc.random_tangent(x, rng))
+    u = mc.random_tangent(x, rng)                                 # the step's direction
+    defects = []
+    for t in (1e-2, 1e-3):
+        x1 = mc.retract(x, mc.Tangent((t * u[0], t * u[1])))
+        U1, _, V1 = x1
+        moved = mc.transport(x, x1, v)
+        assert np.max(np.abs(U1.T @ moved[0])) < 1e-12
+        Z = ambient(x, v)
+        projected = Z - (np.eye(shape[0]) - U1 @ U1.T) @ Z @ (np.eye(shape[1]) - V1 @ V1.T)
+        assert np.max(np.abs(ambient(x1, moved) - projected)) < 1e-12
+        moved_w = mc.transport_covector(x, x1, w)
+        assert np.max(np.abs(U1.T @ moved_w[0])) < 1e-12
+        sp = mc.fixed_rank_space()
+        pairing = sp.pair(w, v)
+        defects.append(abs(sp.pair(moved_w, moved) - pairing) / abs(pairing))
+        length = np.sqrt(sp.pair(mc.Cotangent(moved), moved))
+        assert abs(length - 1.0) < 10 * t ** 2
+    assert 0.005 < defects[1] / defects[0] < 0.02                 # second order: 100x smaller
+
+
+@pytest.mark.parametrize("pairings", ["stored", "recomputed", "corrected"])
+def test_lbfgs_reaches_the_trust_region_fit(pairings: Literal["stored", "recomputed", "corrected"]) -> None:
+    """From X = 0, L-BFGS with the projection transport converges to the fit
+    the trust region finds, with each treatment of the stored pairings."""
+    a, samples, rng = small_problem(3, (120, 90), 4, 4.0)
+    x0 = mc.zero_point((120, 90), 4, rng)
+    x_tr, s_tr = mc.complete(samples, x0)
+    x, s = mc.complete_lbfgs(samples, x0, pairings=pairings)
+    assert s.reason == "converged" and s_tr.reason == "converged"
+    assert abs(mc.relative_error(x, a) - mc.relative_error(x_tr, a)) < 1e-6 * mc.relative_error(x_tr, a)
+    assert abs(s.f - s_tr.f) < 1e-8 * s_tr.f
+    accepted = [r for r in s.iterations if r.accepted]
+    assert all(np.isfinite(r.transport_defect) and np.isfinite(r.isometry_defect) for r in accepted)
+    assert s.vector_transport_calls > len(accepted)
+
+
+def test_lbfgs_rank_continuation_on_fast_decay() -> None:
+    """Rank continuation with L-BFGS (the first step of each stage as long as
+    the smallest singular value so far) tracks the best rank-k error at every
+    stage, as the trust region does."""
+    rng = np.random.default_rng(4)
+    d = 0.25 ** np.arange(10, dtype=float)
+    a = mc.random_low_rank((150, 120), d, rng)
+    samples = mc.sample_uniformly(a, 4 * (150 + 120 - 4) * 4, rng)
+    stages = mc.complete_by_rank_continuation(samples, 4, rng, method="lbfgs")
+    for k, (x, summary) in enumerate(stages, start=1):
+        assert summary.reason == "converged"
+        best = float(np.sqrt(np.sum(d[k:] ** 2) / np.sum(d ** 2)))
+        assert mc.relative_error(x, a) < 1.3 * best
