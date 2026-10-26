@@ -739,3 +739,15 @@ asks for it.
     and with fallbacks; the call counts; resumption both ways; the strict
     backend; refusing a non-identity transport.
   - fixed_preconditioner comes with phase 3.
+- **Note: constant against point-dependent metrics (2026-10-26)**,
+  `experiments/lbfgs_metrics/`, one problem (the p-Laplacian, sparse LU).
+  - **Fixed against general path.** The same iterates with a third of the
+    solves, about 60% of the time.
+  - **The Kacanov metric M(u)** needs the fewest gradients. With memory 1
+    it takes 17 iterations at every N; with memory 10 it degrades on fine
+    meshes (74 iterations at N = 255, 9% unit steps): older pairs conflict
+    with a changing base.
+  - **Cost.** One factorization per point makes it slower than the
+    constant H^1 metric on the fixed path here.
+  - **Both kinds stay supported.** To try: P = Kacanov with M = H^1
+    (phase 3), and memory policies for changing metrics (phase 8).
