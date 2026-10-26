@@ -3,8 +3,9 @@
 Everything here acts on small arrays (projected matrices, coefficient
 vectors), never on the optimizer's vectors, so it is independent of any
 VectorSpace: Rayleigh-Ritz for a projected pencil, an exact solver for the
-trust-region problem on a ball (including the hard case), and the projected
-trust-region problem of a Krylov method.
+trust-region problem on a ball (including the hard case), the projected
+trust-region problem of a Krylov method, and its projected Newton step for
+a line search.
 
 The functions are written for a backend's array namespace (see backend;
 numpy by default) without Python control flow on values, so they run inside
@@ -214,6 +215,58 @@ def solve_projected_trs(T: Coords, G: Optional[Coords], gamma0: Any, radius: Any
     else:
         y_flip = y
     return y, y_flip, lam, model_value, true_model_value, theta
+
+
+def solve_projected_newton(T: Coords, G: Optional[Coords], gamma0: Any, saddle_free: bool = False,
+                           curvature_floor: float = 1e-6, *, backend: Backend = numpy_backend,
+                           k: Optional[Any] = None) -> tuple[Coords, Coords, Any, Any, Any, Coords]:
+    """The Newton step of a Krylov method for a line search: the minimizer
+    of b^T z + 0.5 z^T A_model z without a bound, in M-orthonormal
+    coordinates (A = L^{-1} T L^{-T}, G = L L^T, b = gamma0 L^{-1} e_1, as in
+    solve_projected_trs), with A_model = A, or |A| with its eigenvalues
+    floored at curvature_floor times the largest |theta| (saddle_free).
+
+    Returns (y, y_flip, lam, model_value, true_model_value, theta) like
+    solve_projected_trs, with lam = 0. For the plain model the result is the
+    Galerkin solution y = -gamma0 T^{-1} e_1, which does not depend on G, and
+    it is meaningful only when theta[0] > 0 (T positive definite; a caller
+    that truncates at nonpositive curvature tests it). G = None stands for
+    G = I: with it, theta are the eigenvalues of T, which have the signs of
+    the M-Ritz values (Sylvester), so the plain model needs no G at all.
+    T and G may be padded (see the module docstring), with k active
+    coordinates; the floor is taken over the active theta.
+    """
+    xp = backend.xp
+    m = T.shape[0]
+    if k is not None and not backend.static_shapes and int(k) < m:
+        kk = int(k)
+        y, y_flip, lam, model_value, true_model_value, theta = solve_projected_newton(
+            T[:kk, :kk], None if G is None else G[:kk, :kk], gamma0, saddle_free,
+            curvature_floor, backend=backend)
+        return (_pad(backend, y, m), _pad(backend, y_flip, m), lam, model_value,
+                true_model_value, _pad(backend, theta, m, xp.inf))
+    L, theta, Z = pencil_ritz(T, G, backend=backend, k=k)
+    if saddle_free:
+        active = xp.arange(m) < (m if k is None else k)       # pads come last in theta
+        largest = xp.max(xp.where(active, xp.abs(theta), 0.0))
+        curvature = xp.maximum(xp.abs(theta), curvature_floor * largest)
+    else:
+        curvature = theta
+    positive = curvature > 0.0
+    e1 = xp.where(xp.arange(m) == 0, 1.0, 0.0)
+    b = gamma0 * (e1 if L is None else xp.linalg.solve(L, e1))
+    bh = Z.T @ b                                     # M-Ritz coordinates
+    zh = xp.where(positive, -bh / xp.where(positive, curvature, 1.0), 0.0)
+    z = Z @ zh
+    model_value = b @ z + 0.5 * xp.sum(curvature * zh ** 2)
+    true_model_value = b @ z + 0.5 * xp.sum(theta * zh ** 2)
+    y = z if L is None else xp.linalg.solve(L.T, z)
+    if saddle_free:
+        flipped = Z @ (xp.where(theta < 0.0, -1.0, 1.0) * zh)
+        y_flip = flipped if L is None else xp.linalg.solve(L.T, flipped)
+    else:
+        y_flip = y
+    return y, y_flip, xp.asarray(0.0), model_value, true_model_value, theta
 
 
 def _pad(backend: Backend, v: Coords, m: int, fill: float = 0.0) -> Coords:

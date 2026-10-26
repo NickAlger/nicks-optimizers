@@ -33,7 +33,13 @@ modules.
 
 from .backend import Backend, loop_from_scan, loop_from_while, numpy_backend
 from .criteria import forcing_term, gradient_converged, reduction_ratio
-from .dense import pencil_ritz, solve_projected_trs, solve_sphere_trs, solve_sphere_trs_eig
+from .dense import (
+    pencil_ritz,
+    solve_projected_newton,
+    solve_projected_trs,
+    solve_sphere_trs,
+    solve_sphere_trs_eig,
+)
 from .krylov import (
     CGState,
     LanczosState,
@@ -157,6 +163,7 @@ __all__ = [
     "vector_norm",
     # dense
     "pencil_ritz",
+    "solve_projected_newton",
     "solve_projected_trs",
     "solve_sphere_trs",
     "solve_sphere_trs_eig",
