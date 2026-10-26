@@ -1,23 +1,47 @@
 # Plan: metric-aware L-BFGS
 
-October 2026. **Status: proposed**, decisions D1 to D11 open.
+October 2026. **Status: revised after the first review (2026-10-25).**
+
+- **Settled:** D2 (user-supplied transports), D4 (new space entries), D6
+  (every curvature test, as options), D7 (restarts), D8 (exact resumption),
+  D10 (fixed M and fixed P, independently), D11 (names).
+- **Reworked after the review** and open again: the role of M (now the
+  principle of the design), D1 and D5 (the initial guess, the scaling and
+  P), D3 (the transport of the stored pairings), D9 (how operators are
+  passed); new: D12 (M required), D13 (how P enters), D14 (the angle test).
 
 ## Goal
 
-`lbfgs`: a limited-memory BFGS method that works in the geometry of the
-metric M (and the preconditioner P), on flat spaces and manifolds, with the
-problem pieces of the Newton methods (fun, grad, space, retract, metric_solve,
-metric_apply, precond_solve, operators_at with point data, project_covector),
-their backends (numpy by default, compiled by JAX or another framework, the
-whole iteration in one compiled piece), callback, resumption and a display of
-its own. No Hessian is needed. New ingredient: a **vector transport** supplied
-by the user, which carries the memory from one tangent space to the next.
+`lbfgs`: a limited-memory BFGS method defined in the geometry of the metric
+M, on flat spaces and manifolds. It takes the problem pieces of the Newton
+methods (fun, grad, space, retract, metric_solve, metric_apply,
+precond_solve, project_covector, point data), their backends (numpy by
+default, compiled by JAX or another framework, the whole iteration in one
+compiled piece), callback, resumption and a display of its own. No Hessian
+is needed. New ingredient: a **vector transport** supplied by the user,
+which carries the memory from one tangent space to the next.
 
-Not in scope: Wolfe and extrapolating line searches (deferred, as agreed;
-the design leaves room for them), bounds (L-BFGS-B), trust-region L-BFGS
-(it needs products with B, the compact representation), limited-memory SR1,
-and L-BFGS as a preconditioner for the Newton-Krylov solvers. Each could
-follow on top of this design.
+Not in scope: Wolfe and extrapolating line searches (deferred; the design
+leaves room for them), bounds (L-BFGS-B), trust-region L-BFGS, limited-memory
+SR1, L-BFGS as a preconditioner for the Newton-Krylov solvers.
+
+## The principle: M first
+
+M is the Hilbert structure of the tangent spaces, and it is given by both of
+its operators: M^{-1} (`metric_solve`, the Riesz map from covectors to
+vectors) and M (`metric_apply`). Both are required here (D12); for plain
+numpy arrays both default to the identity. They are not assumed cheap, but
+they are used wherever they make the method cleaner or better motivated.
+Options that spend fewer applications are offered next to the clean
+defaults, with their costs in the work table, so the user can judge the
+trade.
+
+- **M defines everything geometric:** the initial guess B0 = M / gamma,
+  every scaling fit, every norm (stopping, step lengths, angles), and the
+  corrections of inexact transports (D3).
+- **P, if given, is only an accelerant.** It proposes directions; it never
+  defines a norm or a fit. It need not be symmetric or linear (D13): as in
+  the flexible Newton solver, P chooses and M keeps the method safe.
 
 ## Where the metric enters
 
@@ -29,90 +53,150 @@ Typed, the objects of L-BFGS are:
 | g_k = Df(x_k) | Covector | T*_{x_k} |
 | d_k, s_k = alpha_k d_k | Vector | T_{x_k} |
 | y_k = g_{k+1} - (g_k transported) | Covector | T*_{x_{k+1}} |
-| B_k, the Hessian approximation | Vector -> Covector | |
+| B_k, the Hessian approximation | symmetric bilinear form on T_{x_k} (Vector -> Covector) | |
 | H_k = B_k^{-1} | Covector -> Vector | |
-| H0_k = gamma_k P_k^{-1} | Covector -> Vector | |
+| H0_k = gamma_k M_k^{-1} (or a P proposal, D13) | Covector -> Vector | |
 | S, the stored steps | VectorBlock | T_{x_k} |
 | Y, the stored gradient changes | CovectorBlock | T*_{x_k} |
 | rho_i, cross pairings, gamma | Coords | numbers |
 | T_{x -> x'} | Vector at x -> Vector at x' | |
 | Tb_{x -> x'} | Covector at x -> Covector at x' | |
 
-Written this way, textbook L-BFGS has its Euclidean assumptions in a few
-specific places, and each one has a typed replacement:
+Textbook L-BFGS has its Euclidean assumptions in a few specific places, and
+each one has a typed replacement:
 
-| step | textbook (R^n) | metric-aware | operators |
-|---|---|---|---|
-| direction | d = -H g, H0 = gamma I | d = -H g, H0 = gamma P^{-1} (P = M by default) | P^{-1}: the only covector-to-vector map |
-| scaling | gamma = s^T y / y^T y | gamma = <y, s> / <y, P^{-1} y> | P^{-1} |
-| update | s^T q, y^T r, q - a y, r + c s | <q, s_i>, <y_i, r>, covector and vector combinations | none: pairings only |
-| new pair | s = x_{k+1} - x_k, y = g_{k+1} - g_k | s~ = T(alpha d), y = g_{k+1} - Tb(g_k) | transports |
-| old pairs | reused as they are | S <- T(S), Y <- Tb(Y) | transports |
-| curvature test | s^T y > 0 | <y, s~> > 0, relative (D6) | none |
-| stopping | \|\|g\|\|_2 | \|\|g\|\|_{M^{-1}} | M^{-1} |
-| line search | slope g^T d | slope <g, d>; \|\|alpha d\|\|_M only for step_max | M, only for lengths |
+| step | textbook (R^n) | metric-aware |
+|---|---|---|
+| initial guess | B0 = I / gamma | B0 = M / gamma: a multiple of the inner product itself |
+| scaling | gamma = s^T y / y^T y | gamma = <y, s> / <y, M^{-1} y> (or another fit in M, D5) |
+| update | s^T q, y^T r, q - a y, r + c s | <q, s_i>, <y_i, r>, combinations of covectors and of vectors: pairings only |
+| new pair | s = x_{k+1} - x_k, y = g_{k+1} - g_k | s~ = T(alpha d), y = g_{k+1} - Tb(g_k) |
+| old pairs | reused as they are | S <- T(S), Y <- Tb(Y), the stored pairings per D3 |
+| curvature test | s^T y > 0 | pairings, or norms in M (D6) |
+| stopping, lengths, angles | Euclidean | \|\|g\|\|_{M^{-1}}, \|\|d\|\|_M, the angle between -g and d in M |
 
 The update itself needs no metric. It is
-H+ = V* H V + rho s (x) s with V = I - rho y (x) s, and in typed form every
-term is a pairing. Its variational characterization (Nocedal and Wright,
-section 6.1) is also intrinsic: H+ is the symmetric operator closest to H
-with H+ y = s in the weighted norm ||E||_W^2 = tr(W E W E), for any W with
-W s = y. E maps covectors to vectors and W maps vectors to covectors, so the
-trace is defined without coordinates. BFGS is therefore affine covariant:
-under any linear change of variables it maps to itself.
+H+ = V* H V + rho s (x) s with V = I - rho y (x) s, every term a pairing.
+Its variational characterization (Nocedal and Wright, section 6.1) is
+intrinsic too: H+ is the symmetric operator closest to H with H+ y = s in
+the weighted norm ||E||_W^2 = tr(W E W E), for any W with W s = y, and that
+trace needs no coordinates. BFGS is affine covariant: under a linear change
+of variables it maps to itself. So the metric enters through the initial
+guess, its scaling, the transports and the measurements, and nowhere else.
 
-Consequences:
+**A reference test.** With a constant metric M = L L^T, the iterates are
+exactly those of textbook L-BFGS on f(L^{-T} z), mapped back by
+x = L^{-T} z. Checked numerically for the operator, to 1e-15.
 
-- **Only a few places change.** The base H0, the scaling, the transport
-  and the norms. Converting between vectors and covectors happens exactly
-  once per iteration, P^{-1} applied to one covector in the two-loop
-  recursion, and never the other way (M is applied only to measure
-  ||d||_M, D9).
-- **A free reference test.** With a constant metric M = L L^T and
-  H0 = M^{-1}, the iterates are exactly those of textbook L-BFGS on
-  f(L^{-T} z), mapped back by x = L^{-T} z. Checked numerically for the
-  operator, to 1e-15. The method generalizes textbook L-BFGS by a change of
-  variables while M is constant, and goes beyond it when M varies or the
-  space is curved.
+## Initial guess and scaling (D1, D5)
 
-## Transports, and what they are for
+**The base.** H0 = gamma M^{-1}, so B0 = M / gamma.
+
+**The scaling** fits the scaled base to the newest pair, in the M geometry.
+The options:
+
+| scaling | gamma | fits | cost at the new point |
+|---|---|---|---|
+| "y" (default; Shanno-Phua, BB2) | <y, s~> / <y, M^{-1} y> | gamma M^{-1} y = s~, in the M-norm | one M^{-1} solve |
+| "s" (BB1) | <M s~, s~> / <y, s~> | M s~ / gamma = y, in the M^{-1}-norm | one M product |
+| "geometric" | \|\|s~\|\|_M / \|\|y\|\|_{M^{-1}} | equal lengths: \|\|gamma M^{-1} y\|\|_M = \|\|s~\|\|_M | both |
+| "none" | gamma0 throughout | | none |
+
+The three fits are ordered "y" <= "geometric" <= "s", by Cauchy-Schwarz.
+"y" is the conservative textbook choice.
+
+**The first step.** Before any pair is stored:
+
+- gamma0 = 1 (default): B0 = M, the first step is -M^{-1} g. It is a full
+  step when M is scaled like the Hessian.
+- initial_step = l: gamma0 = l / ||g0||_{M^{-1}}, a first step of M-length
+  l. This is the textbook rule typed: Liu and Nocedal take a Euclidean unit
+  step.
+
+After a restart (D7), the last fitted gamma is kept, since it carries
+curvature information.
+
+**Why ||g||_{M^{-1}} is not used as the scaling after the first step.** It
+sets the length of the base step, not the curvature. As ||g|| -> 0 near a
+minimizer, gamma = l / ||g|| would keep base steps of length l while Newton
+steps shrink, which loses superlinear convergence. The fits above measure
+curvature, which stays bounded.
+
+**The denominator follows the base.** In a fit, the denominator is the
+thing being scaled, applied to y. With the base M^{-1} it is
+<y, M^{-1} y>. If the base were P^{-1} and the denominator still
+<y, M^{-1} y>, gamma would be the curvature scale relative to M, applied to
+P^{-1}.
+
+*Example (checked):* the L^2 metric M = h^2 I and the H^1 operator P of the
+comparison example (N = 63), with curvature equal to P, so the right gamma
+is 1. That gamma comes out between 7e-3 (smooth modes) and 3e-5 (rough
+modes). The M-norm fit of gamma P^{-1} y = s gives 1.000 for every mode
+(D13).
+
+## The preconditioner as an accelerant (D13)
+
+The memory is data from f only: any step s and its gradient change y form
+a valid pair, whatever produced the step. So P can never corrupt the
+memory; it can only influence which steps are taken. The two-loop
+recursion splits into a base-independent part and the base:
+
+```
+c  = S^T g               one block pairing                      (<g, s_i>)_i
+a  = R^{-1} c            m x m triangular solve
+q  = g - Y a             one block combination of covectors
+r0 = base(q)             gamma M^{-1} q   or   gamma_P P^{-1}(q)
+e  = Y^T r0              one block pairing of covectors with a vector
+b  = R^{-T} (e + U^T a)  m x m triangular solve
+d  = -(r0 + S (a - b))   one block combination of vectors
+```
+
+Here R = diag(1/rho) + U is upper triangular, in logical order (oldest
+first). The P direction d_P is the same recursion with P^{-1} as the base,
+applied once as a black box. The modes:
+
+- **"safeguarded"** (recommended default when P is given): use d_P if it
+  passes the angle test in M (D14),
+  -<g, d_P> >= angle_tol ||g||_{M^{-1}} ||d_P||_M; otherwise use the M
+  direction (the first half of the recursion is shared). Every direction
+  taken is then gradient-related in the M geometry, which is what global
+  convergence of Armijo backtracking needs, whatever P is: nonsymmetric,
+  nonlinear or stochastic. P only changes the speed.
+- **"trusted"**: d_P with the descent test only. This is classic
+  preconditioned L-BFGS, for a symmetric positive definite P.
+- **"subspace"** (later phase): minimize the BFGS model, built on the M
+  base, over span{d_M, d_P}. The result is never worse than d_M in the
+  model, the flexible solver's guarantee. It needs B applied to d_P (the
+  direct compact form), hence the M-Gram matrix of the memory: one more M
+  product per pair when M is fixed or the transport is isometric, m
+  otherwise.
+
+**The scale of the P base** (option scaling_P):
+
+- "fit" (default): gamma_P = <M P^{-1} y, s~> / <M P^{-1} y, P^{-1} y>, the
+  fit of gamma_P P^{-1}(y) = s~ in the M-norm. It costs one P^{-1} solve
+  and one M product per stored pair. It equals the "y" scaling when P = M,
+  and is defined for any P, since it is a scalar fit of one vector.
+- "none": gamma_P = 1, trusting P's scale (e.g. multigrid on the Hessian).
+
+## Transports
 
 **Flat spaces: the identity, even when M varies.** The stored pairs are
-data about the Hessian: for a quadratic, y = A s exactly, whatever M is. A
-transport that tried to follow the metric would break this. For example, a
-transport isometric from M_x to M_x' = c^2 M_x scales s by 1/c and, to keep
-pairings, y by c, so the pair no longer satisfies B s = y.
-
-How the operator adapts to a new metric: each iteration rebuilds H from the
-newest base gamma_k P_k^{-1} and the stored pairs. The newest secant
-equation H y_k = s_k holds exactly whatever the base, and the older pairs
-pin H approximately along their directions. So when P changes from point to
-point, the stored pairs keep H in place along the directions they have
-seen; the new P shapes H elsewhere, and gamma sets the scale there. This
-happens by construction. The transport's job is only geometric: moving
-vectors between tangent spaces.
+data about the Hessian: for a quadratic, y = A s whatever M is. Each
+iteration rebuilds H from the base at the new point and the stored pairs.
+The newest secant equation H y_k = s_k holds exactly whatever the base, and
+the older pairs pin H approximately along their directions. So a change of
+M is absorbed along the directions the pairs have seen, and gamma sets the
+scale elsewhere.
 
 **The Riesz convention mixes the metric in.** Riemannian L-BFGS (Huang,
-Gallivan and Absil 2015; Ring and Wirth 2012) represents y as a vector
-through the Riesz map:
+Gallivan and Absil 2015; Ring and Wirth 2012) keeps y as a vector,
+M'^{-1} g' - T M^{-1} g. That amounts to the covector transport
+Tb = M' T M^{-1}: with a varying metric on a flat space and T = I it
+changes y (for a quadratic, y is no longer A s). Keeping y a covector
+avoids this (D1).
 
-    y = grad f(x') - T grad f(x) = M'^{-1} g' - T M^{-1} g.
-
-As a covector this is the transport Tb = M' T M^{-1}. With a point-dependent
-metric on a flat space and T = I, that mixes the change of metric into y
-(for a quadratic, y is no longer A s). Keeping y a covector and transporting
-it as one avoids this, and saves the 2(m + 1) metric operations per
-iteration that Riesz-converting the memory would cost (D1).
-
-**Curved spaces.** The user supplies T and Tb: for an embedded manifold,
-typically the projection onto the new tangent space, with the same formula
-on canonical covector representatives. Pairing-preserving pairs,
-<Tb w, T v> = <w, v>, are the ideal; an M-isometric T with
-Tb = M' T M^{-1} is one example. Projections preserve pairings only
-approximately, and the memory below is built to tolerate that.
-
-The transport is a record of functions, given separately like the retraction
-(the point structure):
+**Curved spaces.** The user supplies T and Tb (settled, D2):
 
 ```python
 @dataclass(frozen=True, kw_only=True)
@@ -121,136 +205,194 @@ class VectorTransport(Generic[PointT, VectorT, CovectorT, VectorBlockT, Covector
     covector: Callable[[PointT, PointT, CovectorT], CovectorT]    # Tb_{x -> x'} w
     vector_block: Optional[Callable[[PointT, PointT, VectorBlockT], VectorBlockT]] = None
     covector_block: Optional[Callable[[PointT, PointT, CovectorBlockT], CovectorBlockT]] = None
-
-identity_transport     # flat spaces: nothing is called, nothing is copied
 ```
 
-- **Single vectors.** The memory is transported member by member, through
-  new space entries for reading block members (D4).
-- **Block forms** are optional: one call per block, in the space's block
-  representation (e.g. one batched projection of an array_space block),
-  for when batching pays.
-- **Requirements.** Both maps must be linear, and the covector map must
-  return canonical covectors when project_covector is in use.
+- **Helpers:** `identity_transport` (flat spaces: nothing is called,
+  nothing is copied) and `riesz_covector_transport(vector_transport)`
+  (Tb = M' T M^{-1}: pairing-preserving when T is M-isometric, at two
+  operator applications per covector).
+- **Without block forms**, the memory is transported member by member,
+  through the new space entries (D4).
+- **Requirements:** both maps linear; Tb returns canonical covectors when
+  project_covector is in use.
 
-## The memory, and the two-loop recursion in coordinates
+### What it means to transport B (D3)
 
-**The memory** holds up to m pairs in circular slots of two blocks with
-capacity m:
+B is a symmetric bilinear form. Transporting it means
+T(B)(T u, T v) = B(u, v). As operators, T(B) = Tb B T^{-1} with
+Tb = T^{-*}, the inverse adjoint.
 
-- S, a VectorBlock, and Y, a CovectorBlock;
-- rho_i = 1 / <y_i, s_i> and the cross pairings U_ij = <y_j, s_i> (y_j newer
-  than s_i), both computed when a pair is stored, at the point where it is
-  formed;
-- gamma, the count, and the newest slot.
+- **The pairs.** The secant data B s_i = y_i must become
+  T(B)(T s_i) = T^{-*} y_i: the identity holds for the pairs exactly when
+  the covector transport is the inverse adjoint of the vector transport,
+  i.e. preserves pairings, <Tb w, T v> = <w, v>.
+- **The base.** B0 = (., .)_M / gamma transports to the new base exactly
+  when T is isometric from M_x to M_x'. In a flat space with a varying M,
+  T = I is not isometric, and the base is deliberately the new point's
+  metric.
+- **The stored scalars** are values of bilinear forms on memory vectors.
+  In a flat space, y_j = A_j s_j with A_j the Hessian averaged over step j,
+  so 1/rho_i = A_i(s_i, s_i) and U_ij = <y_j, s_i> = A_j(s_j, s_i). The
+  identity says these values do not change under transport.
 
-The active slots are always a prefix until the memory is full; clearing it
-sets the count to zero.
+That decides between the options:
 
-**The direction.** In logical order (oldest first), with
-R = diag(1/rho) + U upper triangular:
+- **"stored"** (a): rho and U kept from when the pairs were formed. These
+  are exactly the values the identity prescribes, whatever the transports
+  are. The operator is always symmetric positive definite and satisfies the
+  newest secant equation exactly (checked: 2000 random trials with stale
+  pairings).
+- **"recomputed"** (c): rho and U recomputed from the transported pairs
+  after each transport, at m more block pairings per iteration. This
+  equals "stored" when the transports satisfy the identity. Otherwise it
+  inherits their defect, and a recomputed curvature can turn nonpositive;
+  such pairs are dropped. The operator is still positive definite whenever
+  all rho are positive.
+- **"corrected"** (d): enforce the identity on the memory. Replace each
+  transported covector Tb y_j by the nearest covector, in the
+  M'^{-1}-norm, that pairs with the transported steps as y_j paired with
+  the steps before:
 
-```
-c  = S^T g               one block pairing             (<g, s_i>)_i
-a  = R^{-1} c            m x m triangular solve
-q  = g - Y a             one block combination of covectors
-r0 = gamma P^{-1} q      the one covector-to-vector map
-e  = Y^T r0              one block pairing of covectors with a vector (new space entry, D4)
-b  = R^{-T} (e + U^T a)  m x m triangular solve
-d  = -(r0 + S (a - b))   one block combination of vectors
-```
+      y_j' = Tb y_j + sum_l C_jl M' s_l',    C = (Pi - (Tb Y)^T S') G^{-1},
 
-This is the textbook two-loop recursion (Nocedal and Wright, Algorithm 7.4)
-with its 2m sequential pairings replaced by two batched ones, using
-pairings between the y_j and s_i stored when they met. It is the
-Byrd-Nocedal-Schnabel compact form without the m applications of H0 to Y.
-What it computes, for any stored rho > 0 and any U:
+  with G = S'^T M' S' the M'-Gram matrix of the transported steps and Pi
+  the matrix of stored pairings Pi_ji = <y_j, s_i>, all of them (one more
+  block pairing per stored pair). After the correction "stored" and "recomputed" agree. It
+  costs m M products and about 2m block pairings per iteration; G may need
+  regularizing when steps are nearly dependent.
+- **The transport defect.** A free diagnostic, per iteration:
+  delta_k = <Tb g_k, T s_k> / <g_k, s_k> - 1. It is the defect of the
+  identity on data at hand: <Tb g_k, s~> is part of <y, s~> anyway, and
+  <g_k, s_k> = alpha * slope. It is zero for the identity transport, and
+  reported in the records and the display. With an M product, the isometry
+  defect ||T s_k||_{M'} / ||s_k||_M - 1 is reported too.
+
+With the identity transport, all three options are the same, and nothing is
+recomputed.
+
+## The memory
+
+The memory holds up to m pairs in circular slots of S (a VectorBlock) and Y
+(a CovectorBlock), with rho, the cross pairings, both gammas, the count and
+the newest slot. The active slots are a prefix until the memory is full;
+clearing sets the count to zero.
+
+**Storing a pair** (s~, y) at x_{k+1}: write it into the next slot (the
+oldest when full). One block pairing of S with y gives the new row of
+pairings, 1/rho included; "corrected" also needs the new column, from a
+block pairing of Y with s~.
+
+**The recursion** is the one under "The preconditioner as an accelerant":
+the textbook two-loop (Nocedal and Wright, Algorithm 7.4) with its 2m
+sequential pairings replaced by two batched ones. What it computes, for any
+stored rho > 0 and U:
 
     H = W* H0 W + S R^{-T} D R^{-1} S^T,   W = I - Y R^{-1} S^T,  D = diag(1/rho).
 
-- **Exact when the stored pairings are current.** Always with the identity
-  transport, and with any pairing-preserving one.
-- **Safe when they are not.** H is still symmetric and positive definite,
-  and the newest secant equation H y_newest = s_newest holds exactly,
-  because the newest pair is formed at the current point.
+For a symmetric positive definite base, H is symmetric positive definite,
+and H y_newest = s_newest holds exactly.
 
-So no transport, however inexact, can make the direction ascend or the
-operator indefinite. All three properties were checked numerically: 2000
-random trials with transports that do not preserve pairings and arbitrary
-stale U and positive rho (D3).
+## The curvature test (D6: every option)
 
-**Storing a pair** (s~, y) at x_{k+1}: write s~ and y into the next slot
-(the oldest when full); one block pairing of S with y gives the row
-(<y, s_i>)_i, which holds the new cross pairings and 1/rho; zero the stale
-column of the overwritten slot.
+A pair (s~, y) is stored only if:
+
+| test | condition | needs |
+|---|---|---|
+| "relative" (default) | <y, s~> > curvature_tol alpha \|<g_k, d>\| | pairings only; invariant under scaling f and changes of variables; a Wolfe search would keep the ratio above 1 - c2 |
+| "positive" | <y, s~> > 0 | nothing |
+| "dennis-schnabel" | <y, s~> > sqrt(eps) \|\|s~\|\|_M \|\|y\|\|_{M^{-1}} | M s~ and M^{-1} y (shared with the "s" and "y" scalings) |
+| "cautious" (Li and Fukushima) | <y, s~> >= eps_c \|\|g_k\|\|_{M^{-1}}^beta \|\|s~\|\|_M^2 | M s~ |
+
+## The angle test (D14)
+
+-<g, d> >= angle_tol ||g||_{M^{-1}} ||d||_M.
+
+- **For d_P** (safeguarded mode): if it fails, use d_M.
+- **For d_M:** if it fails, the fallback is -gamma M^{-1} g and the memory
+  is cleared.
+- **Cost:** ||d||_M is computed every iteration anyway (one M product), and
+  ||g||_{M^{-1}} is known.
+- **Default threshold:** small (1e-8 proposed, tuned at the check-in). For
+  d = -H g, cos theta >= 2 sqrt(kappa) / (1 + kappa) with kappa the
+  condition number of H in M (Kantorovich), so a healthy quasi-Newton
+  direction trips the test only past kappa ~ 4e16.
 
 ## One iteration
 
-At x_k, with f, the canonical gradient g, its norm for the stopping test and
-the memory at x_k:
+At x_k, with f, the canonical gradient g, ||g||_{M^{-1}} and the memory at
+x_k:
 
-1. **Direction** d = -H_k g by the two-loop recursion. With an empty memory,
-   that is -gamma P^{-1} g, which reuses the gradient norm's M^{-1} g when
-   P = M.
-2. **Slope** <g, d> < 0. Otherwise (rounding or non-finite values), use the
-   fallback -gamma P^{-1} g and clear the memory (D7). If M can be
-   applied, also compute ||d||_M (D9).
-3. **Line search.** Backtracking along retract(x, alpha d) from alpha = 1,
+1. **Direction:**
+   - the two-loop recursion with the M base, or with the P base in the
+     mode of D13;
+   - with an empty memory, the base applied to g, which reuses the
+     gradient norm's M^{-1} g;
+   - ||d||_M; the descent and angle tests (D14).
+2. **Line search:** backtracking along retract(x, alpha d) from alpha = 1,
    capped by step_max (line_search.backtracking, unchanged).
-4. **If accepted:** x_{k+1}, the canonical g_{k+1} and its norm.
-   - Transport: s~ = T(alpha d), Tb(g_k), and the memory (S, Y).
-   - Form y = g_{k+1} - Tb(g_k), canonical.
-   - If <y, s~> > curvature_tol alpha |<g_k, d>| (D6): store the pair, and
-     set gamma = <y, s~> / <y, P^{-1} y> (D5).
-   - Otherwise skip the pair; the memory is still transported.
-5. **If the search fails:** with a nonempty memory, clear it and continue
-   from the next iteration (a restart); with an empty memory, stop with
-   reason "line_search" (D7).
+3. **If accepted:** x_{k+1}, the canonical g_{k+1}, ||g_{k+1}||_{M^{-1}}.
+   - Transport s~ = T(alpha d), Tb(g_k) and the memory; then the D3 mode,
+     and the transport defect.
+   - Form y = g_{k+1} - Tb(g_k).
+   - Curvature test (D6): store the pair and refit gamma (and gamma_P), or
+     skip it.
+4. **If the search fails:** with a nonempty memory, clear it and continue
+   (a restart); with an empty memory, stop with "line_search" (D7).
 
-Steps 1 to 4 form one pure piece of fixed shapes: the capacity is m, and
-nothing grows. The driver keeps the stopping tests, restarts, records,
-display, callback and resumption.
+Steps 1 to 3 form one pure piece of fixed shapes (the capacity is m). The
+driver keeps the stopping tests, restarts, records, display, callback and
+resumption.
 
-```
-init(x0, g0)                -> LbfgsState      x, f, g, point data, norms, empty memory
-lbfgs_step(state, gnorm0)   -> (LbfgsState, RawLbfgsIteration)
-clear(state)                -> LbfgsState      the count set to zero (Python, no compiling)
-```
+## Work per iteration
 
-### Work per iteration
+**Default, no P** ("y" scaling, "stored", "relative" test):
 
-| | fun | grad | M^{-1} | P^{-1} | M | transports | block operations |
+| | fun | grad | M^{-1} | M | P^{-1} | transports | block operations |
 |---|---|---|---|---|---|---|---|
-| P = M | trials | 1 | 3: norm, two-loop, scaling | - | 1 if given (D9) | m+1 vectors, m+1 covectors (none for the identity) | 3 pairings, 2 combinations |
-| separate P | trials | 1 | 1: norm | 2: two-loop, scaling | 1 if given | the same | the same |
-| P = M, fixed (D10) | trials | 1 | 1: norm | - | 1 if given | none | 3 pairings, 3 combinations |
+| per iteration | trials | 1 | 3: norm, base, "y" fit | 1: \|\|d\|\|_M | - | m+1 vectors, m+1 covectors (none for the identity) | 3 pairings, 2 combinations |
 
-- **Reductions** (pairings that are global in a distributed run): about six
-  per iteration. scaling=False saves one solve.
-- **Against the Newton methods:** no Hessian products and no Krylov
-  solves. Each Newton iteration spends 1 + k operator applications for k
-  Krylov steps.
+**With P, safeguarded, "fit":** M^{-1} 1 (the norm), P^{-1} 2 (base, fit),
+M 2 (||d_P||_M, fit). A fallback to d_M adds an M^{-1} solve, and another
+for gamma if it is stale.
 
-With P = M, the honest price of a point-dependent metric is three M^{-1}
-solves per iteration. When P and M are fixed and the transport is the
-identity, the fixed path (D10) stores Z = P^{-1} Y and takes P^{-1} y_k as
-P^{-1} g_{k+1} - P^{-1} g_k from the gradient-norm solves, so that
-r0 = gamma (P^{-1} g - Z a). That is one solve per iteration, with the same
-iterates.
+**The options add:**
+
+| option | adds per iteration |
+|---|---|
+| scaling "s" | 1 M product |
+| scaling "geometric" | 1 M product and 1 M^{-1} solve |
+| curvature tests "dennis-schnabel", "cautious" | shared with the scalings, else 1 M product and 1 M^{-1} solve |
+| "recomputed" (D3) | m block pairings |
+| "corrected" (D3) | m M products, about 2m block pairings |
+| isometry defect | 1 M product |
+| scaling "none", scaling_P "none" | saves the corresponding fit |
+
+**Fixed paths** (D10, settled; each needs the identity transport):
+
+- **fixed_metric=True** (M independent of x): store M^{-1} Y and M S as two
+  more blocks.
+  - M^{-1} y_k = M^{-1} g_{k+1} - M^{-1} g_k comes from the gradient-norm
+    solves.
+  - The base is r0 = gamma (M^{-1} g - (M^{-1} Y) a).
+  - M d = -(gamma q + (M S)(a - b)), so ||d||_M is free; M s~ = alpha M d.
+  - The M-Gram matrix of the memory is available (for "subspace").
+  - An iteration then costs one M^{-1} solve and no M product, for twice
+    the memory.
+- **fixed_preconditioner=True** (P linear and independent of x): store
+  P^{-1} Y. P^{-1} g replaces P^{-1}(q) as the one P^{-1} solve, and the
+  fit's P^{-1} y comes free.
+
+Against the Newton methods: no Hessian products and no Krylov solves.
 
 ## Typing
 
-The memory, the two-loop recursion, the transport and the iteration are
-written generically, in type variables for points, vectors, covectors and
-the two block types, with no Any. Under mypy --strict every operation is
-then checked against its kind: storing y in the vector block, applying T to
-a covector, or combining Y with vector coefficients is a type error. The
-tests use the NewTypes Point, Vector, Covector, VectorBlock and
-CovectorBlock. A small set of deliberately mistyped snippets, kept outside
-mypy's file list, must each fail mypy with the expected error; a test runs
-them through mypy.api, and is skipped where mypy is not installed. That
-pins the typing down: a refactor that turned the core back to Any would
-fail it.
+The memory, the recursion, the transports and the iteration are written
+generically, in type variables for points, vectors, covectors and the two
+block types, with no Any. Under mypy --strict every operation is checked
+against its kind. The tests use the NewTypes. A set of deliberately
+mistyped snippets, kept out of mypy's file list, must each fail mypy with
+the expected error; a test runs them through mypy.api, and is skipped where
+mypy is not installed.
 
 ## Diagnostics and display
 
@@ -259,40 +401,74 @@ fail it.
 | field | meaning |
 |---|---|
 | iteration, f, gnorm, gnorm_ratio | as in the other records |
-| direction | "quasi-newton" (from the memory), "steepest" (empty memory: -gamma P^{-1} g), "fallback" (the memory's direction was not a descent direction) |
-| pairs | pairs in the memory used for the direction |
-| gamma | the scaling of H0 |
-| step_norm | \|\|d\|\|_M, or nan when M is not available |
+| direction | "quasi-newton", "steepest" (empty memory) or "fallback" (failed the tests; memory cleared) |
+| base | "M" or "P": which base the direction used |
+| pairs, gamma, gamma_P | memory in use, and the scalings |
+| step_norm, angle | \|\|d\|\|_M and the cosine in the angle test |
 | slope, alpha, trials, accepted | as in LineSearchRecord |
-| curvature | <y, s~> / (alpha \|<g_k, d>\|): in a flat space 1 - phi'(alpha)/phi'(0), so 1 when the step reached the one-dimensional minimizer, below 1 when short, above when past it |
-| update | "stored", "skipped" or "-" (search failed) |
+| curvature | <y, s~> / (alpha \|<g_k, d>\|): in a flat space 1 - phi'(alpha)/phi'(0), so 1 when the step reached the one-dimensional minimizer |
+| update | "stored", "skipped", "dropped" (pairs removed by "recomputed") or "-" |
+| transport_defect, isometry_defect | D3 diagnostics (0 for the identity; nan when not computed) |
 | restart | whether the memory was cleared after this iteration |
 | elapsed, trace_alpha, trace_f | as in LineSearchRecord |
 
 ```
-  it              f       |g|  |g|/|g0|  mem     direction       |d|      slope     alpha  ls     gamma   curv  update
-   0   2.420000e+01   2.3e+02   1.0e+00    0      steepest   2.3e+02  -5.3e+04   1.2e-02   3   1.0e+00   0.97  stored
-   1   1.913200e+01   9.1e+01   4.0e-01    1  quasi-newton   8.7e-01  -2.1e+01   1.0e+00   1   4.1e-03   1.02  stored
+  it              f       |g|  |g|/|g0|  mem      direction  base       |d|    angle      slope     alpha  ls     gamma   curv    tdef  update
+   0   2.420000e+01   2.3e+02   1.0e+00    0       steepest     M   2.3e+02  1.0e+00  -5.3e+04   1.2e-02   3   1.0e+00   0.97   0e+00  stored
+   1   1.913200e+01   9.1e+01   4.0e-01    1   quasi-newton     M   8.7e-01  6.2e-01  -2.1e+01   1.0e+00   1   4.1e-03   1.02   0e+00  stored
 ```
 
-Level 2 adds the line-search trials (format_ls_trials, shared).
-`LbfgsSummary` has the reason (converged, max_iter, callback, line_search),
-the work (calls of every operator, transports, trials), the restarts and
-the skipped pairs. `LbfgsInfo` is what the callback receives. `LbfgsResume`
-holds gnorm0, next_iteration, f, gamma and the memory, so that resuming is
-exact (D8).
+- **Level 2** adds the line-search trials (format_ls_trials, shared).
+- **LbfgsSummary:** the reason (converged, max_iter, callback,
+  line_search), the work (each operator, transports, trials), the
+  restarts, the skipped pairs, and how often P's proposal was taken.
+- **LbfgsInfo** is what the callback receives; **LbfgsResume** holds the
+  memory, so resuming is exact (D8).
 
-## Reuse
+## Passing the operators (D9)
 
-| component | reuse |
-|---|---|
-| backend, metrics, trees | unchanged |
-| spaces | three new entries (D4), in every constructor and in check_space |
-| line_search (backtracking, statuses), format_ls_trials | unchanged |
-| newton_core | canonical; the operators at a point and the gradient norms, with PointOperators.hessvec optional (D9) |
-| newton_driver | number, check_resumed_f; the shared argument checks split from the Newton-specific ones |
-| criteria (gradient_converged) | unchanged |
-| new | transport (VectorTransport, identity_transport), lbfgs_memory (memory, store, clear, transport, two-loop: generic, pure), lbfgs_core (state, init, lbfgs_step), lbfgs_diagnostics (records, display), quasi_newton (the driver, lbfgs) |
+**Keyword operators only:** metric_solve(x, w), metric_apply(x, v),
+precond_solve(x, w).
+
+Pros:
+
+- the smallest API, with one signature style shared with the transports;
+- nothing to change in PointOperators;
+- fewer ways to do the same thing in docs and tests;
+- with numpy, a user can memoize a per-point setup.
+
+Cons:
+
+- setup that depends on the point is repeated on every call. Assembling
+  M(x), factorizing it, building a multigrid hierarchy: L-BFGS applies the
+  operators 3 to 5 times per point, and point-dependent metrics are the
+  case this method is for.
+- Under compilation, Python-side caching is impossible. Within one compiled
+  piece XLA may merge identical setups, but each point spans two calls of
+  the piece (the norm and fits at the end of one, the base and ||d||_M at
+  the start of the next), so at least two setups per point remain.
+
+**Also operators_at(x, data) with point_data(x)**, as in the Newton
+methods.
+
+Pros:
+
+- the setup is computed once per point and carried in the state between
+  compiled pieces;
+- users can reuse the operators_at they wrote for the Newton methods;
+- the code exists and is tested.
+
+Cons:
+
+- a second way to pass operators;
+- PointOperators.hessvec must become optional (L-BFGS ignores it, the
+  Newton methods still require it);
+- the transports would not see the point data (a later extension could
+  pass data at both points).
+
+*Recommendation:* both, with keyword operators as the documented default.
+operators_at is what makes a point-dependent metric with an expensive setup
+pay one setup per point.
 
 ## API
 
@@ -300,122 +476,103 @@ exact (D8).
 lbfgs(fun, grad, x0, *, space=None, retract=None, transport=None,
       metric_solve=None, metric_apply=None, precond_solve=None,
       operators_at=None, point_data=None, project_covector=None,
-      memory=10, scaling=True, convergence_norm="metric",
-      gtol=0.0, rtol=1e-8, gnorm0=None, max_iter=1000,
-      c1=1e-4, max_backtracks=30, step_max=None, curvature_tol=1e-8,
+      memory=10, scaling="y", gamma0=1.0, initial_step=None,
+      precond_mode="safeguarded", scaling_P="fit",
+      pairings="stored", curvature_test="relative", curvature_tol=1e-8,
+      angle_tol=1e-8, fixed_metric=False, fixed_preconditioner=False,
+      convergence_norm="metric", gtol=0.0, rtol=1e-8, gnorm0=None,
+      max_iter=1000, c1=1e-4, max_backtracks=30, step_max=None,
       display=0, print_fn=print, callback=None, resume=None, g0=None,
       backend=None) -> (x, LbfgsSummary)
 ```
 
-- **Defaults.** As for the Newton methods: without a space, numpy arrays,
-  M = I, x + s and the identity transport; with a space, metric_solve,
+- **Defaults:** without a space, numpy arrays, M = I (both operators), x + s
+  and the identity transport. With a space, metric_solve, metric_apply,
   retract and transport are required.
-- **The rest:** memory is m; scaling turns gamma on (D5); curvature_tol
-  sets the test for storing a pair (D6).
+- **Option names** are provisional, to be fixed in phase 2.
 
 ## Decisions
 
-- **D1. Typed memory.** (a) Steps s_i as vectors and gradient changes y_i
-  as covectors, with H0 = gamma P^{-1} as the only covector-to-vector map.
-  (b) The Riemannian convention: y_i as vectors through the Riesz map.
-  *Recommendation: (a)*. It is exact for quadratics under any metric, it
-  needs no metric operations for the memory, and it is what the typing
-  says.
-- **D2. Transports.** (a) A user-supplied `VectorTransport` with a vector
-  map and a covector map (block forms optional), and `identity_transport`
-  for flat spaces. The identity is the default without a space and the
-  transport is required with one, like retract. (b) Only a vector
-  transport, with Tb = M' T M^{-1} derived through the metric: 2(m + 1)
-  metric operations per iteration, and pairing-preserving only if T is
-  isometric. (c) The identity as the default everywhere. *Recommendation:
-  (a)*. A forgotten transport on a manifold would silently put the memory
-  in the wrong tangent space.
-- **D3. The two-loop recursion.** (a) In coordinates, with rho and the
-  cross pairings stored when a pair is formed: three batched pairings per
-  iteration; the operator is always symmetric positive definite and
-  satisfies the newest secant equation exactly. (b) Sequential over
-  members: always current pairings, but 2m sequential reductions. (c)
-  Coordinates with all pairings recomputed after each transport: the
-  textbook operator under any transport, but m more block pairings per
-  iteration, and a recomputed rho can turn negative. *Recommendation: (a)*,
-  with (c) as a possible later option.
-- **D4. New VectorSpace entries.** `pair_covector_block(C, v, k)` (the
-  pairings <c_i, v>, for e = Y^T r0) and `vector_member(B, j)`,
-  `covector_member(C, j)` (for member-by-member transports; for numpy a
-  view). (a) Required, implemented by every constructor and tested by
-  check_space; nothing outside spaces.py builds a VectorSpace directly.
-  (b) Optional, checked when lbfgs runs. *Recommendation: (a)*.
-- **D5. Initial Hessian and scaling.** B0 = P (M when P = M) with
-  gamma_0 = 1: the first step is -P^{-1} g. That is a full step when P is
-  scaled like the Hessian; otherwise the line search finds the scale in a
-  few trials, the first stored pair fixes gamma, and step_max can cap the
-  step. Then gamma = <y, s~> / <y, P^{-1} y> after each stored pair
-  (scaling=True by default), at one P^{-1} solve per iteration;
-  scaling=False keeps gamma = 1 and saves that solve when P already tracks
-  the Hessian's magnitude. Alternatives: no scaling by default, or the
-  textbook first step of unit length. *Recommendation: as stated.*
-- **D6. Line search and the curvature test.** Reuse backtracking unchanged
-  (Armijo from alpha = 1, step_max off by default), with Wolfe deferred.
-  Store a pair only if <y, s~> > curvature_tol alpha |<g_k, d>|, with
-  curvature_tol = 1e-8. The test uses pairings only, so it is invariant
-  under scaling f and under changes of variables; the ratio is the
-  "curvature" column, which a Wolfe search would keep above 1 - c2.
-  Alternatives: plain <y, s> > 0; Dennis-Schnabel's
-  sqrt(eps) ||s|| ||y||, which needs an M product and an M^{-1} solve; the
-  cautious update of Li and Fukushima. *Recommendation: as stated*, with
-  skip rates measured at the check-in.
-- **D7. Failures.** (a) If the search fails with a nonempty memory, clear
-  the memory and continue from -gamma P^{-1} g (a restart, recorded); stop
-  with "line_search" only when it fails with an empty memory. A non-descent
-  direction from the memory gives the fallback -gamma P^{-1} g and clears
-  the memory. (b) Stop at the first failure, as line_search_newton does.
-  *Recommendation: (a)*. A quasi-Newton direction can be poor because the
-  memory is stale (skipped pairs, a metric that changed a lot), which a
-  restart fixes; the Newton direction carries no such state.
-- **D8. Resuming.** (a) Exact: LbfgsResume carries the memory (the pairs as
-  the user's vectors and covectors, rho, the cross pairings, gamma), which
-  the user saves like x and g. (b) Plain numbers only, so the memory is
-  dropped on resume (one restart). *Recommendation: (a)*.
-- **D9. Operators.** Keyword operators, or operators_at with point_data, as
-  in the Newton methods; PointOperators.hessvec becomes optional (the
-  Newton methods still require it). metric_apply is optional: when given
-  (or with the numpy default M = I), ||d||_M is computed for step_max and
-  the display at one M product per iteration. Without it, |d| shows "-"
-  and step_max is refused. A separate precond_solve does not require
-  metric_apply here. *Recommendation: as stated.*
-- **D10. The fixed path.** `fixed_preconditioner=True` declares that P
-  (and M) do not depend on x; it requires the identity transport. Z =
-  P^{-1} Y is then stored, and a P = M iteration costs one M^{-1} solve
-  instead of three, with the same iterates. (a) In this plan, as phase 5.
-  (b) Later. *Recommendation: (a)*. A constant metric with an expensive
-  solve (the H^1 metric by multigrid) is a main use, and there the solves
-  dominate.
-- **D11. Names.** `lbfgs` in module `quasi_newton`; modules `transport`,
-  `lbfgs_memory`, `lbfgs_core`, `lbfgs_diagnostics`; records LbfgsRecord,
-  LbfgsSummary, LbfgsInfo, LbfgsResume; memory = 10 by default.
-  *Recommendation: these, or yours.*
+Settled on 2026-10-25:
+
+- **D2.** User-supplied transports (vector and covector maps, block forms
+  optional), `identity_transport`; the identity is the default without a
+  space, and the transport is required with one.
+- **D4.** pair_covector_block, vector_member and covector_member as
+  required VectorSpace entries, in every constructor and check_space.
+- **D6.** Every curvature test, as options; "relative" by default.
+- **D7.** Restart (clear the memory) when the line search fails with a
+  nonempty memory; stop when it fails with an empty one; fallback with a
+  cleared memory for a direction that fails the tests.
+- **D8.** Exact resumption, with the memory in LbfgsResume.
+- **D10.** Take advantage of fixed operators, with M and P fixed
+  independently (fixed_metric, fixed_preconditioner).
+- **D11.** The names `lbfgs` (in `quasi_newton`), `transport`,
+  `lbfgs_memory`, `lbfgs_core`, `lbfgs_diagnostics`; memory = 10.
+
+Open:
+
+- **D1 (revised). The geometry of the method.** Steps as vectors, gradient
+  changes as covectors (not the Riesz convention), base M^{-1}, every fit
+  and norm in M; P never defines a norm. *Recommendation: yes.*
+- **D3 (revised). The stored pairings under transport.** "stored" by
+  default: it keeps exactly the values the identity
+  T(B)(T u, T v) = B(u, v) prescribes, and always gives a positive definite
+  operator. "recomputed" (dropping pairs with nonpositive curvature) and
+  "corrected" (the identity enforced on the memory, using M) as options.
+  The transport defect is always reported. *Recommendation: as stated;
+  "corrected" in phase 4.*
+- **D5 (revised). Scaling.** "y" by default; "s", "geometric" and "none"
+  as options. gamma0 = 1 (B0 = M) by default, initial_step for a first step
+  of given M-length; the gradient norm only for the first step.
+  *Recommendation: as stated.*
+- **D9. Operators.** Keyword operators and operators_at, as laid out above.
+  *Recommendation: both, keyword operators the documented default.*
+- **D12 (new). M required.** metric_apply joins metric_solve as a required
+  operator for lbfgs (the identity for numpy arrays without a space). A user
+  whose metric exists only through M^{-1} (a multigrid cycle) passes that
+  cycle as P with a simple M, the library's pattern for separating geometry
+  from acceleration. *Recommendation: yes.*
+- **D13 (new). How P enters.** "safeguarded" by default (P's direction when
+  it passes the angle test in M, else the M direction), "trusted" as an
+  option, "subspace" in a later phase; scaling_P "fit" (in the M-norm) by
+  default, "none" as an option. *Recommendation: as stated.*
+- **D14 (new). The angle test** for every direction (d_P falls back to
+  d_M, d_M to steepest descent with a cleared memory), with angle_tol =
+  1e-8 to be tuned at the check-in. *Recommendation: yes.*
 
 ## Testing
 
-- **Memory and two-loop recursion**, against dense references:
+- **Memory and recursion**, against dense references:
   - with current pairings, coordinates = sequential = the dense BFGS
     recursion;
   - with stale pairings, symmetric, positive definite and the newest
     secant equation exact;
-  - circular slots (the oldest dropped), clearing, capacities 1, 2 and n;
+  - the three pairing modes: equal under pairing-preserving transports;
+    after "corrected", <y_j', s_i'> = <y_j, s_i>, with the correction of
+    least M'^{-1}-norm;
+  - circular slots, clearing, capacities 1, 2 and n;
   - the strict backend.
 - **Equivalences:**
-  - with M = I, the same iterates as a textbook L-BFGS written plainly in
-    the test (the same backtracking and scaling);
+  - with M = I, a textbook L-BFGS written plainly in the test (Euclidean
+    unit first step, Shanno-Phua, the same backtracking);
   - with a constant M = L L^T, the iterates are L^{-T} times textbook
     iterates on f(L^{-T} z);
-  - with a constant separate P, the same with P as the change of variables
-    (M then only measures);
   - all to rounding.
-- **Point-dependent metric, flat space:** a quadratic with a strongly
-  varying M(x) converges, and the pairs are exact.
-- **Manifolds:**
-  - the Rayleigh quotient on the sphere, with projection transports;
+- **Scalings:** the fits solve their least-squares problems, and the order
+  "y" <= "geometric" <= "s" holds.
+- **P:**
+  - "trusted" with a symmetric positive definite P;
+  - "safeguarded" with the preconditioners of the flexible experiments
+    (nonsymmetric, nonlinear, stochastic): convergence, the angle test
+    taking over when P misleads, and the M-norm fit giving gamma_P = 1 when
+    P is the curvature.
+- **Transports:**
+  - a quadratic with a strongly varying M(x) on a flat space (pairs
+    exact);
+  - the Rayleigh quotient on the sphere with projection transports
+    (defects of second order in the step) and with an isometric transport
+    plus riesz_covector_transport (zero pairing defect);
   - fixed-rank matrix completion (tuple trees, project_covector);
   - the distributed numpy space.
 - **The optimizer:**
@@ -423,8 +580,10 @@ lbfgs(fun, grad, x0, *, space=None, retract=None, transport=None,
   - the p-Laplacian;
   - exact resumption, memory included;
   - callback and display;
-  - operator calls counted against the work table: each operator and each
-    transport as many times as it says, none repeated.
+  - operator calls counted against the work tables for every option,
+    none repeated.
+- **Fixed paths:** the same iterates as the general path, and the call
+  counts of the table.
 - **Typing:** mypy --strict on the generic core; the mistyped snippets
   rejected.
 - **Backends:**
@@ -440,41 +599,43 @@ is committed separately.
 | | Phase | Delivers | Gate |
 |---|---|---|---|
 | 0 | Space entries | pair_covector_block, vector_member, covector_member in every constructor; check_space | tests; mypy |
-| 1 | Memory | lbfgs_memory (store, clear, transport member by member and by block, the two-loop recursion), VectorTransport, identity_transport; generic types; the mistyped snippets | dense references; stale-pairing properties; strict backend |
-| 2 | Optimizer | lbfgs_core, the driver, records, display, resumption, callback; PointOperators.hessvec optional | equivalence tests; convergence; resumption; call counts; **check in** with a comparison against the Newton methods on the tests' problems, and Euclidean against H^1 metric on the p-Laplacian over N = 15, 31, 63 |
-| 3 | Varying metrics and manifolds | a point-dependent metric (the p-Laplacian with its linearized, Kacanov-type metric M(u)), the sphere and fixed-rank completion with transports, distributed and tree spaces | tests; examples |
-| 4 | Compiled | the JAX example and tests extended to lbfgs | job "jax" |
-| 5 | Fixed path | fixed_preconditioner (D10) | the same iterates as the general path; call counts |
-| 6 | Wrap-up | README section, a comparison example, TODO | CI |
+| 1 | Memory | lbfgs_memory (store, clear, transport by member and by block, the split recursion, "stored" and "recomputed"), VectorTransport, identity_transport, riesz_covector_transport; generic types; the mistyped snippets | dense references; stale-pairing properties; strict backend |
+| 2 | Optimizer, M only | lbfgs_core, the driver, scalings, curvature tests, angle test, restarts, records, display, resumption, callback; operators_at with PointOperators.hessvec optional | equivalence tests; convergence; resumption; call counts; **check in**: comparison with the Newton methods, Euclidean against H^1 metric on the p-Laplacian over N = 15, 31, 63, skip and restart rates, angle_tol |
+| 3 | The preconditioner | "safeguarded" and "trusted", scaling_P | weird-P tests; call counts |
+| 4 | Varying metrics and manifolds | the p-Laplacian with its linearized, Kacanov-type metric M(u); sphere and fixed-rank completion with transports; "corrected" and the defect diagnostics | tests; examples |
+| 5 | Compiled | the JAX example and tests extended to lbfgs | job "jax" |
+| 6 | Fixed paths | fixed_metric, fixed_preconditioner | same iterates; call counts |
+| 7 | Wrap-up | README section, a comparison example, TODO | CI |
+
+"subspace" (D13) is left for after phase 7, or earlier if the check-in
+asks for it.
 
 ## Risks
 
-- **Nonconvex problems with Armijo only.** Without a Wolfe search, steps
-  can give <y, s> <= 0, and pairs are skipped. Skip rates will be measured
-  at the check-in; Wolfe, with the deferred extrapolating search, is the
-  remedy if they are high.
-- **Transports that do not preserve pairings.** The operator stays positive
-  definite and the newest secant equation exact, but the older pairs'
-  information degrades; restarts and option D3 (c) are the remedies.
+- **Nonconvex problems with Armijo only.** Pairs are skipped when
+  <y, s> <= 0; skip rates will be measured at the check-in. Wolfe, with the
+  deferred extrapolating search, is the remedy if they are high.
+- **Inexact transports.** "stored" stays positive definite and keeps the
+  identity's values, but its covectors carry the transport's defect;
+  "corrected" removes it on the memory, at m M products.
 - **Strongly varying metrics.** The base changes every iteration. Outside
-  the directions the pairs pin down, the stored pairs and the new base can
-  disagree; H stays positive definite, and gamma follows the scale. The
-  p-Laplacian with M(u) in phase 3 tests this.
-- **Solves.** With P = M, three M^{-1} solves per iteration; D10 and
-  scaling=False reduce them.
-- **Copies.** numpy blocks copy on write, so once the memory is full,
-  overwriting a slot copies the block: one copy per iteration, the same
-  order as the block operations.
+  the directions the pairs pin down, the pairs and the new base can
+  disagree; H stays positive definite, and gamma follows the scale. Phase 4
+  tests this on the p-Laplacian with M(u).
+- **Solves.** The clean default spends three M^{-1} solves and one M
+  product per iteration (without P). The fixed paths, scaling="none", and
+  the work table let the user trade.
+- **Many options.** Each needs tests and call counts. They are kept
+  orthogonal (base, scaling, pairing mode, curvature test, fixed paths) so
+  that each is a small, separate branch.
 - **Theory on manifolds.** Superlinear convergence results for Riemannian
-  BFGS assume isometric transports, and some also a locking condition with
+  BFGS assume isometric transports and, for some, a locking condition with
   the retraction (Huang, Gallivan and Absil). Projections are the standard
   practice (Manopt) without these guarantees.
 
 ## References
 
-- Nocedal and Wright, *Numerical Optimization* (2nd ed.), chapters 6 and 7:
-  the variational characterization of BFGS, the two-loop recursion, the
-  scaling of H0.
+- Nocedal and Wright, *Numerical Optimization* (2nd ed.), chapters 6 and 7.
 - Byrd, Nocedal and Schnabel, "Representations of quasi-Newton matrices and
   their use in limited memory methods", Math. Programming 63 (1994).
 - Huang, Gallivan and Absil, "A Broyden class of quasi-Newton methods for
@@ -483,6 +644,8 @@ is committed separately.
   application to shape space", SIAM J. Optim. 22 (2012).
 - Li and Fukushima, "On the global convergence of the BFGS method for
   nonconvex unconstrained optimization problems", SIAM J. Optim. 11 (2001).
+- Liu and Nocedal, "On the limited memory BFGS method for large scale
+  optimization", Math. Programming 45 (1989).
 
 ## Progress
 
