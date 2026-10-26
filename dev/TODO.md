@@ -308,13 +308,21 @@ valleys (Rosenbrock: half the Hessian products).
 
 Open:
 
-- **An extrapolating search, or a remembered step length** (next): on
+- **An extrapolating search, or a remembered step length** (deferred, after
+  L-BFGS; see below): on
   Rosenbrock the backtracking settles at alpha = 0.1 for dozens of
   iterations, where a longer step would be accepted; lengthening steps when
   the first trial is accepted with room to spare, or starting from the
   previous accepted length, may close the gap with the trust region.
 - Wolfe and nonmonotone searches as options of the same loop.
 - The comparison under compilation and on GPUs.
+
+## Metric-aware L-BFGS (planned, 2026-10-25)
+
+Plan in `dev/lbfgs_plan.md`, decisions D1 to D11 open: L-BFGS with s as
+vectors and y as covectors, H0 = gamma P^{-1}, a user-supplied vector and
+covector transport, and the two-loop recursion in coordinates (three batched
+pairings, positive definite under any transport).
 
 ## Compiled iterations with a pluggable backend (2026-10-25)
 
