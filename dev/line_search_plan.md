@@ -1,7 +1,7 @@
 # Plan: a line-search Newton-Krylov optimizer
 
-October 2026. **Status: agreed (2026-10-25); phases 0 to 5 done, see
-[Progress](#progress); phases 6 and 7 after the check-in.** Decisions D1 to
+October 2026. **Status: done (2026-10-25)**: all eight phases, see
+[Progress](#progress). Decisions D1 to
 D10 were settled on review: all as recommended, with step_max an option the
 user may set, off by default (D5).
 
@@ -369,3 +369,15 @@ is committed separately.
   iterations, half the Hessian products, 10 products with M instead of 154)
   or a weak one (up to 4.5 times fewer iterations), the trust region on
   Rosenbrock's curved valley (half the Hessian products), close elsewhere.
+
+  Check-in decision (2026-10-25): go ahead with phases 6 and 7; return to an
+  extrapolating line search afterwards.
+- **Phase 6** (df54b02): `examples/jax_p_laplacian.py` runs both optimizers
+  (`--methods`), the line search compiled with the rest of each iteration;
+  the JAX tests cover the line search (compiled against numpy for every
+  solver with both loop helpers, growing bases, trace counts, no host
+  callbacks).
+- **Phase 7**: `examples/line_search_vs_trust_region.py` (the comparison, run
+  in CI, with a test of its conclusions), the README section "Line-search
+  Newton" and the package layout, `dev/TODO.md` (the extrapolating search
+  next); the vendored baseline and its comparison deleted.

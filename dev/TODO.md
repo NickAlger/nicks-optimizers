@@ -291,6 +291,31 @@ preconditioner rescued a cold start at full rank. Write-up:
 `dev/matrix_completion_preconditioners.md`; code and full tables:
 `experiments/sgd_preconditioner/`.
 
+## Line-search Newton-Krylov (2026-10-25)
+
+Done (`dev/line_search_plan.md`): `line_search_newton`, the inexact Newton
+method of `trust_region_newton` with a backtracking Armijo line search
+(safeguarded quadratic and cubic interpolation, a rounding allowance, an
+optional `step_max`), compiled with the rest of each iteration under a
+backend. The Krylov solvers gained a line-search mode (truncation at
+nonpositive curvature by default, saddle-free with a relative floor; no
+M-Gram matrix for truncating Lanczos with a separate P); the shared parts
+moved to `krylov_solvers`, `newton_core` and `newton_driver`. Comparison
+(`examples/line_search_vs_trust_region.py`,
+`experiments/line_search_vs_trust_region/`): the line search wins on convex
+problems with a separate or weak preconditioner, the trust region in curved
+valleys (Rosenbrock: half the Hessian products).
+
+Open:
+
+- **An extrapolating search, or a remembered step length** (next): on
+  Rosenbrock the backtracking settles at alpha = 0.1 for dozens of
+  iterations, where a longer step would be accepted; lengthening steps when
+  the first trial is accepted with room to spare, or starting from the
+  previous accepted length, may close the gap with the trust region.
+- Wolfe and nonmonotone searches as options of the same loop.
+- The comparison under compilation and on GPUs.
+
 ## Compiled iterations with a pluggable backend (2026-10-25)
 
 Done (all eight phases of `dev/jit_backends_plan.md`): a `Backend` record

@@ -1,11 +1,14 @@
 # nicks-optimizers
 
-Matrix-free optimization methods in Python. The first is `trust_region_newton`:
-an inexact Newton trust-region method built around a **metric** `M`, the
-geometry of the problem, with an optional **preconditioner** `P` as a separate
-accelerant. It takes three structures separately: the vector space (how
-vectors and covectors are added, scaled and paired), the Hilbert structure
-(the metric) and the point structure (the retraction).
+Matrix-free optimization methods in Python: two inexact Newton methods,
+`trust_region_newton` and `line_search_newton`, built around a **metric**
+`M`, the geometry of the problem, with an optional **preconditioner** `P` as
+a separate accelerant. They take three structures separately: the vector
+space (how vectors and covectors are added, scaled and paired), the Hilbert
+structure (the metric) and the point structure (the retraction). The
+sections below describe `trust_region_newton`; `line_search_newton` takes the
+same problem pieces and differs in how it globalizes the step (see
+[Line-search Newton](#line-search-newton)).
 
 - **The metric comes first.** `M(x)` (symmetric positive definite, possibly
   depending on the iterate) shapes the trust region
@@ -29,6 +32,10 @@ vectors and covectors are added, scaled and paired), the Hilbert structure
   exactly in M-orthonormal coordinates (including the hard case). It handles
   a separate `P`, the saddle-free model, and is available for `P = M` on
   request. No Hessian-vector products are spent beyond one per Krylov step.
+- **Trust region or line search.** `line_search_newton` uses the same
+  Krylov solvers, metric and preconditioner with a backtracking Armijo line
+  search instead of a trust region: better on convex problems and with a
+  separate or weak preconditioner, worse in curved valleys.
 - **Saddle-free option.** `saddle_free=True` replaces the Hessian by its absolute
   value *with respect to M* (generalized eigenvalues of `H u = theta M u`), so
   saddle points repel iterates instead of attracting them.
@@ -239,6 +246,86 @@ On the problems studied so far it has not paid off inside a trust region:
 
 See [`dev/TODO.md`](dev/TODO.md).
 
+## Line-search Newton
+
+`line_search_newton` is the same inexact Newton method globalized by a line
+search instead of a trust region. It takes the problem pieces, operators,
+spaces, retractions, point data, backends, callback and resumption of
+`trust_region_newton`, without the radius options:
+
+```python
+from nicks_optimizers import line_search_newton
+
+x, summary = line_search_newton(fun, grad, hessvec, x0, metric_solve=metric_solve,
+                                display=1)
+```
+
+Each iteration solves `H d = -g` over a Krylov space to the same relative
+tolerance as the trust region, then backtracks along `retract(x, alpha d)`
+from `alpha = 1` until the Armijo condition
+`f(retract(x, alpha d)) <= f(x) + c1 alpha <g, d>` holds (with a rounding
+allowance of `10 eps max(1, |f(x)|)`), using safeguarded quadratic and cubic
+interpolation, and moves there. If no trial is accepted within
+`max_backtracks` evaluations of `f` the run stops with reason
+`"line_search"`. `step_max` caps the first trial at `||alpha d||_M <=
+step_max`; there is no cap by default.
+
+Negative curvature is truncated by default, as in Newton-CG: the Krylov
+solve stops when it meets nonpositive curvature and returns the last
+direction with positive curvature, or the preconditioned steepest descent
+direction if that happens at the first step. With `saddle_free=True`
+(Lanczos and flexible solvers) the direction uses `|H|_M` on the Krylov
+space, with its M-Ritz values floored at `curvature_floor` (default `1e-6`)
+times the largest. Every direction is a descent direction. With a separate
+`P`, truncating Lanczos keeps no M-Gram matrix: one product with `M` per
+iteration (for `||d||_M`) instead of one per Krylov step.
+
+The display shows the direction and the line search instead of a radius:
+
+```
+  it              f       |g|  |g|/|g0|      eta    k      stop  neg  direction       |d|      slope     alpha   ls  act/pred
+   3   6.040600e+01   1.0e+02   3.3e-02  1.8e-01    4       tol    0     newton  1.55e+00  -1.29e+02  3.25e-01    2     0.927
+   6   1.949094e+01   3.3e-01   1.1e-04  1.0e-02    2  negative    1  truncated  6.65e-03  -2.20e-03  1.00e+00    1     1.011
+```
+
+(`|d|` is `||d||_M`, `slope` is `<g, d>`, `ls` the evaluations of `f`, and
+`act/pred` the actual over the predicted decrease at the step taken;
+`display=2` adds the Krylov trace and each trial.) The records
+(`LineSearchRecord`), resume state (`LineSearchResume`) and summary
+(`LineSearchSummary`) are their own types; the Krylov statistics are the
+same `SubproblemStats`.
+
+Which to use depends on the problem
+([`examples/line_search_vs_trust_region.py`](examples/line_search_vs_trust_region.py);
+work over a run, CPU, default options):
+
+| problem | method | iterations | f evals | Hessian products | products with M |
+|---|---|---|---|---|---|
+| chained Rosenbrock, n = 20 | trust region | 54 | 55 | 409 | 0 |
+| | line search | 114 | 203 | 1049 | 0 |
+| p-Laplacian (convex), M = P = H^1 | trust region | 10 | 11 | 56 | 0 |
+| | line search | 10 | 20 | 55 | 0 |
+| p-Laplacian, M = L^2, P = H^1 | trust region | 18 | 19 | 117 | 154 |
+| | line search | 10 | 20 | 52 | 10 |
+| p-Laplacian, M = P = diag(H^1) | trust region | 211 | 212 | 2117 | 0 |
+| | line search | 47 | 72 | 2123 | 0 |
+
+In a curved valley the Newton direction overshoots, and backtracking cuts
+it again and again, where the trust region's radius remembers the right
+length. On convex problems the line search takes unit Newton steps; with a
+separate preconditioner it avoids the slow boundary solves of the trust
+region (see [Matched and mismatched metrics](#matched-and-mismatched-metrics)),
+and with a weak one it takes far fewer iterations for the same Krylov work.
+A nearly singular Hessian at the start (here the p-Laplacian at `u = 0`)
+gives a very long first direction, which costs a few extra evaluations of
+`f`; `step_max` avoids them. The trust region remains the robust choice for
+nonconvex problems. More results: [`experiments/line_search_vs_trust_region`](experiments/line_search_vs_trust_region/README.md).
+
+The line search itself, `backtracking(backend, phi, x0, f0, slope, alpha0)`,
+is a pure function that other optimizers can reuse, and the Newton
+directions are available alone as `solve_newton_direction`,
+`solve_newton_direction_cg` and `solve_newton_direction_flexible`.
+
 ## Other representations
 
 `trust_region_newton(..., space=...)` takes a `VectorSpace`: a frozen record of
@@ -405,9 +492,10 @@ detected and rejected. See [`examples/checkpointing.py`](examples/checkpointing.
 
 ## Backends: compiled iterations
 
-The iterations are pure pieces (`trust_region_core`) under a Python driver
-(`trust_region_newton`), which keeps the stopping tests, records, display,
-callback and resuming. A `Backend` record says how the pieces are computed:
+The iterations of both optimizers are pure pieces (`newton_core`,
+`trust_region_core`, `newton_line_search_core`) under a Python driver
+(`trust_region_newton`, `line_search_newton`), which keeps the stopping
+tests, records, display, callback and resuming. A `Backend` record says how the pieces are computed:
 how they are compiled (`jit`), how they loop (a bounded loop, built from a
 framework's `scan` or `while_loop` by `loop_from_scan` or `loop_from_while`),
 how they branch (`cond`), how arrays are updated (`index_update`) and which
@@ -431,8 +519,8 @@ x, summary = trust_region_newton(fun, grad, hessvec, x0, backend=backend,
                                  metric_solve=metric_solve)
 ```
 
-Every iteration is then compiled, the Krylov loops, the small dense problems
-and your operators included; the iterates are those of the numpy backend up
+Every iteration is then compiled, the Krylov loops, the small dense problems,
+the line search (for `line_search_newton`) and your operators included; the iterates are those of the numpy backend up
 to rounding. `array_space(backend)` stores one array per vector and Krylov
 bases as arrays of fixed capacity, since compiled code has fixed shapes
 (`tuple_tree_space(array_space(backend))` for trees of arrays). Each Lanczos
@@ -469,8 +557,9 @@ framework installed.
 
 ## Package layout
 
-Modules in dependency order. The first seven do not depend on the
-trust-region code and are meant to be reused by other optimizers.
+Modules in dependency order. The first eight do not depend on the
+optimizers and are meant to be reused by other methods; `krylov_solvers`,
+`newton_core` and `newton_driver` are shared by the two Newton optimizers.
 
 | module | contents |
 |---|---|
@@ -478,13 +567,20 @@ trust-region code and are meant to be reused by other optimizers.
 | `trees` | tuple trees: `Tree`, `as_tuple_tree`, `tree_map`, `tree_map2`, `tree_leaves` |
 | `spaces` | the vector space structure: `VectorSpace`, `numpy_space`, `numpy_space_with_reductions`, `tuple_tree_space`, `tuple_block_space`, `array_space`, `flat_retraction`, `check_space` |
 | `metrics` | the Hilbert structure, the metric given by operators: `euclidean_metric_solve`, `euclidean_metric_apply`, `direct_sum`, `vector_norm`, `covector_norm`, M-Gram matrix growth |
-| `dense` | small dense linear algebra in coordinates: Rayleigh–Ritz for a projected pencil, the trust-region problem on a ball (with the hard case) |
+| `dense` | small dense linear algebra in coordinates: Rayleigh–Ritz for a projected pencil, the trust-region problem on a ball (with the hard case), the projected trust-region problem and Newton step of a Krylov method |
 | `krylov` | Krylov processes, immutable: preconditioned Lanczos (`lanczos_start`, `lanczos_advance`, `LanczosState`, `lanczos_tridiagonal`) and conjugate gradients (`cg_start`, `cg_curvature`, `cg_advance`, `CGState`, with recurrences for P-norms); optional covector projection for redundant representations |
 | `criteria` | tests shared by inexact Newton methods: `gradient_converged`, `forcing_term`, `reduction_ratio` |
+| `line_search` | backtracking with the Armijo condition, as a pure function: `backtracking`, `LineSearchResult` |
+| `krylov_solvers` | the Krylov solvers of the Newton steps (Lanczos, CG, flexible), in trust-region and line-search modes, as pieces a backend can compile; `SubproblemStats` |
 | `trust_region_subproblem` | the trust-region subproblem over a Krylov space: `solve_tr_subproblem` (Lanczos, any M, saddle-free), `solve_tr_subproblem_cg` (Steihaug-Toint, M = P) and `solve_tr_subproblem_flexible` (any preconditioner) |
-| `trust_region_diagnostics` | records, `ResumeState`, and text output |
-| `trust_region_core` | one iteration as pure pieces a backend can compile; `PointOperators` |
+| `newton_core` | the shared parts of an inexact Newton iteration as pure pieces: the state at a point, the step solve; `PointOperators` |
+| `newton_driver` | what the two drivers share |
+| `trust_region_diagnostics` | records, `ResumeState`, and text output of the trust region |
+| `trust_region_core` | the trust-region update as a pure piece |
 | `trust_region` | `trust_region_newton`, the driver |
+| `newton_line_search_diagnostics` | records, `LineSearchResume`, and text output of the line search |
+| `newton_line_search_core` | the line-search part of an iteration as a pure piece |
+| `newton_line_search` | `line_search_newton`, the driver, and the Newton directions: `solve_newton_direction`, `solve_newton_direction_cg`, `solve_newton_direction_flexible` |
 
 The Lanczos process knows nothing about trust regions or the metric, so the
 same `lanczos_advance` loop serves other consumers, e.g. Ritz values of the
