@@ -458,13 +458,16 @@ def tuple_block_space(*, scale_vector: Callable[[float, VectorT], VectorT],
         return TupleBlock(B.members[:j] + (v,) + B.members[j + 1:], B.capacity)
 
     def pair_block(B: TupleBlock[VectorT], w: CovectorT, k: Any) -> Coords:
+        """Members not set are zero: k may exceed the members set."""
+        pairs = [pair(w, b) for b in B.members[:int(k)]]
         out: Coords = np.zeros(B.capacity)
-        out[:int(k)] = np.array([pair(w, b) for b in B.members[:int(k)]], dtype=float)
+        out[:len(pairs)] = np.array(pairs, dtype=float)
         return out
 
     def pair_covector_block(C: TupleBlock[CovectorT], v: VectorT, k: Any) -> Coords:
+        pairs = [pair(c, v) for c in C.members[:int(k)]]
         out: Coords = np.zeros(C.capacity)
-        out[:int(k)] = np.array([pair(c, v) for c in C.members[:int(k)]], dtype=float)
+        out[:len(pairs)] = np.array(pairs, dtype=float)
         return out
 
     def member(scale: Callable[[float, Any], Any]) -> Callable[[TupleBlock[Any], Any], Any]:
@@ -567,8 +570,8 @@ def check_space(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlo
     tested through pairings on two sample vectors and two sample covectors
     (so it works for any representation), including the block entries (a
     block of capacity 3 with two members, grown to 4, and members beyond k
-    ignored; members read back, and a member not set is zero). Expect
-    rounding level, ~1e-15."""
+    ignored; members read back, and a member not set is zero, also when k
+    counts it). Expect rounding level, ~1e-15."""
     def pair(w: CovectorT, v: VectorT) -> float:
         return float(np.asarray(space.pair(w, v)))
 
@@ -588,6 +591,9 @@ def check_space(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlo
         abs(float(coords(space.pair_block(space.vector_block(v2, 1), w2, 1))[0]) - p22),
         abs(float(coords(space.pair_block(VB, w1, 1))[1])),
         float(np.max(np.abs(coords(space.pair_covector_block(CB, v1, 2)) - np.array([p11, p21, 0.0])))),
+        float(np.max(np.abs(coords(space.pair_block(VB, w1, 3)) - np.array([p11, p12, 0.0])))),
+        float(np.max(np.abs(coords(space.pair_covector_block(CB, v1, 3)) - np.array([p11, p21, 0.0])))),
+        abs(pair(w1, space.combine_vectors(VB, np.array([a, b, 5.0]), 3)) - (a * p11 + b * p12)),
         float(np.max(np.abs(coords(space.pair_covector_block(grown_c, v2, 2))
                             - np.array([p12, p22, 0.0, 0.0])))),
         abs(float(coords(space.pair_covector_block(CB, v1, 1))[1])),
