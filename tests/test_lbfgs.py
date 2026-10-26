@@ -419,3 +419,101 @@ def test_strict_backend_transports_member_by_member() -> None:
     _, run = lbfgs(p["fun"], p["grad"], p["x0"], backend=strict_backend, **options)
     assert [(r.direction, r.trials) for r in run.iterations] == [(r.direction, r.trials) for r in ref.iterations]
     assert abs(run.f - ref.f) < 1e-12 and run.vector_transport_calls == ref.vector_transport_calls
+
+
+# --- a constant metric: fixed_metric -------------------------------------------------------
+
+
+def constant_metric(n: int, seed: int = 6) -> Array:
+    Q = np.linalg.qr(np.random.default_rng(seed).standard_normal((n, n)))[0]
+    out: Array = Q @ np.diag(np.geomspace(0.1, 10.0, n)) @ Q.T
+    return out
+
+
+@pytest.mark.parametrize("scaling,test", [("y", "relative"), ("s", "dennis-schnabel"),
+                                          ("geometric", "cautious"), ("none", "positive")])
+def test_fixed_metric_gives_the_general_run_with_one_solve_per_iteration(scaling: Scaling,
+                                                                         test: CurvatureTest) -> None:
+    """With a constant metric, fixed_metric makes the same decisions and
+    iterates (to rounding: M^{-1} y and the base are formed by linearity) and
+    applies M^{-1} once per point and M never."""
+    fun, grad, x0 = convex()
+    M = constant_metric(x0.shape[0])
+    calls = dict(solve=0, apply=0)
+    options: dict[str, Any] = dict(
+        metric_solve=counted(lambda x, w: np.linalg.solve(M, w), calls, "solve"),
+        metric_apply=counted(lambda x, v: M @ v, calls, "apply"), scaling=scaling, curvature_test=test,
+        initial_step=1.0, max_iter=400)
+    general, sg = iterates(fun, grad, x0, **options)
+    calls.update(solve=0, apply=0)
+    fixed, sf = iterates(fun, grad, x0, fixed_metric=True, **options)
+    assert [(r.direction, r.trials, r.update) for r in sf.iterations[:60]] == \
+        [(r.direction, r.trials, r.update) for r in sg.iterations[:60]]
+    assert max(rel(a, b) for a, b in zip(fixed[:60], general[:60])) < 1e-9
+    accepted = sum(r.accepted for r in sf.iterations)
+    assert sf.metric_solve_calls == calls["solve"] == 1 + accepted
+    assert sf.metric_apply_calls == calls["apply"] == 0
+    # ||d||_M from the blocks (M d = gamma q + W (a - b)), not from a product
+    # with M; the steps are small next to x, so their rounding differences
+    # grow sooner than the iterates'
+    assert all(abs(a.step_norm - b.step_norm) <= 1e-9 * b.step_norm
+               for a, b in zip(sf.iterations[:30], sg.iterations[:30]))
+
+
+def test_fixed_metric_on_rosenbrock_with_fallbacks() -> None:
+    """The fallback direction and a cleared memory work on the fixed path:
+    the same run as the general path while rounding allows."""
+    a, sa = iterates(rosen_fun, rosen_grad, X0, angle_tol=0.95, max_iter=200)
+    b, sb = iterates(rosen_fun, rosen_grad, X0, angle_tol=0.95, max_iter=200, fixed_metric=True)
+    assert any(r.direction == "fallback" for r in sb.iterations[:40])
+    assert [r.direction for r in sb.iterations[:40]] == [r.direction for r in sa.iterations[:40]]
+    assert max(rel(u, v) for u, v in zip(a[:40], b[:40])) < 1e-9
+    assert sb.metric_apply_calls == 0
+
+
+def test_resuming_with_a_fixed_metric() -> None:
+    """Resuming keeps the metric blocks (bitwise the same run); a state saved
+    without them (by a run on the general path) gets them recomputed."""
+    fun, grad, x0 = convex()
+    M = constant_metric(x0.shape[0])
+    options: dict[str, Any] = dict(metric_solve=lambda x, w: np.linalg.solve(M, w),
+                                   metric_apply=lambda x, v: M @ v)
+    full, s_full = iterates(fun, grad, x0, fixed_metric=True, **options)
+    for fixed_first in (True, False):
+        saved: dict[str, Any] = {}
+
+        def stop_at_15(x: Any, info: LbfgsInfo[Any, Any]) -> bool:
+            if info.record.iteration == 14:
+                saved.update(x=np.array(x), resume=info.resume, g=np.array(info.g))
+                return True
+            return False
+        lbfgs(fun, grad, x0, callback=stop_at_15, fixed_metric=fixed_first, **options)
+        assert bool(saved["resume"].metric_pairs) == fixed_first
+        rest, second = iterates(fun, grad, saved["x"], resume=saved["resume"], g0=saved["g"],
+                                fixed_metric=True, **options)
+        assert all(r.accepted for r in s_full.iterations[:15])
+        if fixed_first:
+            assert all(np.array_equal(u, v) for u, v in zip(full[15:], rest)) and len(full) == 15 + len(rest)
+        else:                    # rest[0] is the general run's 15th iterate
+            assert max(rel(u, v) for u, v in zip(full[15:45], rest[:30])) < 1e-9
+            assert second.metric_solve_calls == 1 + 10 + sum(r.accepted for r in second.iterations)
+
+
+def test_fixed_metric_needs_the_identity_transport() -> None:
+    p = sphere_problem()
+    with pytest.raises(ValueError):
+        lbfgs(p["fun"], p["grad"], p["x0"], fixed_metric=True, max_iter=1, **p["options"])
+
+
+def test_strict_backend_with_a_fixed_metric() -> None:
+    options: dict[str, Any] = dict(retract=lambda x, s: x + s, transport=identity_transport,
+                                   metric_solve=lambda x, w: w / (1.0 + np.arange(20.0)),
+                                   metric_apply=lambda x, v: v * (1.0 + np.arange(20.0)),
+                                   max_iter=40, memory=5, fixed_metric=True)
+    _, ref = lbfgs(rosen_fun, rosen_grad, X0, space=numpy_space, **options)
+    _, run = lbfgs(lambda x: 100.0 * np.sum((x[1:] - x[:-1] ** 2) ** 2) + np.sum((1.0 - x[:-1]) ** 2),
+                   rosen_grad, X0, space=array_space(strict_backend), backend=strict_backend, **options)
+    assert [(r.direction, r.trials, r.update) for r in run.iterations] == \
+        [(r.direction, r.trials, r.update) for r in ref.iterations]
+    assert max(abs(a.f - b.f) / max(abs(b.f), 1.0) for a, b in zip(run.iterations, ref.iterations)) < 1e-10
+    assert run.metric_apply_calls == 0

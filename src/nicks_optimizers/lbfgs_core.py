@@ -40,6 +40,7 @@ from .lbfgs_memory import (
     memory_transport,
     two_loop_finish,
     two_loop_project,
+    apply_inverse_fixed,
 )
 from .line_search import ARMIJO, backtracking
 from .newton_core import PointOperators
@@ -90,6 +91,10 @@ class LbfgsProblem:
                        ||g||_{M^{-1}} ||d||_M (else -gamma M^{-1} g, and the
                        memory is cleared)
       c1, max_backtracks, step_max   the line search (line_search.backtracking)
+      fixed_metric     M does not depend on x (and the transport is the
+                       identity): M^{-1} y and M s are kept with each pair, so
+                       an iteration applies M^{-1} once (the gradient norm)
+                       and M never, with the same iterates
     """
     fun: Callable[[Any], Any]
     grad: Callable[[Any], Any]
@@ -113,6 +118,7 @@ class LbfgsProblem:
     c1: float
     max_backtracks: int
     step_max: Optional[float]
+    fixed_metric: bool = False
 
 
 @backend_state
@@ -239,7 +245,8 @@ def init(problem: LbfgsProblem, backend: Backend, x0: Any, g0: Any) -> LbfgsStat
     else:
         gamma = xp.where(gnorm > 0.0, problem.initial_step / xp.where(gnorm > 0.0, gnorm, 1.0), 1.0)
     return LbfgsState(x=x0, f=problem.fun(x0), g=g, data=data, Mg=Mg, gnorm=gnorm, metric_gnorm=gnorm,
-                      memory=memory_empty(problem.space, backend, Mg, g, problem.memory),
+                      memory=memory_empty(problem.space, backend, Mg, g, problem.memory,
+                                          metric_blocks=problem.fixed_metric),
                       gamma=gamma, stamp=xp.asarray(0))
 
 
@@ -281,31 +288,41 @@ def lbfgs_step(problem: LbfgsProblem, backend: Backend, state: LbfgsState
     memory = state.memory
     pairs = memory_count(backend, memory)
 
-    # The direction: H g with the base gamma M^{-1}; with an empty memory the
-    # base acts on g itself, and M^{-1} g is known.
-    layout = memory_layout(backend, memory)
-    q, a = two_loop_project(space, backend, memory, layout, state.g)
-    u, base_solves = run_cond(backend, pairs > 0, lambda q: (solve(q), xp.asarray(1)),
-                              lambda q: (state.Mg, xp.asarray(0)), q)
-    d = space.scale_vector(-1.0, two_loop_finish(space, backend, memory, layout, a,
-                                                 space.scale_vector(state.gamma, u)))
+    # The direction: H g with the base gamma M^{-1}. With a constant metric it
+    # comes from the metric blocks, with M d, at no cost; otherwise the base
+    # costs a solve (with an empty memory it acts on g itself, and M^{-1} g is
+    # known) and ||d||_M a product with M.
+    fixed = problem.fixed_metric
+    if fixed:
+        Hg, MHg = apply_inverse_fixed(space, backend, memory, state.g, state.Mg, state.gamma)
+        d, Md = space.scale_vector(-1.0, Hg), space.scale_covector(-1.0, MHg)
+        base_solves, direction_applies = xp.asarray(0), xp.asarray(0)
+    else:
+        layout = memory_layout(backend, memory)
+        q, a = two_loop_project(space, backend, memory, layout, state.g)
+        u, base_solves = run_cond(backend, pairs > 0, lambda q: (solve(q), xp.asarray(1)),
+                                  lambda q: (state.Mg, xp.asarray(0)), q)
+        d = space.scale_vector(-1.0, two_loop_finish(space, backend, memory, layout, a,
+                                                     space.scale_vector(state.gamma, u)))
+        Md, direction_applies = apply(d), xp.asarray(1)
     slope = space.pair(state.g, d)
-    step_norm = _norm(xp, space.pair(apply(d), d))
+    step_norm = _norm(xp, space.pair(Md, d))
     denominator = state.metric_gnorm * step_norm
     cosine = -slope / xp.where(denominator > 0.0, denominator, 1.0)
     good = (xp.isfinite(slope) & xp.isfinite(step_norm) & (slope < 0.0)
             & (cosine >= problem.angle_tol))
 
-    def keep(_: Any) -> tuple[Any, Any, Any, Any]:
-        return d, slope, step_norm, cosine
+    def keep(_: Any) -> tuple[Any, Any, Any, Any, Any]:
+        return d, Md, slope, step_norm, cosine
 
-    def steepest(_: Any) -> tuple[Any, Any, Any, Any]:
-        """-gamma M^{-1} g: its slope and M-norm follow from ||g||_{M^{-1}}."""
+    def steepest(_: Any) -> tuple[Any, Any, Any, Any, Any]:
+        """-gamma M^{-1} g: M d = -gamma g, and its slope and M-norm follow
+        from ||g||_{M^{-1}}."""
         gamma, gnorm = state.gamma, state.metric_gnorm
-        return (space.scale_vector(-gamma, state.Mg), -gamma * gnorm ** 2, gamma * gnorm,
-                xp.asarray(1.0))
+        return (space.scale_vector(-gamma, state.Mg), space.scale_covector(-gamma, state.g),
+                -gamma * gnorm ** 2, gamma * gnorm, xp.asarray(1.0))
 
-    d, slope, step_norm, cosine = run_cond(backend, good, keep, steepest, None)
+    d, Md, slope, step_norm, cosine = run_cond(backend, good, keep, steepest, None)
     direction = xp.where(pairs == 0, STEEPEST, xp.where(good, QUASI_NEWTON, FALLBACK))
     memory = run_cond(backend, direction == FALLBACK, lambda m: memory_clear(space, backend, m),
                       lambda m: m, memory)
@@ -346,21 +363,28 @@ def lbfgs_step(problem: LbfgsProblem, backend: Backend, state: LbfgsState
         ys = space.pair(y, s1)
         defect = (xp.asarray(0.0) if identity
                   else space.pair(gk, s1) / xp.where(gs != 0.0, gs, 1.0) - 1.0)
-        ss = space.pair(ops1.metric_apply(s1), s1) if need_ss else nan
-        yy = space.pair(y, ops1.metric_solve(y)) if need_yy else nan
+        if fixed:             # M^{-1} y and M s by linearity, from what is known
+            metric_pair = (space.axpy_vector(-1.0, state.Mg, Mg1), space.scale_covector(found.alpha, Md))
+            ss, yy = space.pair(metric_pair[1], s1), space.pair(y, metric_pair[0])
+        else:
+            metric_pair = None
+            ss = space.pair(ops1.metric_apply(s1), s1) if need_ss else nan
+            yy = space.pair(y, ops1.metric_solve(y)) if need_yy else nan
         floor = _floor(problem, xp, gs, ss, yy, state.metric_gnorm)
         ok = xp.isfinite(ys) & (ys > floor)
         dropped = zero
         if problem.pairings == "recomputed" and not identity:
             moved, dropped = memory_recompute(space, backend, moved)
-        stored = run_cond(backend, ok, lambda m: memory_store(space, backend, m, s1, y, state.stamp, floor),
+        stored = run_cond(backend, ok,
+                          lambda m: memory_store(space, backend, m, s1, y, state.stamp, floor,
+                                                 metric_pair=metric_pair),
                           lambda m: m, moved)
         fit = _fit(problem, xp, ys, ss, yy, state.gamma)
         gamma = xp.where(ok & xp.isfinite(fit) & (fit > 0.0), fit, state.gamma)
         new = LbfgsState(x=x1, f=f1, g=g1, data=data1, Mg=Mg1, gnorm=gnorm1, metric_gnorm=gnorm1,
                          memory=stored, gamma=gamma, stamp=state.stamp + xp.where(ok, 1, 0))
-        solves = xp.asarray(1 + int(need_yy))
-        applies = xp.asarray(int(need_ss))
+        solves = xp.asarray(1 + int(need_yy and not fixed))
+        applies = xp.asarray(int(need_ss and not fixed))
         if identity:
             vectors = covectors = blocks = zero
         else:
@@ -381,5 +405,6 @@ def lbfgs_step(problem: LbfgsProblem, backend: Backend, state: LbfgsState
         slope=slope, alpha=found.alpha, trials=found.trials, status=found.status,
         actual=state.f - found.f, ys=ys, curvature=curvature, update=update, dropped=dropped,
         transport_defect=defect, step=s, trace_alpha=found.trace_alpha, trace_f=found.trace_f,
-        metric_solves=base_solves + solves, metric_applies=1 + applies, vector_transports=vectors,
+        metric_solves=base_solves + solves, metric_applies=direction_applies + applies,
+        vector_transports=vectors,
         covector_transports=covectors, block_transports=blocks)

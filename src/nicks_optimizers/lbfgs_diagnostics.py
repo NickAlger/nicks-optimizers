@@ -113,6 +113,10 @@ class LbfgsResume(Generic[VectorT, CovectorT]):
       floors          the curvature threshold each pair passed when stored
       slots           the slot of each pair in the memory's blocks (kept on
                       resuming, so the block operations add in the same order)
+      metric_pairs    with fixed_metric, (M^{-1} y_i, M s_i) for each pair
+                      (empty otherwise; when resuming with fixed_metric
+                      without them, they are recomputed: one solve and one
+                      product per pair)
 
     The pairs are the user's vectors and covectors: save them like x and g.
     """
@@ -124,6 +128,7 @@ class LbfgsResume(Generic[VectorT, CovectorT]):
     pairings: tuple[tuple[float, ...], ...]
     floors: tuple[float, ...]
     slots: tuple[int, ...]
+    metric_pairs: tuple[tuple[VectorT, CovectorT], ...] = ()
 
 
 @dataclass(frozen=True, kw_only=True)

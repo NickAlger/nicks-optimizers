@@ -726,3 +726,16 @@ asks for it.
     and hurts at 0.1, so the default 1e-8 stays.
   - **Scalings.** "y" is the best default; "none" fails with the Euclidean
     metric but is the best with H^1.
+- **Fixed metric (2026-10-26)**, moved ahead of phase 3 on review.
+  - `fixed_metric=True` keeps Z = M^{-1} Y and W = M S slot for slot
+    (Memory.Z, Memory.W).
+  - The base is gamma (M^{-1} g - Z a), with M d = gamma q + W (a - b);
+    M^{-1} y = M^{-1} g_new - M^{-1} g and M s = alpha M d. So an iteration
+    applies M^{-1} once (the gradient norm) and M never.
+  - It requires the identity transport and a fixed linear M^{-1}.
+  - LbfgsResume.metric_pairs makes resumption bitwise. A state saved
+    without them gets them recomputed (one solve and one product per pair).
+  - Tests: the general path's decisions and iterates, for four option sets
+    and with fallbacks; the call counts; resumption both ways; the strict
+    backend; refusing a non-identity transport.
+  - fixed_preconditioner comes with phase 3.

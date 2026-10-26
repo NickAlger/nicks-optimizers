@@ -46,6 +46,7 @@ from .lbfgs_core import (
     Scaling,
     init,
     lbfgs_step,
+    point_operators,
     restart,
 )
 from .lbfgs_diagnostics import (
@@ -69,7 +70,7 @@ def _check(*, space: Any, retract: Any, transport: Any, metric_solve: Any, metri
            operators_at: Any, point_data: Any, memory: int, scaling: str, gamma0: float,
            initial_step: Optional[float], pairings: str, curvature_test: str,
            curvature_tol: Optional[float], angle_tol: float, c1: float, max_backtracks: int,
-           step_max: Optional[float]) -> None:
+           step_max: Optional[float], fixed_metric: bool) -> None:
     """Raise ValueError for an inconsistent combination of arguments."""
     if operators_at is not None and (metric_solve is not None or metric_apply is not None):
         raise ValueError("operators_at gives the operators at a point: pass no metric_solve or "
@@ -108,6 +109,8 @@ def _check(*, space: Any, retract: Any, transport: Any, metric_solve: Any, metri
         raise ValueError(f"max_backtracks must be positive, not {max_backtracks}")
     if step_max is not None and not step_max > 0.0:
         raise ValueError(f"step_max must be positive (or None for no cap), not {step_max}")
+    if fixed_metric and transport is not None and transport is not identity_transport:
+        raise ValueError("fixed_metric needs a flat space: the identity transport")
 
 
 def _resume_of(space: VectorSpace[Any, Any, Any, Any], state: LbfgsState, gnorm0: float, it: int,
@@ -117,11 +120,14 @@ def _resume_of(space: VectorSpace[Any, Any, Any, Any], state: LbfgsState, gnorm0
     stamp = np.asarray(memory.stamp)
     order = [int(j) for j in np.argsort(stamp, kind="stable") if stamp[j] >= 0]
     P = np.asarray(memory.pairings)[np.ix_(order, order)]
+    Z, W = memory.Z, memory.W
     return LbfgsResume(
         gnorm0=gnorm0, next_iteration=it, f=f, gamma=number(state.gamma),
         pairs=tuple((space.vector_member(memory.S, j), space.covector_member(memory.Y, j)) for j in order),
         pairings=tuple(tuple(float(v) for v in row) for row in P),
-        floors=tuple(float(np.asarray(memory.floor)[j]) for j in order), slots=tuple(order))
+        floors=tuple(float(np.asarray(memory.floor)[j]) for j in order), slots=tuple(order),
+        metric_pairs=() if Z is None or W is None else
+        tuple((space.vector_member(Z, j), space.covector_member(W, j)) for j in order))
 
 
 def lbfgs(
@@ -153,6 +159,7 @@ def lbfgs(
         resume: Optional[LbfgsResume[VectorT, CovectorT]] = None,
         g0: Optional[CovectorT] = None,
         backend: Optional[Backend] = None,
+        fixed_metric: bool = False,
         ) -> tuple[PointT, LbfgsSummary[VectorT, CovectorT]]:
     """Limited-memory BFGS in the geometry of the metric M (see the module
     docstring).
@@ -219,6 +226,15 @@ def lbfgs(
                              with a compiling backend every iteration is one
                              compiled piece, and the functions given must be
                              traceable, see trust_region_newton)
+      fixed_metric           declare that M does not depend on x (a flat space:
+                             the identity transport). M^{-1} y and M s are then
+                             kept with each pair (two more blocks of memory),
+                             so the base, the scaling fits and ||d||_M need no
+                             operator: an iteration applies M^{-1} once (the
+                             gradient norm) and M never, with the same iterates
+                             as without the flag. M^{-1} must be a fixed linear
+                             operator (a factorization, a fixed multigrid
+                             cycle), since the method uses its linearity.
 
     If the line search fails, the memory is cleared and the next iteration
     starts from -gamma M^{-1} g (a restart); if it fails with an empty
@@ -231,7 +247,8 @@ def lbfgs(
            metric_apply=metric_apply, operators_at=operators_at, point_data=point_data,
            memory=memory, scaling=scaling, gamma0=gamma0, initial_step=initial_step,
            pairings=pairings, curvature_test=curvature_test, curvature_tol=curvature_tol,
-           angle_tol=angle_tol, c1=c1, max_backtracks=max_backtracks, step_max=step_max)
+           angle_tol=angle_tol, c1=c1, max_backtracks=max_backtracks, step_max=step_max,
+           fixed_metric=fixed_metric)
     bk = numpy_backend if backend is None else backend
     xp = bk.xp
     sp: VectorSpace[Any, Any, Any, Any] = numpy_space if space is None else space
@@ -243,7 +260,8 @@ def lbfgs(
         point_data=point_data, project_covector=project_covector, memory=memory, scaling=scaling,
         gamma0=gamma0, initial_step=initial_step, pairings=pairings, curvature_test=curvature_test,
         curvature_tol=CURVATURE_TOL[curvature_test] if curvature_tol is None else curvature_tol,
-        angle_tol=angle_tol, c1=c1, max_backtracks=max_backtracks, step_max=step_max)
+        angle_tol=angle_tol, c1=c1, max_backtracks=max_backtracks, step_max=step_max,
+        fixed_metric=fixed_metric)
     start_piece = compile_function(bk, partial(init, problem, bk))
     step_piece = compile_function(bk, partial(lbfgs_step, problem, bk))
     restart_piece = compile_function(bk, partial(restart, problem, bk))
@@ -262,13 +280,24 @@ def lbfgs(
         k = min(len(resume.pairs), memory)          # the newest, if memory shrank
         kept = resume.slots[len(resume.slots) - k:]
         slots = kept if max(kept, default=-1) < memory else tuple(range(k))
+        pairs = resume.pairs[len(resume.pairs) - k:]
+        metric_pairs = None
+        if fixed_metric:
+            if len(resume.metric_pairs) == len(resume.pairs):
+                metric_pairs = resume.metric_pairs[len(resume.metric_pairs) - k:]
+            else:                       # saved without them: M^{-1} y and M s at x
+                ops = point_operators(problem, state.x, state.data)
+                assert ops.metric_solve is not None and ops.metric_apply is not None
+                metric_pairs = tuple((ops.metric_solve(y), ops.metric_apply(s)) for s, y in pairs)
+                metric_solves += k
+                metric_applies += k
         state = LbfgsState(
             x=state.x, f=state.f, g=state.g, data=state.data, Mg=state.Mg, gnorm=state.gnorm,
             metric_gnorm=state.metric_gnorm, gamma=xp.asarray(resume.gamma), stamp=xp.asarray(k),
-            memory=memory_from_pairs(sp, bk, resume.pairs[len(resume.pairs) - k:],
+            memory=memory_from_pairs(sp, bk, pairs,
                                      [row[len(row) - k:] for row in resume.pairings[len(resume.pairings) - k:]],
                                      resume.floors[len(resume.floors) - k:], slots, state.Mg, state.g,
-                                     memory))
+                                     memory, metric_pairs))
     gnorm = number(state.gnorm)
     if gnorm0 is None:
         gnorm0 = gnorm
