@@ -117,6 +117,27 @@ def test_tree_spaces_are_consistent() -> None:
     assert check_space(tuple_tree_space(BOX_SPACE), *boxed) < 1e-14
 
 
+def test_numpy_block_members_are_values() -> None:
+    """vector_member gives a read-only view of a member in use, and zero for
+    a row of the shared storage that only another block has set."""
+    rng = np.random.default_rng(3)
+    v1, v2 = Vector(rng.standard_normal(4)), Vector(rng.standard_normal(4))
+    B1 = numpy_space.vector_block(v1, 3)
+    B2 = numpy_space.set_vector(B1, 1, v2)            # written in place: shared storage
+    assert B1.storage is B2.storage
+    assert np.all(numpy_space.vector_member(B1, 1) == 0.0)
+    assert np.array_equal(numpy_space.vector_member(B2, 1), v2)
+    member = numpy_space.vector_member(B2, 0)
+    assert np.array_equal(member, v1)
+    with pytest.raises(ValueError):
+        member[0] = 1.0                               # read-only: blocks are values
+    with pytest.raises(IndexError):
+        numpy_space.vector_member(B2, 3)
+    W = numpy_space.covector_block(Covector(v2), 2)
+    assert np.array_equal(numpy_space.covector_member(W, 0), v2)
+    assert np.allclose(numpy_space.pair_covector_block(W, v1, 2), np.array([float(v2 @ v1), 0.0]))
+
+
 def test_tree_operations_refuse_lists_and_mismatched_structures() -> None:
     """Trees are tuples only: a list is an error (as_tuple_tree converts),
     and so is combining trees of different structures."""

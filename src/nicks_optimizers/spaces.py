@@ -94,8 +94,12 @@ class VectorSpace(Generic[VectorT, CovectorT, VectorBlockT, CovectorBlockT]):
       covector_block(w, capacity) -> CovectorBlock
       set_vector(B, j, v) -> VectorBlock             B with member j replaced by v
       set_covector(C, j, w) -> CovectorBlock
+      vector_member(B, j) -> Vector                  member j (zero if not set)
+      covector_member(C, j) -> Covector
       pair_block(B, w, k) -> Coords                  (<w, b_i>)_i, of length
                                                      capacity, zero for i >= k
+      pair_covector_block(C, v, k) -> Coords         (<c_i, v>)_i, the same for a
+                                                     block of covectors
       combine_vectors(B, c, k) -> Vector             sum_{i < k} c_i b_i (c of length
                                                      capacity, or shorter, >= k)
       combine_covectors(C, c, k) -> Covector         sum_{i < k} c_i w_i
@@ -119,7 +123,10 @@ class VectorSpace(Generic[VectorT, CovectorT, VectorBlockT, CovectorBlockT]):
     covector_block: Callable[[CovectorT, int], CovectorBlockT]
     set_vector: Callable[[VectorBlockT, Any, VectorT], VectorBlockT]
     set_covector: Callable[[CovectorBlockT, Any, CovectorT], CovectorBlockT]
+    vector_member: Callable[[VectorBlockT, Any], VectorT]
+    covector_member: Callable[[CovectorBlockT, Any], CovectorT]
     pair_block: Callable[[VectorBlockT, CovectorT, Any], Coords]
+    pair_covector_block: Callable[[CovectorBlockT, VectorT, Any], Coords]
     combine_vectors: Callable[[VectorBlockT, Coords, Any], VectorT]
     combine_covectors: Callable[[CovectorBlockT, Coords, Any], CovectorT]
     grow_vector_block: Callable[[VectorBlockT, int], VectorBlockT]
@@ -234,6 +241,19 @@ def _np_set(B: NumpyBlock, j: Any, v: Array) -> NumpyBlock:
     return NumpyBlock(_Rows(array, count), count)
 
 
+def _np_member(B: NumpyBlock, j: Any) -> Array:
+    """Member j: a read-only view of its row, or zeros if it is not set (the
+    storage may hold another block's member there)."""
+    j = int(j)
+    if not 0 <= j < B.capacity:
+        raise IndexError(f"member {j} of a block of capacity {B.capacity}")
+    if j >= B.count:
+        return np.zeros(B.storage.array.shape[1:], dtype=B.storage.array.dtype)
+    row: Array = B.storage.array[j, ...]           # a view, also for 0-d members
+    row.flags.writeable = False          # rows in use are shared and never rewritten
+    return row
+
+
 def _np_active(B: NumpyBlock, k: Any) -> Array:
     """The first k members (k is at most the capacity; members beyond those
     set are zero, so they are left out)."""
@@ -242,7 +262,7 @@ def _np_active(B: NumpyBlock, k: Any) -> Array:
     return active.reshape(m, -1)
 
 
-def _np_pair_block(B: NumpyBlock, w: Covector, k: Any) -> Coords:
+def _np_pair_block(B: NumpyBlock, w: Array, k: Any) -> Coords:
     active = _np_active(B, k)
     out: Coords = np.zeros(B.capacity)
     out[:active.shape[0]] = active @ w.ravel()
@@ -272,7 +292,8 @@ numpy_space: NumpySpace = VectorSpace(
     axpy_vector=_np_axpy_vector, axpy_covector=_np_axpy_covector, pair=_np_pair,
     vector_block=cast(Any, _np_block), covector_block=cast(Any, _np_block),
     set_vector=cast(Any, _np_set), set_covector=cast(Any, _np_set),
-    pair_block=cast(Any, _np_pair_block),
+    vector_member=cast(Any, _np_member), covector_member=cast(Any, _np_member),
+    pair_block=cast(Any, _np_pair_block), pair_covector_block=cast(Any, _np_pair_block),
     combine_vectors=cast(Any, _np_combine), combine_covectors=cast(Any, _np_combine),
     grow_vector_block=cast(Any, _np_grow), grow_covector_block=cast(Any, _np_grow),
     dimension=_np_dimension)
@@ -282,8 +303,9 @@ def numpy_space_with_reductions(allreduce: Callable[[Coords], Coords]) -> NumpyS
     """numpy_space for data stored as one local numpy array per process
     (e.g. MPI ranks).
 
-    Local operations stay numpy; the reductions (pair, pair_block, dimension)
-    are completed with allreduce, which must return the elementwise sum of its
+    Local operations stay numpy; the reductions (pair, pair_block,
+    pair_covector_block, dimension) are completed with allreduce, which must
+    return the elementwise sum of its
     argument over all processes, identical on every process. Every decision
     the method makes comes from reduced numbers, so the processes stay in
     lockstep. Operators (metric_solve, precond_solve, hessvec) act on the
@@ -296,10 +318,14 @@ def numpy_space_with_reductions(allreduce: Callable[[Coords], Coords]) -> NumpyS
     def pair_block(B: VectorBlock, w: Covector, k: Any) -> Coords:
         return allreduce(_np_pair_block(B, w, k))
 
+    def pair_covector_block(C: CovectorBlock, v: Vector, k: Any) -> Coords:
+        return allreduce(_np_pair_block(C, v, k))
+
     def dimension(v: Vector) -> int:
         return int(round(float(allreduce(np.array([float(v.size)]))[0])))
 
-    return dataclasses.replace(numpy_space, pair=pair, pair_block=pair_block, dimension=dimension)
+    return dataclasses.replace(numpy_space, pair=pair, pair_block=pair_block,
+                               pair_covector_block=pair_covector_block, dimension=dimension)
 
 
 # --- tuple trees ---------------------------------------------------------------
@@ -347,14 +373,21 @@ def tuple_tree_space(leaf_space: Any = None) -> Any:
             total = total + p
         return total
 
-    def pair_block(B: Any, w: Any, k: Any) -> Coords:
+    def summed_pairings(pair_leaves: Callable[[Any, Any, Any], Coords], B: Any, u: Any, k: Any
+                        ) -> Coords:
         total: Optional[Coords] = None
-        for Bl, wl in tree_leaf_pairs(B, w):
-            p = leaf.pair_block(Bl, wl, k)
+        for Bl, ul in tree_leaf_pairs(B, u):
+            p = pair_leaves(Bl, ul, k)
             total = p if total is None else total + p
         if total is None:
             raise ValueError("a tuple tree without leaves")
         return total
+
+    def pair_block(B: Any, w: Any, k: Any) -> Coords:
+        return summed_pairings(leaf.pair_block, B, w, k)
+
+    def pair_covector_block(C: Any, v: Any, k: Any) -> Coords:
+        return summed_pairings(leaf.pair_covector_block, C, v, k)
 
     dimension = None
     if leaf.dimension is not None:
@@ -373,7 +406,9 @@ def tuple_tree_space(leaf_space: Any = None) -> Any:
         covector_block=lambda w, cap: tree_map(lambda wl: leaf.covector_block(wl, cap), w),
         set_vector=lambda B, j, v: tree_map2(lambda Bl, vl: leaf.set_vector(Bl, j, vl), B, v),
         set_covector=lambda C, j, w: tree_map2(lambda Cl, wl: leaf.set_covector(Cl, j, wl), C, w),
-        pair_block=pair_block,
+        vector_member=lambda B, j: tree_map(lambda Bl: leaf.vector_member(Bl, j), B),
+        covector_member=lambda C, j: tree_map(lambda Cl: leaf.covector_member(Cl, j), C),
+        pair_block=pair_block, pair_covector_block=pair_covector_block,
         combine_vectors=lambda B, c, k: tree_map(lambda Bl: leaf.combine_vectors(Bl, c, k), B),
         combine_covectors=lambda C, c, k: tree_map(lambda Cl: leaf.combine_covectors(Cl, c, k), C),
         grow_vector_block=lambda B, cap: tree_map(lambda Bl: leaf.grow_vector_block(Bl, cap), B),
@@ -404,12 +439,13 @@ def tuple_block_space(*, scale_vector: Callable[[float, VectorT], VectorT],
     optionally dimension).
 
     Blocks are TupleBlocks (tuples of the members set so far), and the block
-    entries are built from the functions given: pair_block pairs one vector
-    at a time and combine_* accumulate with scale and axpy. That is correct
-    for any representation; for distributed objects it costs one reduction
-    per block member, so override pair_block (and combine_*) with
-    dataclasses.replace when a batched version is available. For the numpy
-    backend only (see TupleBlock).
+    entries are built from the functions given: pair_block and
+    pair_covector_block pair one member at a time and combine_* accumulate
+    with scale and axpy. That is correct for any representation; for
+    distributed objects it costs one reduction per block member, so override
+    pair_block, pair_covector_block (and combine_*) with dataclasses.replace
+    when a batched version is available. For the numpy backend only (see
+    TupleBlock).
     """
     def block(v: Any, capacity: int) -> TupleBlock[Any]:
         return TupleBlock((v,), capacity)
@@ -425,6 +461,19 @@ def tuple_block_space(*, scale_vector: Callable[[float, VectorT], VectorT],
         out: Coords = np.zeros(B.capacity)
         out[:int(k)] = np.array([pair(w, b) for b in B.members[:int(k)]], dtype=float)
         return out
+
+    def pair_covector_block(C: TupleBlock[CovectorT], v: VectorT, k: Any) -> Coords:
+        out: Coords = np.zeros(C.capacity)
+        out[:int(k)] = np.array([pair(c, v) for c in C.members[:int(k)]], dtype=float)
+        return out
+
+    def member(scale: Callable[[float, Any], Any]) -> Callable[[TupleBlock[Any], Any], Any]:
+        def get(B: TupleBlock[Any], j: Any) -> Any:
+            j = int(j)
+            if not 0 <= j < B.capacity:
+                raise IndexError(f"member {j} of a block of capacity {B.capacity}")
+            return B.members[j] if j < len(B.members) else scale(0.0, B.members[0])
+        return get
 
     def combine(scale: Callable[[float, Any], Any], axpy: Callable[[float, Any, Any], Any]
                 ) -> Callable[[TupleBlock[Any], Coords, Any], Any]:
@@ -443,7 +492,9 @@ def tuple_block_space(*, scale_vector: Callable[[float, VectorT], VectorT],
         scale_vector=scale_vector, scale_covector=scale_covector,
         axpy_vector=axpy_vector, axpy_covector=axpy_covector, pair=pair,
         vector_block=block, covector_block=block, set_vector=set_member, set_covector=set_member,
-        pair_block=pair_block, combine_vectors=combine(scale_vector, axpy_vector),
+        vector_member=member(scale_vector), covector_member=member(scale_covector),
+        pair_block=pair_block, pair_covector_block=pair_covector_block,
+        combine_vectors=combine(scale_vector, axpy_vector),
         combine_covectors=combine(scale_covector, axpy_covector),
         grow_vector_block=grow, grow_covector_block=grow, dimension=dimension)
 
@@ -469,6 +520,9 @@ def array_space(backend: Any) -> VectorSpace[Any, Any, Any, Any]:
     def set_member(B: Any, j: Any, v: Any) -> Any:
         return put(B, j, v)
 
+    def get_member(B: Any, j: Any) -> Any:
+        return B[j]                       # j may be computed (a dynamic index)
+
     def rows(B: Any) -> Any:
         return xp.reshape(B, (B.shape[0], -1))
 
@@ -490,7 +544,8 @@ def array_space(backend: Any) -> VectorSpace[Any, Any, Any, Any]:
         scale_vector=lambda a, v: a * v, scale_covector=lambda a, w: a * w,
         axpy_vector=lambda a, v, z: a * v + z, axpy_covector=lambda a, w, z: a * w + z,
         pair=pair, vector_block=block, covector_block=block, set_vector=set_member,
-        set_covector=set_member, pair_block=pair_block, combine_vectors=combine,
+        set_covector=set_member, vector_member=get_member, covector_member=get_member,
+        pair_block=pair_block, pair_covector_block=pair_block, combine_vectors=combine,
         combine_covectors=combine, grow_vector_block=grow, grow_covector_block=grow,
         dimension=lambda v: int(v.size))
 
@@ -512,9 +567,13 @@ def check_space(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlo
     tested through pairings on two sample vectors and two sample covectors
     (so it works for any representation), including the block entries (a
     block of capacity 3 with two members, grown to 4, and members beyond k
-    ignored). Expect rounding level, ~1e-15."""
+    ignored; members read back, and a member not set is zero). Expect
+    rounding level, ~1e-15."""
     def pair(w: CovectorT, v: VectorT) -> float:
         return float(np.asarray(space.pair(w, v)))
+
+    def coords(x: Any) -> Coords:
+        return np.asarray(x, dtype=float)
 
     a, b = 0.7, -1.3
     c = np.array([a, b])
@@ -522,11 +581,22 @@ def check_space(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlo
     VB = space.set_vector(space.vector_block(v1, 3), 1, v2)
     CB = space.set_covector(space.covector_block(w1, 3), 1, w2)
     grown = space.grow_vector_block(VB, 4)
+    grown_c = space.grow_covector_block(CB, 4)
     errors = [
-        float(np.max(np.abs(np.asarray(space.pair_block(VB, w1, 2)) - np.array([p11, p12, 0.0])))),
-        float(np.max(np.abs(np.asarray(space.pair_block(grown, w1, 2)) - np.array([p11, p12, 0.0, 0.0])))),
-        abs(float(np.asarray(space.pair_block(space.vector_block(v2, 1), w2, 1))[0]) - p22),
-        abs(float(np.asarray(space.pair_block(VB, w1, 1))[1])),
+        float(np.max(np.abs(coords(space.pair_block(VB, w1, 2)) - np.array([p11, p12, 0.0])))),
+        float(np.max(np.abs(coords(space.pair_block(grown, w1, 2)) - np.array([p11, p12, 0.0, 0.0])))),
+        abs(float(coords(space.pair_block(space.vector_block(v2, 1), w2, 1))[0]) - p22),
+        abs(float(coords(space.pair_block(VB, w1, 1))[1])),
+        float(np.max(np.abs(coords(space.pair_covector_block(CB, v1, 2)) - np.array([p11, p21, 0.0])))),
+        float(np.max(np.abs(coords(space.pair_covector_block(grown_c, v2, 2))
+                            - np.array([p12, p22, 0.0, 0.0])))),
+        abs(float(coords(space.pair_covector_block(CB, v1, 1))[1])),
+        abs(pair(w2, space.vector_member(VB, 0)) - p21),
+        abs(pair(w1, space.vector_member(grown, 1)) - p12),
+        abs(pair(w1, space.vector_member(grown, 3))),
+        abs(pair(space.covector_member(CB, 1), v1) - p21),
+        abs(pair(space.covector_member(grown_c, 0), v2) - p12),
+        abs(pair(space.covector_member(CB, 2), v1)),
         abs(pair(w1, space.combine_vectors(VB, c, 2)) - (a * p11 + b * p12)),
         abs(pair(w1, space.combine_vectors(VB, np.array([a, b, 5.0]), 2)) - (a * p11 + b * p12)),
         abs(pair(space.combine_covectors(CB, c, 2), v1) - (a * p11 + b * p21)),

@@ -652,4 +652,12 @@ asks for it.
 
 ## Progress
 
-Not started.
+- **Phase 0 (2026-10-26).** pair_covector_block, vector_member and
+  covector_member in VectorSpace and every constructor:
+  - numpy: a read-only view of a member in use, zeros for a row only
+    another block has set;
+  - array_space: a dynamic index;
+  - tuple trees: leafwise;
+  - tuple_block_space: from pair.
+
+  check_space tests the three entries.
