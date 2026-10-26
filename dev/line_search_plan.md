@@ -1,7 +1,8 @@
 # Plan: a line-search Newton-Krylov optimizer
 
-October 2026. **Status: draft for review.** Decisions marked **D1** to
-**D10** are open; each has a recommendation.
+October 2026. **Status: agreed (2026-10-25).** Decisions D1 to D10 were
+settled on review: all as recommended, with step_max an option the user may
+set, off by default (D5).
 
 ## Goal
 
@@ -223,52 +224,58 @@ curvature_floor.
 
 ## Decisions
 
+Settled on 2026-10-25: all as recommended. D5: step_max is an option the
+user may set; no cap by default. D8: module names as proposed. D10: the
+M^{-1} norm, one M^{-1} solve per Lanczos step, as for the trust region.
+
 - **D1. Negative curvature.** (a) Truncation by default, saddle-free on
   request (Lanczos and flexible). (b) Saddle-free by default whenever
   Lanczos runs. *Recommendation: (a)*: it is the standard Newton-CG
   behavior, the same for all three solvers, and needs no curvature floor;
-  saddle-free remains one flag away, as for the trust region.
+  saddle-free remains one flag away, as for the trust region. **Agreed.**
 - **D2. Line search.** (a) Armijo backtracking with safeguarded
   quadratic/cubic interpolation, alpha_0 = 1. (b) Strong Wolfe: a gradient
   at every trial, which Newton steps rarely need. (c) Nonmonotone (Grippo
   et al., Zhang-Hager). *Recommendation: (a)*; (b) and (c) can be added as
-  options of the same loop later.
+  options of the same loop later. **Agreed.**
 - **D3. Rounding allowance in the Armijo test** (10 eps max(1, |f|), like
   rho). *Recommendation: yes.* Without it, runs near convergence can fail
-  the line search on noise.
+  the line search on noise. **Agreed.**
 - **D4. When the search fails.** (a) Stop with reason "line_search", x
   unchanged. (b) Retry once along -P^{-1} g, then stop. *Recommendation:
   (a)*: failures come from inaccurate gradients or rounding, where a retry
   rarely helps, and an honest stop is easier to diagnose; (b) is a small
-  addition if wanted.
+  addition if wanted. **Agreed.**
 - **D5. step_max**, a cap on ||alpha d||_M. *Recommendation: default None*
   (no cap), documented as the remedy for nearly singular Hessians and
-  steepest-descent fallbacks on badly scaled problems.
+  steepest-descent fallbacks on badly scaled problems. **Agreed**: an option
+  the user may set, off by default.
 - **D6. Saddle-free floor**: |theta| floored at curvature_floor * max |theta|.
   *Recommendation: relative, default 1e-6.* An absolute floor would depend
-  on the scale of f.
+  on the scale of f. **Agreed.**
 - **D7. Records.** (a) New types for the line search (LineSearchRecord,
   LineSearchResume, LineSearchSummary), sharing SubproblemStats. (b) A
   generic RunSummary[RecordT, ResumeT] for both methods. *Recommendation:
   (a)*: the trust-region types stay as they are, and each method's records
-  say exactly what it does; the shared helpers stay internal.
+  say exactly what it does; the shared helpers stay internal. **Agreed.**
 - **D8. Code organization.** (a) One set of Krylov solvers with a static
   trust_region flag, shared modules extracted from the trust-region ones.
   (b) Separate line-search solvers. *Recommendation: (a)*: the solvers
   differ in a few lines (the boundary test, the projected solve, the Gram
   matrix), and one copy keeps fixes and capacity growth in one place.
-  Module names as proposed above, or yours.
+  Module names as proposed above, or yours. **Agreed, with the proposed
+  names.**
 - **D9. Safety net for the refactoring.** The shared-module extraction must
   not change `trust_region_newton`. *Recommendation:* vendor the current
   package again (as phase 0 of the backend plan did) and compare 40-odd
   trust-region configurations bit for bit until the line search is done;
-  then delete the copy.
+  then delete the copy. **Agreed.**
 - **D10. The inner residual norm with P != M.** (a) ||R||_{M^{-1}}, like
   the trust region: one M^{-1} solve per Lanczos step. (b) ||R||_{P^{-1}},
   free from the Lanczos relation, but then the forcing test is not in the
   convergence norm. *Recommendation: (a)* for consistency, (b) as a later
   option if the solve matters. In both, truncating Lanczos keeps no Gram
-  matrix (no product with M per step).
+  matrix (no product with M per step). **Agreed: (a).**
 
 ## Testing
 
