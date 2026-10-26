@@ -50,6 +50,7 @@ from .lbfgs_memory import (
     memory_store,
     memory_transport,
     two_loop_project,
+    capacity,
 )
 from .line_search import ARMIJO, backtracking
 from .newton_core import PointOperators
@@ -87,7 +88,11 @@ CURVATURE_TOL: dict[str, float] = {"relative": 1e-8, "positive": 0.0,
 class LbfgsProblem:
     """The problem pieces and options of lbfgs (see its docstring).
 
-      memory           m, the number of pairs kept
+      memory           m, the number of pairs kept; 0 keeps none: every
+                       direction is -gamma M^{-1} g, with gamma fitted to the
+                       newest pair (steepest descent in M with
+                       Barzilai-Borwein steps), the baseline that shows what
+                       the memory adds
       scaling          the fit of gamma after each stored pair: "y"
                        (<y, s> / <y, M^{-1} y>), "s" (<M s, s> / <y, s>),
                        "geometric" (||s||_M / ||y||_{M^{-1}}) or "none"
@@ -329,7 +334,7 @@ def init(problem: LbfgsProblem, backend: Backend, x0: Any, g0: Any) -> LbfgsStat
             precond_solves, applies = 1, 1
     return LbfgsState(x=x0, f=problem.fun(x0), g=g, data=data, Mg=Mg, Pg=Pg, gnorm=gnorm,
                       metric_gnorm=metric_gnorm,
-                      memory=memory_empty(space, backend, Mg, g, problem.memory,
+                      memory=memory_empty(space, backend, Mg, g, max(problem.memory, 1),
                                           metric_blocks=problem.fixed_metric,
                                           precond_block=problem.fixed_preconditioner),
                       gamma=gamma, gamma_P=gamma_P, stamp=xp.asarray(0), metric_solves=xp.asarray(1),
@@ -380,7 +385,7 @@ def lbfgs_step(problem: LbfgsProblem, backend: Backend, state: LbfgsState
     has_P = precond is not None
     memory = state.memory
     pairs = memory_count(backend, memory)
-    m = problem.memory
+    m = capacity(memory)
     zero, one, nan = xp.asarray(0), xp.asarray(1), xp.asarray(xp.nan)
     need_ss = problem.scaling in ("s", "geometric") or problem.curvature_test in ("dennis-schnabel",
                                                                                   "cautious")
@@ -567,7 +572,8 @@ def lbfgs_step(problem: LbfgsProblem, backend: Backend, state: LbfgsState
             moved, correction_applies = memory_correct(space, backend, moved, ops1.metric_apply)
             applies = applies + correction_applies
         full = problem.pairings == "corrected"
-        stored = run_cond(backend, ok,
+        keep = ok if problem.memory > 0 else xp.asarray(False)   # memory 0: the pair fits gamma only
+        stored = run_cond(backend, keep,
                           lambda m_: memory_store(space, backend, m_, s1, y, state.stamp, floor,
                                                   full_pairings=full, metric_pair=metric_pair,
                                                   precond_y=precond_y),

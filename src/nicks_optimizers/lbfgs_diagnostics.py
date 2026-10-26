@@ -59,8 +59,9 @@ class LbfgsRecord:
                          flat space 1 - phi'(alpha) / phi'(0), so 1 when the
                          step reached the one-dimensional minimizer (nan if
                          the search failed)
-      update             "stored", "skipped" (the curvature test failed) or
-                         "-" (the search failed)
+      update             "stored" (with memory 0: passed the curvature test and
+                         fitted gamma, not kept), "skipped" (the curvature
+                         test failed) or "-" (the search failed)
       dropped            pairs dropped by recomputed pairings
       transport_defect   <Tb g, T s> / <g, s> - 1: how far the transport is
                          from preserving pairings on this step (0 for the

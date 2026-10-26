@@ -95,8 +95,8 @@ def _check(*, space: Any, retract: Any, transport: Any, metric_solve: Any, metri
         if operators_at is None and metric_solve is None:
             raise ValueError("with a space, pass metric_solve and metric_apply "
                              "(euclidean_metric_solve and euclidean_metric_apply give M = I)")
-    if memory < 1:
-        raise ValueError(f"memory must be positive, not {memory}")
+    if memory < 0:
+        raise ValueError(f"memory must be nonnegative, not {memory}")
     if scaling not in SCALINGS:
         raise ValueError(f"scaling must be one of {SCALINGS}, not {scaling!r}")
     if pairings not in PAIRINGS:
@@ -216,7 +216,10 @@ def lbfgs(
                              and transported gradients)
 
     Options:
-      memory                 m, the number of pairs kept (default 10)
+      memory                 m, the number of pairs kept (default 10); 0 keeps
+                             none (steepest descent in M with gamma fitted
+                             to each new pair: the baseline without the
+                             low-rank memory)
       scaling                gamma after each stored pair: "y" (default,
                              <y, s> / <y, M^{-1} y>), "s" (<M s, s> / <y, s>),
                              "geometric" (||s||_M / ||y||_{M^{-1}}), "none"

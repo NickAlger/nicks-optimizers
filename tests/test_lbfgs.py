@@ -391,7 +391,7 @@ def test_arguments_are_checked() -> None:
         dict(space=numpy_space, retract=lambda x, s: x + s),             # no transport
         dict(space=numpy_space, transport=identity_transport),           # no retract
         dict(space=numpy_space, retract=lambda x, s: x + s, transport=identity_transport),  # no metric
-        dict(point_data=lambda x: None), dict(memory=0), dict(scaling="bb"), dict(pairings="fresh"),
+        dict(point_data=lambda x: None), dict(memory=-1), dict(scaling="bb"), dict(pairings="fresh"),
         dict(curvature_test="wolfe"), dict(curvature_tol=-1.0), dict(angle_tol=1.0), dict(gamma0=0.0),
         dict(initial_step=0.0), dict(c1=1.0), dict(max_backtracks=0), dict(step_max=0.0),
         dict(operators_at=lambda x, d: None, metric_solve=euclidean_metric_solve,
@@ -525,3 +525,29 @@ def test_strict_backend_with_a_fixed_metric() -> None:
         [(r.direction, r.trials, r.update) for r in ref.iterations]
     assert max(abs(a.f - b.f) / max(abs(b.f), 1.0) for a, b in zip(run.iterations, ref.iterations)) < 1e-10
     assert run.metric_apply_calls == 0
+
+
+def test_memory_zero_is_scaled_steepest_descent_in_M() -> None:
+    """memory=0 keeps no pairs: every direction is -gamma M^{-1} g, gamma
+    refitted to each new pair (<y, s> / <y, M^{-1} y>, the Barzilai-Borwein
+    step in M): the baseline without the low-rank memory."""
+    fun, grad, x0 = convex()
+    M = constant_metric(x0.shape[0])
+    xs, s = iterates(fun, grad, x0, memory=0, max_iter=300,
+                     metric_solve=lambda x, w: np.linalg.solve(M, w), metric_apply=lambda x, v: M @ v)
+    assert all(r.direction == "steepest" and r.pairs == 0 for r in s.iterations)
+    x, g, gamma = x0.copy(), grad(x0), 1.0
+    reference = [x.copy()]
+    for _ in range(len(s.iterations)):
+        d = -gamma * np.linalg.solve(M, g)
+        found = backtracking(numpy_backend, lambda a: (fun(x + a * d), x + a * d), x, fun(x),
+                             float(g @ d), 1.0)
+        assert found.status == ARMIJO
+        x1 = np.asarray(found.point)
+        g1 = grad(x1)
+        step, y = float(found.alpha) * d, g1 - g
+        if float(y @ step) > 1e-8 * abs(float(g @ step)):
+            gamma = float(y @ step) / float(y @ np.linalg.solve(M, y))
+        x, g = x1, g1
+        reference.append(x.copy())
+    assert max(rel(a, b) for a, b in zip(xs[:80], reference[:80])) < 1e-9
