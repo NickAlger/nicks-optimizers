@@ -12,6 +12,8 @@ Modules, in dependency order:
   dense                     small dense linear algebra in coordinates
   krylov                    Krylov processes (preconditioned Lanczos and CG)
   criteria                  tests shared by inexact Newton methods
+  line_search               backtracking with the Armijo condition, as a
+                            pure function a backend can compile
   krylov_solvers            Krylov solvers for Newton steps (Lanczos, CG, and
                             a flexible solver for unconventional
                             preconditioners), as pieces a backend can compile
@@ -25,8 +27,8 @@ Modules, in dependency order:
   trust_region              trust_region_newton, the driver around them
   newton_line_search        Newton directions for a line search
 
-backend, trees, spaces, metrics, dense, krylov and criteria do not depend on
-the optimizers and are meant to be reused by other methods; krylov_solvers,
+backend, trees, spaces, metrics, dense, krylov, criteria and line_search do
+not depend on the optimizers and are meant to be reused by other methods; krylov_solvers,
 newton_core and newton_driver are shared by the Newton optimizers. The names
 below are the public interface; lower-level pieces are available from their
 modules.
@@ -90,6 +92,7 @@ from .spaces import (
     tuple_block_space,
     tuple_tree_space,
 )
+from .line_search import LineSearchResult, backtracking
 from .newton_line_search import (
     solve_newton_direction,
     solve_newton_direction_cg,
@@ -208,6 +211,8 @@ __all__ = [
     "solve_tr_subproblem_flexible",
     "trust_region_newton",
     # line search
+    "LineSearchResult",
+    "backtracking",
     "solve_newton_direction",
     "solve_newton_direction_cg",
     "solve_newton_direction_flexible",

@@ -14,8 +14,11 @@ from helpers import (
     matrix_with_spectrum,
     random_spd,
 )
-from nicks_optimizers import Covector, array_space, numpy_backend, numpy_space
 from nicks_optimizers import (
+    Covector,
+    array_space,
+    numpy_backend,
+    numpy_space,
     solve_newton_direction,
     solve_newton_direction_cg,
     solve_newton_direction_flexible,
