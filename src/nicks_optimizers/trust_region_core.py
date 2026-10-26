@@ -1,120 +1,54 @@
-"""One outer iteration of trust_region_newton, as pure pieces a backend can
-compile (see backend and dev/jit_backends_plan.md).
+"""The trust-region part of an iteration of trust_region_newton, as a pure
+piece a backend can compile (see backend and dev/jit_backends_plan.md).
 
-  CoreProblem    the problem and the options of a run (fixed, closed over)
-  OuterState     what is known at the current point: x, f, the gradient,
-                 the point data, the gradient norms and the Krylov start
-                 vector
-  RawIteration   what one iteration reports, as arrays; the driver turns it
-                 into an IterationRecord
-  init(problem, backend, x0, g0) -> OuterState
+The step is computed by the shared pieces of newton_core (step_start,
+step_grow, step_continue); then
 
-and the pieces of one iteration, which the driver
-(trust_region.trust_region_newton) calls in turn:
-
-  step_start(problem, backend, state, radius, gnorm0, capacity=c) -> carry
-                 start the subproblem solve and run it until it stops or its
-                 Krylov basis (room for c vectors) is full
-  step_grow(problem, backend, state, carry, capacity=c2) -> carry
-  step_continue(problem, backend, state, carry) -> carry
-                 when the basis was full: copy the solve into a larger basis
-                 and continue where it stopped (nothing is recomputed)
-  step_finish(problem, backend, state, carry, radius, gnorm0)
+  step_finish(problem, options, backend, state, carry, radius, gnorm0)
                  -> (OuterState, RawIteration)
                  the step, the trial point, the reduction ratio, the new
                  radius, and, when the step is accepted, the gradient, the
                  point data and the gradient norms at the new point (under
                  backend.cond)
 
-Each piece rebuilds the operators from (x, point data), so no function
-crosses the boundary of a compiled piece. Nothing here branches in Python on
-computed values, and nothing imports numpy: arrays go through backend.xp.
-The stopping tests, records, display, callback and resuming stay in the
-driver.
+  TrustRegionOptions  eta and radius_max, the options of the update
+  RawIteration   what one iteration reports, as arrays; the driver turns it
+                 into an IterationRecord
+
+Nothing here branches in Python on computed values, and nothing imports
+numpy. The stopping tests, records, display, callback and resuming stay in
+the driver (trust_region).
 """
 
 from dataclasses import dataclass
-from typing import Any, Callable, Generic, Literal, Optional
+from typing import Any
 
 from .backend import Backend, backend_state, run_cond
-from .spaces import CovectorT, VectorSpace, VectorT
-from .trust_region_subproblem import (
-    KrylovSolver,
-    SubproblemOperators,
-    cg_solver,
-    flexible_solver,
-    lanczos_solver,
+from .newton_core import (
+    CoreProblem,
+    OuterState,
+    PointOperators,
+    canonical,
+    forcing_term,
+    init,
+    state_at,
+    step_continue,
+    step_grow,
+    step_start,
+    subproblem_at,
 )
 
-
-@dataclass(frozen=True, kw_only=True)
-class PointOperators(Generic[VectorT, CovectorT]):
-    """The linear operators at one point, frozen: what operators_at(x, data)
-    returns, everything the method uses at that point.
-
-      hessvec(v) -> Covector         H v
-      metric_solve(w) -> Vector      M^{-1} w (None: M = I, for numpy arrays
-                                     without a space only)
-      precond_solve(w) -> Vector     P^{-1} w (None: P = M)
-      metric_apply(v) -> Covector    M v, the inverse of metric_solve (needed
-                                     only with precond_solve)
-    """
-    hessvec: Callable[[VectorT], CovectorT]
-    metric_solve: Optional[Callable[[CovectorT], VectorT]] = None
-    precond_solve: Optional[Callable[[CovectorT], VectorT]] = None
-    metric_apply: Optional[Callable[[VectorT], CovectorT]] = None
+__all__ = ["CoreProblem", "OuterState", "PointOperators", "RawIteration", "TrustRegionOptions",
+           "forcing_term", "init", "reduction_ratio", "step_continue", "step_finish", "step_grow",
+           "step_start", "update_radius"]
 
 
 @dataclass(frozen=True, kw_only=True)
-class CoreProblem:
-    """The problem pieces and the options of a run (see trust_region_newton),
-    with defaults filled in. Fixed during the run: compiled pieces close
-    over it, so none of it is traced."""
-    fun: Callable[[Any], Any]
-    grad: Callable[[Any], Any]
-    hessvec: Optional[Callable[[Any, Any], Any]]
-    space: VectorSpace[Any, Any, Any, Any]
-    numpy_default: bool                      # no space given: M = I is the default
-    retract: Callable[[Any, Any], Any]
-    metric_solve: Optional[Callable[[Any, Any], Any]]
-    metric_apply: Optional[Callable[[Any, Any], Any]]
-    precond_solve: Optional[Callable[[Any, Any], Any]]
-    operators_at: Optional[Callable[[Any, Any], PointOperators[Any, Any]]]
-    point_data: Optional[Callable[[Any], Any]]
-    project_covector: Optional[Callable[[Any, Any], Any]]
-    saddle_free: bool
-    krylov: Literal["auto", "cg", "lanczos", "flexible"]
-    convergence_norm: Literal["metric", "preconditioner"]
+class TrustRegionOptions:
+    """The options of the trust-region update: the acceptance threshold eta
+    for rho, and the largest radius."""
     eta: float
     radius_max: float
-    forcing_max: float
-    stall_tol: float
-    max_krylov: int
-
-
-@backend_state
-@dataclass(frozen=True, kw_only=True)
-class OuterState:
-    """What is known at the current point.
-
-      x, f, g          the point, f(x) and the (canonical) gradient
-      data             point_data(x), or None
-      gnorm            ||g|| in the convergence norm
-      metric_gnorm     ||g||_{M^{-1}}
-      start            the Krylov start vector computed with the norms
-                       (M^{-1} g or P^{-1} g), or None
-      metric_solves, precond_solves
-                       the solves the norms took at this point
-    """
-    x: Any
-    f: Any
-    g: Any
-    data: Any
-    gnorm: Any
-    metric_gnorm: Any
-    start: Any
-    metric_solves: Any
-    precond_solves: Any
 
 
 @backend_state
@@ -137,13 +71,6 @@ class RawIteration:
 # --- the tests of criteria.py and the radius update, in where form -------------------------
 
 
-def forcing_term(xp: Any, gnorm: Any, gnorm0: Any, forcing_max: Any) -> Any:
-    """criteria.forcing_term: min(forcing_max, sqrt(||g|| / ||g0||))."""
-    positive = gnorm0 > 0.0
-    ratio = gnorm / xp.where(positive, gnorm0, 1.0)
-    return xp.where(positive, xp.minimum(forcing_max, xp.sqrt(ratio)), forcing_max)
-
-
 def reduction_ratio(xp: Any, f_old: Any, f_trial: Any, predicted: Any) -> Any:
     """criteria.reduction_ratio: actual over predicted reduction, both
     shifted by 10 eps max(1, |f_old|); -inf when the predicted reduction is
@@ -164,139 +91,12 @@ def update_radius(xp: Any, radius: Any, rho: Any, step_norm: Any, radius_max: An
                     xp.where(expand, xp.minimum(2.0 * radius, radius_max), radius))
 
 
-# --- the pieces ---------------------------------------------------------------------------
+# --- the piece ---------------------------------------------------------------------------
 
 
-def _identity(w: Any) -> Any:
-    """M = I for numpy arrays: the same array, as a vector or covector."""
-    return w
-
-
-def operators(problem: CoreProblem, x: Any, data: Any) -> PointOperators[Any, Any]:
-    """All the operators at x, from operators_at or the keyword arguments,
-    with the numpy default M = I filled in and the combination checked."""
-    if problem.operators_at is not None:
-        given = problem.operators_at(x, data)
-    else:
-        hv, ms, ma, ps = problem.hessvec, problem.metric_solve, problem.metric_apply, problem.precond_solve
-        assert hv is not None
-        given = PointOperators(
-            hessvec=lambda v: hv(x, v),
-            metric_solve=None if ms is None else (lambda w: ms(x, w)),
-            metric_apply=None if ma is None else (lambda v: ma(x, v)),
-            precond_solve=None if ps is None else (lambda w: ps(x, w)))
-    Ms, Ma = given.metric_solve, given.metric_apply
-    if Ms is None:
-        if Ma is not None:
-            raise ValueError("metric_apply needs metric_solve (its inverse)")
-        if not problem.numpy_default:
-            raise ValueError("with a space, give metric_solve")
-        Ms, Ma = _identity, _identity
-    if given.precond_solve is not None and Ma is None:
-        raise ValueError("a separate preconditioner needs metric_apply (M)")
-    if problem.krylov == "cg" and given.precond_solve is not None:
-        raise ValueError("krylov='cg' needs P = M (no precond_solve)")
-    if problem.krylov == "flexible" and given.precond_solve is None:
-        raise ValueError("krylov='flexible' needs a separate precond_solve, and metric_apply")
-    return PointOperators(hessvec=given.hessvec, metric_solve=Ms,
-                          precond_solve=given.precond_solve, metric_apply=Ma)
-
-
-def canonical(problem: CoreProblem, x: Any, w: Any) -> Any:
-    return w if problem.project_covector is None else problem.project_covector(x, w)
-
-
-def gradient_norms(problem: CoreProblem, xp: Any, g: Any, ops: PointOperators[Any, Any]
-                   ) -> tuple[Any, Any, Any, int, int]:
-    """(convergence norm, ||g||_{M^{-1}}, start vector, M^{-1} solves,
-    P^{-1} solves). The start vector is what the subproblem solver starts
-    from, when it was computed anyway: M^{-1} g for CG and the flexible
-    solver, P^{-1} g for Lanczos (M^{-1} g when P = M)."""
-    sp = problem.space
-    assert ops.metric_solve is not None
-    Mg = ops.metric_solve(g)
-    m_norm = xp.sqrt(xp.maximum(sp.pair(g, Mg), 0.0))
-    preconditioner_norm = problem.convergence_norm == "preconditioner"
-    if ops.precond_solve is None or problem.krylov == "flexible":
-        if preconditioner_norm and ops.precond_solve is not None:
-            Pg = ops.precond_solve(g)
-            return xp.sqrt(xp.maximum(sp.pair(g, Pg), 0.0)), m_norm, Mg, 1, 1
-        return m_norm, m_norm, Mg, 1, 0
-    if preconditioner_norm:
-        Pg = ops.precond_solve(g)
-        return xp.sqrt(xp.maximum(sp.pair(g, Pg), 0.0)), m_norm, Pg, 1, 1
-    return m_norm, m_norm, None, 1, 0
-
-
-def state_at(problem: CoreProblem, backend: Backend, x: Any, f: Any, g: Any) -> OuterState:
-    """The OuterState at x, given f(x) and the canonical gradient g."""
-    xp = backend.xp
-    data = None if problem.point_data is None else problem.point_data(x)
-    gnorm, metric_gnorm, start, metric_solves, precond_solves = gradient_norms(
-        problem, xp, g, operators(problem, x, data))
-    return OuterState(x=x, f=f, g=g, data=data, gnorm=gnorm, metric_gnorm=metric_gnorm,
-                      start=start, metric_solves=xp.asarray(metric_solves),
-                      precond_solves=xp.asarray(precond_solves))
-
-
-def init(problem: CoreProblem, backend: Backend, x0: Any, g0: Any) -> OuterState:
-    """The state at x0; g0, if not None, is the gradient at x0."""
-    g = problem.grad(x0) if g0 is None else g0
-    return state_at(problem, backend, x0, problem.fun(x0), canonical(problem, x0, g))
-
-
-def uses_cg(problem: CoreProblem, ops: PointOperators[Any, Any]) -> bool:
-    return problem.krylov == "cg" or (problem.krylov == "auto" and ops.precond_solve is None
-                                      and not problem.saddle_free)
-
-
-def subproblem_at(problem: CoreProblem, state: OuterState
-                  ) -> tuple[KrylovSolver, SubproblemOperators[Any, Any]]:
-    """The subproblem solver for this run (chosen from the configuration and
-    whether a separate preconditioner is given, so fixed when a piece is
-    traced) and its operators at the current point."""
-    ops = operators(problem, state.x, state.data)
-    pc, x = problem.project_covector, state.x
-    assert ops.metric_solve is not None
-    sub_ops = SubproblemOperators(
-        hessvec=ops.hessvec, metric_solve=ops.metric_solve, precond_solve=ops.precond_solve,
-        metric_apply=ops.metric_apply,
-        project_covector=None if pc is None else (lambda w: pc(x, w)))
-    if uses_cg(problem, ops):
-        return cg_solver(problem.max_krylov), sub_ops
-    if problem.krylov == "flexible":
-        return flexible_solver(problem.max_krylov, saddle_free=problem.saddle_free), sub_ops
-    return lanczos_solver(problem.max_krylov, saddle_free=problem.saddle_free,
-                          stall_tol=problem.stall_tol), sub_ops
-
-
-def step_start(problem: CoreProblem, backend: Backend, state: OuterState, radius: Any,
-               gnorm0: Any, *, capacity: int) -> Any:
-    """Start the subproblem solve at state with the given radius, and run it
-    until it stops or its basis (of the given capacity)
-    is full. Returns the solver's carry."""
-    solver, ops = subproblem_at(problem, state)
-    forcing = forcing_term(backend.xp, state.gnorm, gnorm0, problem.forcing_max)
-    carry = solver.begin(backend, problem.space, ops, state.g, radius, forcing * state.metric_gnorm,
-                         state.start, capacity)
-    return solver.run(backend, problem.space, ops, state.g, carry)
-
-
-def step_continue(problem: CoreProblem, backend: Backend, state: OuterState, carry: Any) -> Any:
-    """Continue a solve after its basis has grown."""
-    solver, ops = subproblem_at(problem, state)
-    return solver.run(backend, problem.space, ops, state.g, carry)
-
-
-def step_grow(problem: CoreProblem, backend: Backend, state: OuterState, carry: Any, *,
-              capacity: int) -> Any:
-    """The same solve with room for capacity basis vectors (copies only)."""
-    solver, _ = subproblem_at(problem, state)
-    return solver.grow(backend, problem.space, carry, capacity)
-
-
-def step_finish(problem: CoreProblem, backend: Backend, state: OuterState, carry: Any, radius: Any,
-                gnorm0: Any) -> tuple[OuterState, RawIteration]:
+def step_finish(problem: CoreProblem, options: TrustRegionOptions, backend: Backend,
+                state: OuterState, carry: Any, radius: Any, gnorm0: Any
+                ) -> tuple[OuterState, RawIteration]:
     """The rest of the iteration once the solve has stopped: the step, the
     trial point, rho, the new radius, and the state at the next point (the
     trial point if accepted, else the same)."""
@@ -307,8 +107,8 @@ def step_finish(problem: CoreProblem, backend: Backend, state: OuterState, carry
     f_trial = problem.fun(x_trial)
     predicted = -sub.model_value
     rho = reduction_ratio(xp, state.f, f_trial, predicted)
-    accepted = rho > problem.eta
-    new_radius = update_radius(xp, radius, rho, sub.step_norm, problem.radius_max)
+    accepted = rho > options.eta
+    new_radius = update_radius(xp, radius, rho, sub.step_norm, options.radius_max)
 
     def move(_: Any) -> OuterState:
         g = canonical(problem, x_trial, problem.grad(x_trial))

@@ -12,16 +12,23 @@ Modules, in dependency order:
   dense                     small dense linear algebra in coordinates
   krylov                    Krylov processes (preconditioned Lanczos and CG)
   criteria                  tests shared by inexact Newton methods
+  krylov_solvers            Krylov solvers for Newton steps (Lanczos, CG, and
+                            a flexible solver for unconventional
+                            preconditioners), as pieces a backend can compile
   trust_region_subproblem   the trust-region subproblem over a Krylov space
-                            (Lanczos, CG, and a flexible solver for
-                            unconventional preconditioners)
+  newton_core               the shared parts of an inexact Newton iteration
+                            (the state at a point, the step solve) as pure
+                            pieces
+  newton_driver             what the optimizers' drivers share
   trust_region_diagnostics  records, resumption state and text output
-  trust_region_core         one iteration as pure pieces a backend can compile
+  trust_region_core         the trust-region update as a pure piece
   trust_region              trust_region_newton, the driver around them
 
-backend, trees, spaces, metrics, dense, krylov and criteria do not depend on the trust-region
-modules and are meant to be reused by other optimizers. The names below are
-the public interface; lower-level pieces are available from their modules.
+backend, trees, spaces, metrics, dense, krylov and criteria do not depend on
+the optimizers and are meant to be reused by other methods; krylov_solvers,
+newton_core and newton_driver are shared by the Newton optimizers. The names
+below are the public interface; lower-level pieces are available from their
+modules.
 """
 
 from .backend import Backend, loop_from_scan, loop_from_while, numpy_backend

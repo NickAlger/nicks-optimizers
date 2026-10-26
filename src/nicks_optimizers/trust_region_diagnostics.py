@@ -26,7 +26,7 @@ from typing import Callable, Generic, Literal
 import numpy as np
 
 from .spaces import Array, CovectorT, VectorT
-from .trust_region_subproblem import SubproblemStats
+from .krylov_solvers import SubproblemStats
 
 
 RunReason = Literal["converged", "radius", "max_iter", "callback"]

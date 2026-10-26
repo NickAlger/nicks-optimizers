@@ -102,12 +102,13 @@ array rather than a float).
 
 import time
 from functools import partial
-from typing import Any, Callable, Literal, Optional, SupportsFloat, cast
+from typing import Any, Callable, Literal, Optional, SupportsFloat
 
 import numpy as np
 
 from .backend import Backend, compile_function, numpy_backend
 from .criteria import gradient_converged
+from .newton_driver import check_arguments, check_resumed_f, make_problem, number, step_solve
 from .spaces import (
     CovectorBlockT,
     CovectorT,
@@ -115,18 +116,8 @@ from .spaces import (
     VectorBlockT,
     VectorSpace,
     VectorT,
-    numpy_space,
 )
-from .trust_region_core import (
-    CoreProblem,
-    OuterState,
-    PointOperators,
-    init,
-    step_continue,
-    step_finish,
-    step_grow,
-    step_start,
-)
+from .trust_region_core import OuterState, PointOperators, TrustRegionOptions, step_finish
 from .trust_region_diagnostics import (
     IterationInfo,
     IterationRecord,
@@ -137,7 +128,7 @@ from .trust_region_diagnostics import (
     display_iteration,
     format_summary,
 )
-from .trust_region_subproblem import DEFAULT_CAPACITY, FULL, as_integer, subproblem_stats
+from .krylov_solvers import subproblem_stats
 
 __all__ = ["PointOperators", "trust_region_newton", "update_radius", "check_resume_matches"]
 
@@ -159,10 +150,7 @@ def check_resume_matches(state: ResumeState, f_x0: float, rtol: float = 1e-10) -
     different accepted iterates; it cannot tell apart states saved before and
     after a rejected step, since x and f do not change there.
     """
-    if abs(f_x0 - state.f) > rtol * max(1.0, abs(state.f)):
-        raise ValueError(
-            f"resume state does not belong to x0: f(x0) = {f_x0!r}, but the state was saved at "
-            f"f = {state.f!r}. Save x, the state (and g) from the same callback call.")
+    check_resumed_f(state.f, f_x0, rtol)
 
 
 def trust_region_newton(
@@ -275,73 +263,26 @@ def trust_region_newton(
     ResumeState at x. history_array(summary) gives the iterations as a numeric
     array; merge_summaries joins the summaries of a stopped and resumed run.
     """
-    if operators_at is not None:
-        if any(f is not None for f in (hessvec, metric_solve, metric_apply, precond_solve)):
-            raise ValueError("operators_at gives all the operators at a point: pass hessvec=None "
-                             "and no metric_solve, metric_apply or precond_solve")
-    elif hessvec is None:
-        raise ValueError("pass hessvec, or operators_at")
-    elif point_data is not None:
-        raise ValueError("point_data is passed to operators_at: give operators_at too")
-    elif metric_apply is not None and metric_solve is None:
-        raise ValueError("metric_apply needs metric_solve (its inverse)")
-    numpy_default = space is None
-    if not numpy_default and retract is None:
-        raise ValueError("with a space, pass retract (flat_retraction(space) gives x + s)")
-    if not numpy_default and operators_at is None and metric_solve is None:
-        raise ValueError("with a space, pass metric_solve (euclidean_metric_solve gives M = I)")
-    if krylov not in ("auto", "cg", "lanczos", "flexible"):
-        raise ValueError(f"krylov must be 'auto', 'cg', 'lanczos' or 'flexible', not {krylov!r}")
-    if krylov == "flexible" and operators_at is None and (precond_solve is None or metric_apply is None):
-        raise ValueError("krylov='flexible' needs a separate precond_solve, and metric_apply")
-    if krylov == "cg" and (saddle_free or precond_solve is not None):
-        raise ValueError("krylov='cg' needs P = M (no precond_solve) and saddle_free=False")
-    if convergence_norm not in ("metric", "preconditioner"):
-        raise ValueError(f"convergence_norm must be 'metric' or 'preconditioner', "
-                         f"not {convergence_norm!r}")
-    if krylov_capacity is not None and krylov_capacity < 1:
-        raise ValueError(f"krylov_capacity must be positive, not {krylov_capacity}")
-
+    check_arguments(hessvec=hessvec, space=space, retract=retract, metric_solve=metric_solve,
+                    metric_apply=metric_apply, precond_solve=precond_solve,
+                    operators_at=operators_at, point_data=point_data, saddle_free=saddle_free,
+                    krylov=krylov, convergence_norm=convergence_norm,
+                    krylov_capacity=krylov_capacity)
     bk = numpy_backend if backend is None else backend
     xp = bk.xp
-    sp = space if space is not None else cast(
-        VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT], numpy_space)
-    problem = CoreProblem(
-        fun=fun, grad=grad, hessvec=hessvec, space=sp, numpy_default=numpy_default,
-        retract=retract if retract is not None else (lambda x, s: cast(Any, x) + s),
+    problem = make_problem(
+        fun=fun, grad=grad, hessvec=hessvec, space=space, retract=retract,
         metric_solve=metric_solve, metric_apply=metric_apply, precond_solve=precond_solve,
         operators_at=operators_at, point_data=point_data, project_covector=project_covector,
-        saddle_free=saddle_free, krylov=krylov, convergence_norm=convergence_norm, eta=eta,
-        radius_max=radius_max, forcing_max=forcing_max, stall_tol=stall_tol,
-        max_krylov=max_krylov)
-    start_piece = compile_function(bk, partial(init, problem, bk))
-    continue_piece = compile_function(bk, partial(step_continue, problem, bk))
-    finish_piece = compile_function(bk, partial(step_finish, problem, bk))
-    begin_pieces: dict[int, Callable[..., Any]] = {}
-    grow_pieces: dict[int, Callable[..., Any]] = {}
-
-    def begin_piece(c: int) -> Callable[..., Any]:
-        """step_start compiled for basis capacity c (one version per capacity)."""
-        if c not in begin_pieces:
-            begin_pieces[c] = compile_function(bk, partial(step_start, problem, bk, capacity=c))
-        return begin_pieces[c]
-
-    def grow_piece(c: int) -> Callable[..., Any]:
-        if c not in grow_pieces:
-            grow_pieces[c] = compile_function(bk, partial(step_grow, problem, bk, capacity=c))
-        return grow_pieces[c]
-
-    # Every solve starts small and doubles its basis when full (see Backend in
-    # the docstring).
-    initial_capacity = min(DEFAULT_CAPACITY if krylov_capacity is None else krylov_capacity,
-                           max_krylov)
+        saddle_free=saddle_free, krylov=krylov, convergence_norm=convergence_norm,
+        forcing_max=forcing_max, stall_tol=stall_tol, max_krylov=max_krylov)
+    pieces = step_solve(problem, bk, krylov_capacity)
+    finish_piece = compile_function(bk, partial(step_finish, problem,
+                                                TrustRegionOptions(eta=eta, radius_max=radius_max), bk))
     growths = 0
 
-    def number(v: Any) -> float:
-        return float(np.asarray(v))
-
     start = time.perf_counter()
-    state: OuterState = start_piece(x0, g0)
+    state: OuterState = pieces.start(x0, g0)
     fx = number(state.f)                        # records hold Python floats
     fun_calls, grad_calls = 1, (0 if g0 is not None else 1)
     it = 0
@@ -364,12 +305,8 @@ def trust_region_newton(
             reason = "max_iter"
             break
         radius_x, gnorm0_x = xp.asarray(radius), xp.asarray(gnorm0)
-        capacity = initial_capacity
-        carry = begin_piece(capacity)(state, radius_x, gnorm0_x)
-        while as_integer(carry.status) == FULL:
-            capacity = min(2 * capacity, max_krylov)
-            carry = continue_piece(state, grow_piece(capacity)(state, carry))
-            growths += 1
+        carry, grown = pieces.solve(state, radius_x, gnorm0_x)
+        growths += grown
         new_state, raw = finish_piece(state, carry, radius_x, gnorm0_x)
         stats = subproblem_stats(raw.subproblem)
         fun_calls += 1
