@@ -66,7 +66,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Generic, Literal, Optional
 
 from .backend import Backend, backend_state, numpy_backend, run_cond, run_loop
-from .dense import solve_projected_trs
+from .dense import solve_projected_newton, solve_projected_trs
 from .krylov import (
     CGState,
     LanczosState,
@@ -106,17 +106,26 @@ class SubproblemStats:
                         even M^{-1} R), "max" (max_krylov or, for Lanczos
                         and flexible, the dimension), "boundary" (CG: the next
                         iterate would leave the trust region; the step stops
-                        on it) or "negative" (CG: negative curvature along the
-                        search direction; the step follows it to the boundary)
+                        on it) or "negative" (trust region, CG: negative
+                        curvature along the search direction; the step
+                        follows it to the boundary; line search, any solver:
+                        nonpositive curvature appeared, and the direction is
+                        the last one found before it, or the preconditioned
+                        steepest descent direction when it appeared at the
+                        first step)
       step_norm, lam    ||s||_M and the multiplier (> 0 when the boundary is
                         active). CG does not compute the multiplier: lam is 0
-                        for interior steps and nan on the boundary.
+                        for interior steps and nan on the boundary. A line
+                        search has no multiplier: lam = 0.
       model_value       <g,s> + 0.5 <H_model s, s>, the model that was minimized
       true_model_value  <g,s> + 0.5 <H s, s> (differs only with saddle_free)
       resid, resid_tol  final ||R||_{M^{-1}} and the tolerance it was tested
-                        against (CG: nan when the step stopped on the boundary)
+                        against (CG: nan when the step stopped on the boundary;
+                        line search: nan for the steepest-descent fallback)
       n_negative, theta_min  Lanczos and flexible: number of negative M-Ritz
-                        values and the smallest one. CG: 1 if negative
+                        values and the smallest one (line search with a
+                        separate P and no saddle-free model: eigenvalues of T,
+                        which have the same signs). CG: 1 if negative
                         curvature was found, and the smallest
                         <H p, p> / ||p||_M^2 seen.
       *_calls           calls of each operator made by this solve
@@ -325,22 +334,49 @@ def krylov_residual_norm(space: VectorSpace[VectorT, CovectorT, VectorBlockT, Co
     gamma_next y_flip[-1] v_next and its norm is gamma_next |y_flip[-1]|,
     exactly (<v_next, M^{-1} v_next> = 1): no operator is applied. With a
     separate P, R is formed explicitly, which costs one product with M when
-    lam > 0, and measured with one solve with M^{-1}.
+    lam > 0, and measured with one solve with M^{-1}. lam None stands for
+    no multiplier at all (a line search): R = gamma_next y_flip[-1] v_next,
+    and G is not needed.
     """
     xp = backend.xp
     if metric_apply is None:
         return state.gamma_next * xp.abs(y_flip_last), xp.asarray(0), xp.asarray(0)
-    assert G is not None
-    m = y.shape[0] if k is None else k
     R = space.scale_covector(state.gamma_next * y_flip_last, state.v_next)
+    applies = xp.asarray(0)
+    if lam is not None:
+        assert G is not None
+        m = y.shape[0] if k is None else k
 
-    def with_metric(R: CovectorT) -> CovectorT:
-        Ms = metric_apply(space.combine_vectors(state.Q, y, m))
-        R = space.axpy_covector(lam, Ms, R)
-        return space.axpy_covector(-lam, space.combine_covectors(state.V, G @ y, m), R)
-    R = run_cond(backend, lam > 0.0, with_metric, lambda R: R, R)
+        def with_metric(R: CovectorT) -> CovectorT:
+            Ms = metric_apply(space.combine_vectors(state.Q, y, m))
+            R = space.axpy_covector(lam, Ms, R)
+            return space.axpy_covector(-lam, space.combine_covectors(state.V, G @ y, m), R)
+        R = run_cond(backend, lam > 0.0, with_metric, lambda R: R, R)
+        applies = xp.where(lam > 0.0, 1, 0)
     norm = xp.sqrt(xp.maximum(space.pair(R, metric_solve(R)), 0.0))
-    return norm, xp.where(lam > 0.0, 1, 0), xp.asarray(1)
+    return norm, applies, xp.asarray(1)
+
+
+def _resized(backend: Backend, a: Any, n: int) -> Any:
+    """a cut or zero-padded to length n (numpy coordinates grow with k)."""
+    if a.shape[0] >= n:
+        return a[:n]
+    return backend.index_update(backend.xp.zeros(n), slice(0, a.shape[0]), a)
+
+
+def _truncated(backend: Backend, truncate: Any, k: Any, gamma0: Any, y_new: Any, y_prev: Any,
+               T: Any) -> tuple[Any, Any]:
+    """The coefficients and the model value of the direction a line-search
+    solve returns when it truncates at nonpositive curvature: the previous
+    step's solution, or at the first step -gamma0 e_1 (minus the first basis
+    vector times gamma0: the preconditioned steepest descent direction).
+    y_new otherwise. The model value is the true quadratic model
+    gamma0 y_0 + 0.5 y^T T y."""
+    xp = backend.xp
+    n = y_new.shape[0]
+    steepest = xp.where(xp.arange(n) == 0, -gamma0, 0.0)
+    y = xp.where(truncate, xp.where(k == 1, steepest, _resized(backend, y_prev, n)), y_new)
+    return y, gamma0 * y[0] + 0.5 * (y @ (T @ y))
 
 
 def boundary_stalled(lam: float, model_value: float, prev_model_value: Optional[float],
@@ -391,11 +427,20 @@ class _LanczosCarry(Generic[VectorT, CovectorT, VectorBlockT, CovectorBlockT]):
 
 
 def lanczos_solver(max_iter: int, *, saddle_free: bool = False, stall_tol: float = 1e-3,
-                   breakdown_tol: float = 1e-12) -> KrylovSolver:
-    """The Lanczos subproblem solver as pieces (see solve_tr_subproblem)."""
+                   breakdown_tol: float = 1e-12, trust_region: bool = True,
+                   curvature_floor: float = 1e-6) -> KrylovSolver:
+    """The Lanczos solver as pieces: of the trust-region subproblem (see
+    solve_tr_subproblem), or with trust_region=False of the Newton direction
+    of a line search (no bound; truncated at nonpositive curvature, or the
+    saddle-free model with curvature_floor; see solve_newton_direction).
+    The M-Gram matrix is kept only when it is needed: with a separate P, for
+    the trust region and for the saddle-free model."""
 
     def bound_of(c: _LanczosCarry[Any, Any, Any, Any]) -> int:
         return int(c.trace_model.shape[0])
+
+    def gram(ops: SubproblemOperators[Any, Any]) -> bool:
+        return ops.precond_solve is not None and (trust_region or saddle_free)
 
     def after_step(backend: Backend, space: VectorSpace[Any, Any, Any, Any],
                    ops: SubproblemOperators[Any, Any], c: _LanczosCarry[Any, Any, Any, Any],
@@ -407,17 +452,41 @@ def lanczos_solver(max_iter: int, *, saddle_free: bool = False, stall_tol: float
         k = state.steps
         T = tridiagonal(leading(backend, state.deltas, k), leading(backend, state.gammas, k),
                         backend=backend)
-        G = None if matched else leading(backend, c.G, k)      # None: the identity
-        y, y_flip, lam, model_value, true_model_value, theta = solve_projected_trs(
-            T, G, state.gamma0, c.radius, saddle_free, backend=backend, k=k)
-        resid, applies, solves = krylov_residual_norm(
-            space, state, y, y_flip[k - 1], lam, G, None if matched else ops.metric_apply,
-            ops.metric_solve, backend=backend, k=k)
+        G = leading(backend, c.G, k) if gram(ops) else None      # None: the identity, or not needed
+        metric_apply = None if matched else ops.metric_apply
+        if trust_region:
+            y, y_flip, lam, model_value, true_model_value, theta = solve_projected_trs(
+                T, G, state.gamma0, c.radius, saddle_free, backend=backend, k=k)
+            resid, applies, solves = krylov_residual_norm(
+                space, state, y, y_flip[k - 1], lam, G, metric_apply, ops.metric_solve,
+                backend=backend, k=k)
+            truncate = xp.asarray(False)
+        else:
+            y, y_flip, lam, model_value, true_model_value, theta = solve_projected_newton(
+                T, G, state.gamma0, saddle_free, curvature_floor, backend=backend, k=k)
+
+            def measure(_: Any) -> tuple[Any, Any, Any]:
+                return krylov_residual_norm(space, state, y, y_flip[k - 1], None, None,
+                                            metric_apply, ops.metric_solve, backend=backend, k=k)
+            if saddle_free:
+                truncate = xp.asarray(False)
+                resid, applies, solves = measure(None)
+            else:
+                truncate = theta[0] <= 0.0
+                # The truncated direction's residual is the previous step's (none
+                # for the steepest-descent fallback); nothing new is measured.
+                resid, applies, solves = run_cond(
+                    backend, truncate,
+                    lambda _: (xp.where(k == 1, xp.nan, c.resid), xp.asarray(0), xp.asarray(0)),
+                    measure, None)
+                y, model_value = _truncated(backend, truncate, k, state.gamma0, y, c.y, T)
+                y_flip, true_model_value = y, model_value
         n_negative = xp.sum(theta < 0.0)
         stalled = ((lam > 0.0) & xp.isfinite(c.prev_model)
                    & (xp.abs(c.prev_model - model_value) <= stall_tol * xp.abs(model_value)))
-        done = xp.where(state.breakdown, BREAKDOWN,
-                        xp.where(resid <= c.resid_tol, TOL, xp.where(stalled, STALL, RUNNING)))
+        done = xp.where(truncate, NEGATIVE, xp.where(
+            state.breakdown, BREAKDOWN,
+            xp.where(resid <= c.resid_tol, TOL, xp.where(stalled, STALL, RUNNING))))
         status = _next_status(backend, done, k, bound_of(c), int(c.G.shape[0]))
         return dataclasses.replace(
             c, state=state, status=xp.where(state.gamma0 > 0.0, status, INVALID),
@@ -444,7 +513,7 @@ def lanczos_solver(max_iter: int, *, saddle_free: bool = False, stall_tol: float
         bound = max_iter if space.dimension is None else min(max_iter, space.dimension(state.q))
         G = xp.eye(cap)
         applies = xp.asarray(0)
-        if ops.precond_solve is not None:
+        if gram(ops):
             assert ops.metric_apply is not None
             G = put(G, (0, 0), space.pair_block(state.Q, ops.metric_apply(state.q), 1)[0])  # (q0, q0)_M
             applies = xp.asarray(1)
@@ -474,7 +543,7 @@ def lanczos_solver(max_iter: int, *, saddle_free: bool = False, stall_tol: float
             k = state.steps
             stepped = lanczos_step_state(space, state, ops.hessvec, precond, breakdown_tol,
                                          project_covector=ops.project_covector, backend=backend)
-            if ops.precond_solve is not None:      # the row of G of the vector that joined the basis
+            if gram(ops):                          # the row of G of the vector that joined the basis
                 assert ops.metric_apply is not None
                 # Paired with the new basis (member k is that vector): reading the old
                 # block too would keep it alive next to the updated one, and a compiler
@@ -510,17 +579,22 @@ def lanczos_solver(max_iter: int, *, saddle_free: bool = False, stall_tol: float
         k = c.state.steps
         y, G = leading(backend, c.y, k), leading(backend, c.G, k)
         precond_calls = k + c.precond_start
+        s = space.combine_vectors(c.state.Q, c.y, k)
+        step_norm2, applies = y @ G @ y, c.metric_applies
+        if not matched and not gram(ops):     # no Gram matrix (line search): one product with M
+            assert ops.metric_apply is not None
+            step_norm2, applies = space.pair(ops.metric_apply(s), s), applies + 1
         raw = RawSubproblem(
             method=xp.asarray(METHODS.index("lanczos")), krylov_steps=k, status=c.status,
-            step_norm=xp.sqrt(xp.maximum(y @ G @ y, 0.0)), lam=c.lam, model_value=c.model_value,
+            step_norm=xp.sqrt(xp.maximum(step_norm2, 0.0)), lam=c.lam, model_value=c.model_value,
             true_model_value=c.true_model_value, resid=c.resid, resid_tol=c.resid_tol,
             n_negative=c.n_negative, theta_min=c.theta_min, hessvec_calls=k,
             metric_solve_calls=c.metric_solves + precond_calls if matched else c.metric_solves,
             precond_solve_calls=xp.asarray(0) if matched else precond_calls,
-            metric_apply_calls=c.metric_applies, trace_model=c.trace_model,
+            metric_apply_calls=applies, trace_model=c.trace_model,
             trace_resid=c.trace_resid, trace_lam=c.trace_lam, trace_negative=c.trace_negative,
             fallbacks=xp.asarray(0))
-        return space.combine_vectors(c.state.Q, c.y, k), raw
+        return s, raw
 
     return KrylovSolver(name="lanczos", begin=begin, run=run, grow=grow, result=result,
                         capacity=lambda c: int(c.G.shape[0]))
@@ -562,9 +636,13 @@ class _CGCarry(Generic[VectorT, CovectorT]):
     trace_negative: Any
 
 
-def cg_solver(max_iter: int) -> KrylovSolver:
-    """Truncated CG as pieces (see solve_tr_subproblem_cg). It keeps no
-    basis, so it never fills up and grow is not needed."""
+def cg_solver(max_iter: int, *, trust_region: bool = True) -> KrylovSolver:
+    """Truncated CG as pieces: Steihaug-Toint for the trust-region subproblem
+    (see solve_tr_subproblem_cg), or with trust_region=False Newton-CG for
+    the direction of a line search (no boundary; at nonpositive curvature it
+    stops with the current iterate, or with p_0 = -P^{-1} g at the first
+    step; see solve_newton_direction_cg). It keeps no basis, so it never
+    fills up and grow is not needed."""
 
     def begin(backend: Backend, space: VectorSpace[Any, Any, Any, Any],
               ops: SubproblemOperators[Any, Any], g: Any, radius: Any, resid_tol: Any,
@@ -595,6 +673,7 @@ def cg_solver(max_iter: int) -> KrylovSolver:
             alpha = st.rz / safe_curvature
             leaves = (curvature <= 0.0) | (positive & (st.s_norm2 + 2.0 * alpha * st.sp
                                                         + alpha ** 2 * st.p_norm2 >= radius ** 2))
+            first = c.k == 0
 
             def to_boundary(_: Any) -> _CGCarry[Any, Any]:
                 """Stop where the segment crosses the boundary (or follow
@@ -624,7 +703,28 @@ def cg_solver(max_iter: int) -> KrylovSolver:
                     trace_resid=put(c.trace_resid, c.k, resid), trace_lam=put(c.trace_lam, c.k, zero),
                     trace_negative=put(c.trace_negative, c.k, zero))
 
-            return run_cond(backend, leaves, to_boundary, advance, None)
+            def truncate(_: Any) -> _CGCarry[Any, Any]:
+                """Line search: stop at nonpositive curvature with the current
+                iterate, or with p_0 = -P^{-1} g at the first step (whose
+                residual is not measured)."""
+                tau = xp.where(first, 1.0, 0.0)
+                model = xp.where(first, -st.rz + 0.5 * curvature, st.model)
+                stopped = CGState(steps=st.steps, s=space.axpy_vector(tau, st.p, st.s), r=st.r,
+                                  z=st.z, p=st.p, rz=st.rz,
+                                  s_norm2=xp.where(first, st.p_norm2, st.s_norm2), sp=st.sp,
+                                  p_norm2=st.p_norm2, model=model)
+                resid = xp.where(first, nan, c.resid)
+                one = xp.asarray(1)
+                return dataclasses.replace(
+                    c, state=stopped, k=c.k + 1, status=xp.asarray(NEGATIVE), theta_min=theta_min,
+                    lam=zero, resid=resid, n_negative=one,
+                    trace_model=put(c.trace_model, c.k, model),
+                    trace_resid=put(c.trace_resid, c.k, resid), trace_lam=put(c.trace_lam, c.k, zero),
+                    trace_negative=put(c.trace_negative, c.k, one))
+
+            if trust_region:
+                return run_cond(backend, leaves, to_boundary, advance, None)
+            return run_cond(backend, curvature <= 0.0, truncate, advance, None)
 
         return run_loop(backend, lambda c: c.status != RUNNING, step, carry, max_iter)
 
@@ -637,7 +737,8 @@ def cg_solver(max_iter: int) -> KrylovSolver:
                ) -> tuple[Any, RawSubproblem]:
         xp = backend.xp
         st = c.state
-        on_boundary = (c.status == BOUNDARY) | (c.status == NEGATIVE)
+        on_boundary = ((c.status == BOUNDARY) | (c.status == NEGATIVE) if trust_region
+                       else xp.asarray(False))
         raw = RawSubproblem(
             method=xp.asarray(METHODS.index("cg")), krylov_steps=c.k,
             status=xp.where(c.status == RUNNING, MAX, c.status),
@@ -695,10 +796,14 @@ class _FlexibleCarry(Generic[VectorT, CovectorT, VectorBlockT, CovectorBlockT]):
     trace_negative: Any
 
 
-def flexible_solver(max_iter: int, *, saddle_free: bool = False,
-                    breakdown_tol: float = 1e-10) -> KrylovSolver:
-    """The flexible subproblem solver as pieces (see
-    solve_tr_subproblem_flexible)."""
+def flexible_solver(max_iter: int, *, saddle_free: bool = False, breakdown_tol: float = 1e-10,
+                    trust_region: bool = True, curvature_floor: float = 1e-6) -> KrylovSolver:
+    """The flexible solver as pieces: of the trust-region subproblem (see
+    solve_tr_subproblem_flexible), or with trust_region=False of the Newton
+    direction of a line search (no bound; truncated at nonpositive
+    curvature, falling back to -M^{-1} g, its first basis vector, at the
+    first step; or the saddle-free model with curvature_floor; see
+    solve_newton_direction_flexible)."""
 
     def bound_of(c: _FlexibleCarry[Any, Any, Any, Any]) -> int:
         return int(c.trace_model.shape[0])
@@ -714,23 +819,43 @@ def flexible_solver(max_iter: int, *, saddle_free: bool = False,
         xp, put = backend.xp, backend.index_update
         k = c.k
         cap = int(c.T.shape[0])
-        y, y_flip, lam, model_value, true_model_value, theta = solve_projected_trs(
-            leading(backend, c.T, k), None, c.gamma0, c.radius, saddle_free, backend=backend,
-            k=k)                                  # the basis is M-orthonormal: G = I
-        R = space.axpy_covector(1.0, g, space.combine_covectors(c.HQ, y_flip, k))
-        R = run_cond(backend, lam > 0.0,
-                     lambda R: space.axpy_covector(lam, space.combine_covectors(c.MQ, y, k), R),
-                     lambda R: R, R)
-        R = project(ops, R)
-        MinvR = ops.metric_solve(R)
-        resid = xp.sqrt(xp.maximum(space.pair(R, MinvR), 0.0))
+        T = leading(backend, c.T, k)              # the basis is M-orthonormal: G = I
+        if trust_region:
+            y, y_flip, lam, model_value, true_model_value, theta = solve_projected_trs(
+                T, None, c.gamma0, c.radius, saddle_free, backend=backend, k=k)
+        else:
+            y, y_flip, lam, model_value, true_model_value, theta = solve_projected_newton(
+                T, None, c.gamma0, saddle_free, curvature_floor, backend=backend, k=k)
+
+        def measure(_: Any) -> tuple[Any, Any, Any, Any]:
+            R = space.axpy_covector(1.0, g, space.combine_covectors(c.HQ, y_flip, k))
+            if trust_region:
+                R = run_cond(backend, lam > 0.0,
+                             lambda R: space.axpy_covector(lam, space.combine_covectors(c.MQ, y, k), R),
+                             lambda R: R, R)
+            R = project(ops, R)
+            MinvR = ops.metric_solve(R)
+            return R, MinvR, xp.sqrt(xp.maximum(space.pair(R, MinvR), 0.0)), xp.asarray(1)
+        if trust_region or saddle_free:
+            truncate = xp.asarray(False)
+            R, MinvR, resid, solves = measure(None)
+        else:
+            truncate = theta[0] <= 0.0
+            # Truncated: the previous step's residual (none for the fallback);
+            # nothing new is measured.
+            R, MinvR, resid, solves = run_cond(
+                backend, truncate,
+                lambda _: (c.R, c.MinvR, xp.where(k == 1, xp.nan, c.resid), xp.asarray(0)),
+                measure, None)
+            y, model_value = _truncated(backend, truncate, k, c.gamma0, y, c.y, T)
+            y_flip, true_model_value = y, model_value
         n_negative = xp.sum(theta < 0.0)
-        done = xp.where(resid <= c.resid_tol, TOL, RUNNING)
+        done = xp.where(truncate, NEGATIVE, xp.where(resid <= c.resid_tol, TOL, RUNNING))
         status = _next_status(backend, done, k, bound_of(c), cap)
         return dataclasses.replace(
             c, status=xp.where(c.gamma0 > 0.0, status, INVALID), R=R, MinvR=MinvR, y=y,
             y_flip=y_flip, lam=lam, model_value=model_value, true_model_value=true_model_value,
-            resid=resid, n_negative=n_negative, theta_min=theta[0], solve_calls=c.solve_calls + 1,
+            resid=resid, n_negative=n_negative, theta_min=theta[0], solve_calls=c.solve_calls + solves,
             trace_model=put(c.trace_model, k - 1, model_value),
             trace_resid=put(c.trace_resid, k - 1, resid), trace_lam=put(c.trace_lam, k - 1, lam),
             trace_negative=put(c.trace_negative, k - 1, n_negative))

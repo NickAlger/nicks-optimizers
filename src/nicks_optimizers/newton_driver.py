@@ -64,7 +64,8 @@ def make_problem(*, fun: Callable[[Any], Any], grad: Callable[[Any], Any],
                  point_data: Optional[Callable[[Any], Any]],
                  project_covector: Optional[Callable[[Any, Any], Any]], saddle_free: bool,
                  krylov: Krylov, convergence_norm: ConvergenceNorm, forcing_max: float,
-                 stall_tol: float, max_krylov: int) -> CoreProblem:
+                 stall_tol: float, max_krylov: int, trust_region: bool = True,
+                 curvature_floor: float = 1e-6) -> CoreProblem:
     """The CoreProblem, with the numpy defaults (numpy_space, x + s) filled in."""
     return CoreProblem(
         fun=fun, grad=grad, hessvec=hessvec,
@@ -74,7 +75,8 @@ def make_problem(*, fun: Callable[[Any], Any], grad: Callable[[Any], Any],
         metric_solve=metric_solve, metric_apply=metric_apply, precond_solve=precond_solve,
         operators_at=operators_at, point_data=point_data, project_covector=project_covector,
         saddle_free=saddle_free, krylov=krylov, convergence_norm=convergence_norm,
-        forcing_max=forcing_max, stall_tol=stall_tol, max_krylov=max_krylov)
+        forcing_max=forcing_max, stall_tol=stall_tol, max_krylov=max_krylov,
+        trust_region=trust_region, curvature_floor=curvature_floor)
 
 
 @dataclass(frozen=True)

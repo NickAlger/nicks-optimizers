@@ -23,6 +23,7 @@ Modules, in dependency order:
   trust_region_diagnostics  records, resumption state and text output
   trust_region_core         the trust-region update as a pure piece
   trust_region              trust_region_newton, the driver around them
+  newton_line_search        Newton directions for a line search
 
 backend, trees, spaces, metrics, dense, krylov and criteria do not depend on
 the optimizers and are meant to be reused by other methods; krylov_solvers,
@@ -88,6 +89,11 @@ from .spaces import (
     numpy_space_with_reductions,
     tuple_block_space,
     tuple_tree_space,
+)
+from .newton_line_search import (
+    solve_newton_direction,
+    solve_newton_direction_cg,
+    solve_newton_direction_flexible,
 )
 from .trees import Tree, as_tuple_tree, tree_leaves, tree_map, tree_map2
 from .trust_region import PointOperators, trust_region_newton
@@ -201,6 +207,10 @@ __all__ = [
     "solve_tr_subproblem_cg",
     "solve_tr_subproblem_flexible",
     "trust_region_newton",
+    # line search
+    "solve_newton_direction",
+    "solve_newton_direction_cg",
+    "solve_newton_direction_flexible",
 ]
 
 __version__ = "0.1.0"

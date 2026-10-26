@@ -87,6 +87,8 @@ class CoreProblem:
     forcing_max: float
     stall_tol: float
     max_krylov: int
+    trust_region: bool = True                # the solvers' mode: trust region, or line search
+    curvature_floor: float = 1e-6            # saddle-free model of a line search
 
 
 @backend_state
@@ -206,9 +208,10 @@ def uses_cg(problem: CoreProblem, ops: PointOperators[Any, Any]) -> bool:
 
 def subproblem_at(problem: CoreProblem, state: OuterState
                   ) -> tuple[KrylovSolver, SubproblemOperators[Any, Any]]:
-    """The subproblem solver for this run (chosen from the configuration and
-    whether a separate preconditioner is given, so fixed when a piece is
-    traced) and its operators at the current point."""
+    """The Krylov solver for this run (chosen from the configuration, the
+    mode, trust region or line search, and whether a separate preconditioner
+    is given, so fixed when a piece is traced) and its operators at the
+    current point."""
     ops = operators(problem, state.x, state.data)
     pc, x = problem.project_covector, state.x
     assert ops.metric_solve is not None
@@ -216,12 +219,15 @@ def subproblem_at(problem: CoreProblem, state: OuterState
         hessvec=ops.hessvec, metric_solve=ops.metric_solve, precond_solve=ops.precond_solve,
         metric_apply=ops.metric_apply,
         project_covector=None if pc is None else (lambda w: pc(x, w)))
+    tr = problem.trust_region
     if uses_cg(problem, ops):
-        return cg_solver(problem.max_krylov), sub_ops
+        return cg_solver(problem.max_krylov, trust_region=tr), sub_ops
     if problem.krylov == "flexible":
-        return flexible_solver(problem.max_krylov, saddle_free=problem.saddle_free), sub_ops
+        return flexible_solver(problem.max_krylov, saddle_free=problem.saddle_free,
+                               trust_region=tr, curvature_floor=problem.curvature_floor), sub_ops
     return lanczos_solver(problem.max_krylov, saddle_free=problem.saddle_free,
-                          stall_tol=problem.stall_tol), sub_ops
+                          stall_tol=problem.stall_tol, trust_region=tr,
+                          curvature_floor=problem.curvature_floor), sub_ops
 
 
 def step_start(problem: CoreProblem, backend: Backend, state: OuterState, radius: Any,
