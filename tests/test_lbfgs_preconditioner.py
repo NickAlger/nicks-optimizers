@@ -5,6 +5,7 @@ direction; unconventional preconditioners (nonsymmetric, nonlinear, random)
 converge; the scale fit in the M-norm; the preconditioner's convergence
 norm; fixed_preconditioner; operator calls; the strict backend."""
 
+import dataclasses
 from typing import Any, Callable, cast
 
 import numpy as np
@@ -196,6 +197,56 @@ def test_fixed_preconditioner() -> None:
             assert all(np.array_equal(u, v) for u, v in zip(fixed[15:], rest))
         else:
             assert max(rel(u, v) for u, v in zip(fixed[15:45], rest[:30])) < 1e-9
+
+
+def test_memory_zero_with_a_preconditioner() -> None:
+    """With memory 0 the M base's gamma is fitted to each pair when it is
+    formed (no pair is kept to fit it from later), so the general path is the
+    fixed path's run, with M directions and P directions both taken."""
+    fun, grad, x0 = convex()
+    _, M, P0 = matrices()
+    options: dict[str, Any] = dict(memory=0, precond_solve=lambda x, w: w / np.diag(P0), angle_tol=0.9,
+                                   max_iter=150, **metric(M))
+    general, sg = iterates(fun, grad, x0, **options)
+    fixed, sf = iterates(fun, grad, x0, fixed_metric=True, **options)
+    assert {r.base for r in sg.iterations[:60]} == {"M", "P"}
+    assert [(r.base, r.trials, r.update) for r in sf.iterations[:60]] == \
+        [(r.base, r.trials, r.update) for r in sg.iterations[:60]]
+    assert max(abs(a.gamma - b.gamma) / b.gamma for a, b in zip(sg.iterations[:60], sf.iterations[:60])) < 1e-9
+    assert max(rel(a, b) for a, b in zip(general[:60], fixed[:60])) < 1e-9
+
+
+def test_a_restart_fits_gamma_to_the_newest_pair_first() -> None:
+    """With a preconditioner, gamma of the M base is fitted when the M
+    direction is used. While P's directions are taken it is not, so a
+    restart, which clears the memory, fits it to the newest pair first (one
+    M^{-1} solve), as a restart without P keeps the newest pair's fit."""
+    from nicks_optimizers import numpy_backend
+    from nicks_optimizers.lbfgs_core import LbfgsProblem, init, lbfgs_step, restart
+    from nicks_optimizers.lbfgs_memory import memory_count
+    fun, grad, x0 = convex()
+    _, M, P0 = matrices()
+    problem = LbfgsProblem(
+        fun=fun, grad=grad, space=numpy_space, numpy_default=True, retract=lambda x, s: x + s,
+        transport=identity_transport, metric_solve=metric(M)["metric_solve"],
+        metric_apply=metric(M)["metric_apply"], operators_at=None, point_data=None, project_covector=None,
+        memory=5, scaling="y", gamma0=1.0, initial_step=None, pairings="stored", curvature_test="relative",
+        curvature_tol=1e-8, angle_tol=1e-8, c1=1e-4, max_backtracks=30, step_max=None,
+        precond_solve=lambda x, w: w / np.diag(P0))
+    state = init(problem, numpy_backend, x0, None)
+    for _ in range(4):
+        state, raw = lbfgs_step(problem, numpy_backend, state)
+        assert int(raw.base) == 1 and int(raw.update) == 1              # P's direction, pair stored
+    assert float(state.gamma) == 1.0                                     # not fitted yet
+    newest = int(np.argmax(state.memory.stamp))
+    s_new = np.asarray(numpy_space.vector_member(state.memory.S, newest))
+    y_new = np.asarray(numpy_space.covector_member(state.memory.Y, newest))
+    fresh = restart(problem, numpy_backend, state)
+    assert int(memory_count(numpy_backend, fresh.memory)) == 0
+    assert abs(float(fresh.gamma) - (y_new @ s_new) / (y_new @ np.linalg.solve(M, y_new))) < 1e-12
+    assert int(fresh.metric_solves) == 1 and int(fresh.metric_applies) == 0
+    without_P = dataclasses.replace(problem, precond_solve=None)
+    assert float(restart(without_P, numpy_backend, state).gamma) == 1.0  # fitted at storage there
 
 
 def test_operators_at_can_give_the_preconditioner() -> None:

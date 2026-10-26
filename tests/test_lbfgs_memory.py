@@ -209,6 +209,61 @@ def test_recomputed_pairings_are_the_textbook_operator_of_the_transported_pairs(
     assert rel(operator(kept, B0), dense_bfgs(steps[1:], np.linalg.inv(B0))) < 1e-10
 
 
+def test_skips_drops_and_slot_reuse_keep_the_textbook_operator() -> None:
+    """A memory of 4 through a history like a run's: pairs stored, a pair
+    skipped (not stored), a pair in the middle dropped by recomputed
+    pairings, its slot reused by the next pair, then the oldest replaced
+    until every slot has turned over. At every stage the operator is the dense
+    BFGS operator of the pairs kept, oldest first by stamp."""
+    rng = np.random.default_rng(6)
+    m = 4
+    A, B0 = spd(rng, N, float(N)), spd(rng, N)
+    H0 = np.linalg.inv(B0)
+    steps = pairs(rng, A, 10)
+    memory: Mem = memory_empty(numpy_space, numpy_backend, steps[0][0], steps[0][1], m)
+    kept: list[tuple[Vector, Covector]] = []
+    stamp = 0
+
+    def store(k: int) -> None:
+        nonlocal memory, stamp, kept
+        s, y = steps[k]
+        memory = memory_store(numpy_space, numpy_backend, memory, s, y, np.asarray(stamp), np.asarray(0.0))
+        stamp += 1
+        kept = (kept + [(s, y)])[-m:]
+
+    def check() -> None:
+        assert int(memory_count(numpy_backend, memory)) == len(kept)
+        H = operator(memory, B0)
+        assert rel(H, dense_bfgs(kept, H0)) < 1e-11
+        s, y = kept[-1]
+        assert np.linalg.norm(H @ y - s) < 1e-10 * np.linalg.norm(s)
+
+    for k in range(3):
+        store(k)
+    check()
+    before = operator(memory, B0)                     # step 3 is skipped: nothing changes
+    check()
+    assert np.array_equal(operator(memory, B0), before)
+
+    # drop the middle pair: a covector transport sends y_1 to -y_1 and fixes y_0 and y_2
+    Ys = np.column_stack([y for _, y in kept])
+    z = np.linalg.lstsq(Ys.T, np.eye(3)[1], rcond=None)[0]           # z.y_1 = 1, z.y_0 = z.y_2 = 0
+    flip = np.eye(N) - 2.0 * np.outer(kept[1][1], z)
+    moved = memory_transport(numpy_space, numpy_backend, matrix_transport(np.eye(N), flip), None, None, memory)
+    memory, dropped = memory_recompute(numpy_space, numpy_backend, moved)
+    assert int(dropped) == 1
+    kept = [kept[0], kept[2]]
+    check()
+    free = int(np.flatnonzero(np.asarray(memory.stamp) < 0)[0])
+    store(4)                                          # into the freed slot, not over the oldest
+    assert int(np.asarray(memory.stamp)[free]) == stamp - 1
+    check()
+    for k in range(5, 10):                            # full at 5, then the oldest goes each time
+        store(k)
+        check()
+    assert sorted(np.asarray(memory.stamp).tolist()) == list(range(stamp - m, stamp))
+
+
 def test_transport_by_member_and_by_block_agree() -> None:
     rng = np.random.default_rng(5)
     A = spd(rng, N, float(N))

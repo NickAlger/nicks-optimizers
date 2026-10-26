@@ -338,7 +338,8 @@ def lbfgs(
         gnorm0, it = resume.gnorm0, resume.next_iteration
         k = min(len(resume.pairs), memory)          # the newest, if memory shrank
         kept = resume.slots[len(resume.slots) - k:]
-        slots = kept if max(kept, default=-1) < memory else tuple(range(k))
+        room = max(memory, 1)                        # memory 0 still has its one slot, kept empty
+        slots = kept if max(kept, default=-1) < room else tuple(range(k))
         pairs = resume.pairs[len(resume.pairs) - k:]
         metric_pairs = None
         precond_vectors = None
@@ -368,7 +369,7 @@ def lbfgs(
             memory=memory_from_pairs(sp, bk, pairs,
                                      [row[len(row) - k:] for row in resume.pairings[len(resume.pairings) - k:]],
                                      resume.floors[len(resume.floors) - k:], slots, state.Mg, state.g,
-                                     memory, metric_pairs, precond_vectors))
+                                     room, metric_pairs, precond_vectors))
     gnorm = number(state.gnorm)
     if gnorm0 is None:
         gnorm0 = gnorm
@@ -389,6 +390,8 @@ def lbfgs(
         if cleared:
             new_state = restart_piece(state)
             restarts += 1
+            metric_solves += int(np.asarray(new_state.metric_solves))      # gamma's fit, with P
+            metric_applies += int(np.asarray(new_state.metric_applies))
         update = UPDATES[int(np.asarray(raw.update))]
         n_dropped = int(np.asarray(raw.dropped))
         fun_calls += n_trials

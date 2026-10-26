@@ -835,3 +835,22 @@ asks for it.
     - a structured secant update (Dennis-Martinez-Tapia), spending the
       memory on H - M(x) with y - M(x_new) s;
     - a long BB step on negative curvature at memory 0.
+- **Independent review (2026-10-26).** A reviewer without context checked
+  every direction of whole runs against dense BFGS operators built from
+  the same pairs, for m = 0 to 10 (wraparound, skips, constant and
+  point-dependent M, P, fixed paths, transports), and compared runs with
+  its own textbook L-BFGS. Everything matched; no bug in how several pairs
+  are used. Fixed:
+  - memory 0 with P on the general path never fitted the M base's gamma
+    (it is now fitted when each pair is formed, as on the fixed path);
+  - a restart with P now fits gamma to the newest pair before clearing it
+    (it was fitted lazily, so a restart after P's directions kept a stale
+    one); the fit's solve is counted;
+  - resuming with memory 0 crashed (the memory needs its one slot);
+  - after a fallback whose line search fails, the reported state now has
+    the memory cleared.
+  - Tests added: every direction against dense BFGS over whole runs (skips,
+    restarts, fallbacks, wraparound, P with both bases, memory 0 with P);
+    textbook equivalence for memories 0, 1 and 3; a memory through skips, a
+    dropped pair and slot reuse; resuming with memory 0; the restart fit; a
+    failed fallback.

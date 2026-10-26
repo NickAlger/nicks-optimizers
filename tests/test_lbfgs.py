@@ -95,7 +95,8 @@ def textbook(fun: Callable[[Any], float], grad: Callable[[Any], Any], x0: Array,
         g1 = grad(x1)
         s, y = float(found.alpha) * d, g1 - g
         if float(y @ s) > curvature_tol * abs(float(found.alpha) * slope):
-            S, Y = (S + [s])[-m:], (Y + [y])[-m:]
+            if m > 0:                                   # memory 0: the pair only fits gamma
+                S, Y = (S + [s])[-m:], (Y + [y])[-m:]
             gamma = float(y @ s) / float(y @ y)
         x, f, g = x1, float(found.f), g1
         xs.append(x.copy())
@@ -131,6 +132,22 @@ def test_euclidean_metric_is_textbook_lbfgs() -> None:
     reference = textbook(rosen_fun, rosen_grad, X0)
     assert summary.reason == "converged"
     assert max(rel(a, b) for a, b in zip(xs[:40], reference[:40])) < 1e-10
+
+
+@pytest.mark.parametrize("m", [0, 1, 3])
+def test_every_memory_is_textbook_lbfgs(m: int) -> None:
+    """As test_euclidean_metric_is_textbook_lbfgs, with other memories:
+    memory 0 (no pairs: steepest descent with Barzilai-Borwein steps), 1 and
+    3 (which wrap around from the third pair on)."""
+    fun, grad, x0 = convex()
+    xs, summary = iterates(fun, grad, x0, memory=m)
+    reference = textbook(fun, grad, x0, m=m)
+    assert summary.reason == "converged" and len(xs) == len(reference)
+    assert max(rel(a, b) for a, b in zip(xs, reference)) < 1e-8
+    xs, summary = iterates(rosen_fun, rosen_grad, X0, memory=m, max_iter=40)
+    reference = textbook(rosen_fun, rosen_grad, X0, m=m, max_iter=40)
+    assert len(xs) == len(reference)
+    assert max(rel(a, b) for a, b in zip(xs, reference)) < 1e-10
 
 
 def test_constant_metric_is_textbook_lbfgs_after_a_change_of_variables() -> None:
@@ -272,6 +289,94 @@ def test_sphere_with_projection_transports(pairings: Pairings) -> None:
     assert s.metric_apply_calls == len(s.iterations) + accepted + corrections
 
 
+# --- every direction against dense BFGS --------------------------------------------------
+
+
+def jacobi_like_metric(x: Array) -> Array:
+    """A point-dependent metric for X0's dimension: a fixed SPD matrix plus
+    diag(1 + x^2)."""
+    n = x.shape[0]
+    Q = np.linalg.qr(np.random.default_rng(0).standard_normal((n, n)))[0]
+    out: Array = Q @ np.diag(np.geomspace(0.5, 2.0, n)) @ Q.T + np.diag(1.0 + x ** 2)
+    return out
+
+
+@pytest.mark.parametrize("m,options,event", [
+    (0, dict(), "skips"),
+    (1, dict(), "wraps"),
+    (3, dict(curvature_tol=0.3), "skips"),
+    (5, dict(curvature_tol=0.3), "skips"),
+    (2, dict(max_backtracks=2, initial_step=0.1), "restarts"),
+    (3, dict(angle_tol=0.9), "fallbacks"),
+    (4, dict(angle_tol=0.3, precond=True), "both bases"),
+    (0, dict(angle_tol=0.7, precond=True), "both bases"),
+])
+def test_every_direction_is_the_dense_bfgs_direction(m: int, options: dict[str, Any], event: str) -> None:
+    """Over whole runs on Rosenbrock with a point-dependent metric M(x), each
+    direction is -H g for H the dense BFGS operator of the pairs kept
+    (replayed from the records: stored pairs appended, the oldest dropped
+    past m, all dropped at a fallback or restart) on the base gamma M(x)^{-1}
+    (or gamma_P P^{-1}). The curvature test's decisions and the scalings are
+    checked too: gamma fitted to the newest stored pair (lazily, at the
+    current point, with P), gamma_P fitted when its pair was stored."""
+    from test_lbfgs_memory import dense_bfgs
+    options = dict(options)
+    precond = options.pop("precond", False)
+    n = X0.shape[0]
+    Q2 = np.linalg.qr(np.random.default_rng(1).standard_normal((n, n)))[0]
+    P = Q2 @ np.diag(np.geomspace(1.0, 50.0, n)) @ Q2.T
+    log: list[tuple[Array, Any, Array, Array]] = []
+    s: LbfgsSummary[Any, Any]
+    _, s = lbfgs(rosen_fun, rosen_grad, X0, memory=m, max_iter=300,
+                 callback=lambda x, info: log.append((np.array(x), info.record, np.array(info.step),
+                                                      np.array(info.g))),
+                 metric_solve=lambda x, w: np.linalg.solve(jacobi_like_metric(x), w),
+                 metric_apply=lambda x, v: jacobi_like_metric(x) @ v,
+                 precond_solve=(lambda x, w: np.linalg.solve(P, w)) if precond else None, **options)
+    tol = options.get("curvature_tol", 1e-8)
+    x, g = np.array(X0), np.asarray(rosen_grad(X0))
+    kept: list[tuple[Any, Any]] = []
+    gamma = gamma_P = 1.0
+    if "initial_step" in options:
+        gamma = options["initial_step"] / np.sqrt(g @ np.linalg.solve(jacobi_like_metric(x), g))
+    stored = 0
+    for x1, r, step, g1 in log:
+        if r.direction == "fallback":
+            kept = []
+        base = np.linalg.inv(P) if r.base == "P" else np.linalg.inv(jacobi_like_metric(x))
+        d = -dense_bfgs(kept, r.gamma * base) @ g
+        assert rel(step / r.alpha, d) < 1e-10
+        if r.base == "P":
+            assert abs(r.gamma - gamma_P) <= 1e-12 * gamma_P
+        elif not precond or m == 0:
+            assert abs(r.gamma - gamma) <= 1e-12 * gamma
+        elif kept and r.direction != "fallback":     # refitted to the newest pair, here
+            sn, yn = kept[-1]
+            fit = float(yn @ sn) / float(yn @ np.linalg.solve(jacobi_like_metric(x), yn))
+            assert abs(r.gamma - fit) <= 1e-12 * fit
+        if r.accepted:
+            sv, y = step, g1 - g
+            ok = float(y @ sv) > tol * abs(float(g @ sv))
+            assert (r.update == "stored") == ok
+            if ok:
+                stored += 1
+                gamma = float(y @ sv) / float(y @ np.linalg.solve(jacobi_like_metric(x1), y))
+                u = np.linalg.solve(P, y)
+                Mu = jacobi_like_metric(x1) @ u
+                fit_P = float(Mu @ sv) / float(Mu @ u)
+                gamma_P = fit_P if fit_P > 0.0 else gamma_P        # a nonpositive fit is not taken
+                if m > 0:
+                    kept = (kept + [(sv, y)])[-m:]
+            x, g = x1, g1
+        if r.restart:
+            kept = []
+    assert max(r.pairs for r in s.iterations) == m
+    happened = {"skips": s.skipped > 0, "wraps": stored > m, "restarts": s.restarts > 0,
+                "fallbacks": any(r.direction == "fallback" for r in s.iterations),
+                "both bases": {r.base for r in s.iterations} == {"M", "P"}}
+    assert happened[event] and (m == 0 or stored > m)
+
+
 # --- restarts, fallbacks, skipped pairs -----------------------------------------------------
 
 
@@ -340,6 +445,48 @@ def test_resuming_is_exact() -> None:
     merged = merge_lbfgs_summaries(first, second)
     assert len(merged.iterations) == len(s_full.iterations)
     assert merged.fun_calls == s_full.fun_calls + 1 and merged.grad_calls == s_full.grad_calls
+
+
+def test_resuming_with_memory_zero() -> None:
+    """A memory-0 run resumes exactly (the memory keeps its one slot empty);
+    a state saved with pairs resumes with memory 0 as the memory-0 run from
+    there, gamma as saved."""
+    fun, grad, x0 = convex()
+    full, _ = iterates(fun, grad, x0, memory=0)
+    for m_first in (0, 3):
+        saved: dict[str, Any] = {}
+
+        def stop_at_12(x: Any, info: LbfgsInfo[Any, Any]) -> bool:
+            if info.record.iteration == 11:
+                saved.update(x=np.array(x), resume=info.resume, g=np.array(info.g))
+                return True
+            return False
+        lbfgs(fun, grad, x0, memory=m_first, callback=stop_at_12)
+        resume: LbfgsResume[Any, Any] = saved["resume"]
+        assert len(resume.pairs) == min(m_first, 12)
+        rest, second = iterates(fun, grad, saved["x"], memory=0, resume=resume, g0=saved["g"])
+        assert all(r.pairs == 0 for r in second.iterations)
+        if m_first == 0:
+            assert all(np.array_equal(a, b) for a, b in zip(full[12:], rest)) and len(full) == 12 + len(rest)
+        else:
+            fresh, _ = iterates(fun, grad, saved["x"], memory=0, gamma0=resume.gamma, max_iter=30)
+            assert all(np.array_equal(a, b) for a, b in zip(fresh, rest[:31]))
+
+
+def test_a_failed_fallback_leaves_an_empty_memory() -> None:
+    """A fallback clears the memory; if its line search then fails, the run
+    stops there, and the state it reports (for resuming) has no pairs."""
+    fun, grad, x0 = convex()
+    calls = [0]
+
+    def failing(x: Any) -> float:               # f is infinite after 30 evaluations
+        calls[0] += 1
+        return np.inf if calls[0] > 30 else fun(x)
+    s: LbfgsSummary[Any, Any]
+    _, s = lbfgs(failing, grad, x0, angle_tol=0.999999)
+    last = s.iterations[-1]
+    assert s.reason == "line_search" and last.direction == "fallback" and last.pairs > 0
+    assert len(s.resume.pairs) == 0
 
 
 def test_display_and_history() -> None:

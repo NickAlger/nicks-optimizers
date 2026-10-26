@@ -18,7 +18,8 @@ dev/lbfgs_plan.md).
                   memory transported there, the new pair (s, y) tested and
                   stored, the scalings refitted
   restart(problem, backend, state) -> LbfgsState
-                  the same state with the memory cleared
+                  the same state with the memory cleared (and gamma fitted
+                  to the newest pair first where it is fitted lazily)
 
 Everything geometric is measured with the metric M, given by both of its
 operators (M^{-1}, the Riesz map, and M): the base gamma M^{-1}, the scaling
@@ -341,9 +342,50 @@ def init(problem: LbfgsProblem, backend: Backend, x0: Any, g0: Any) -> LbfgsStat
                       precond_solves=xp.asarray(precond_solves), metric_applies=xp.asarray(applies))
 
 
+def _lazy_gamma(problem: LbfgsProblem, has_P: bool) -> bool:
+    """Whether gamma of the M base is fitted lazily, when the M direction is
+    used, rather than when each pair is stored: with a preconditioner on the
+    general path the M base is a fallback, so its fit (a solve) is made only
+    when needed. With memory 0 no pair is kept to fit it from later, so it is
+    fitted at storage."""
+    return has_P and not problem.fixed_metric and problem.scaling != "none" and problem.memory > 0
+
+
+def _newest_fit(problem: LbfgsProblem, backend: Backend, memory: Memory[Any, Any],
+                ops: PointOperators[Any, Any], gamma: Any) -> tuple[Any, Any, Any]:
+    """(gamma, solves, products): gamma of the M base fitted to the newest
+    stored pair with the operators of this point, or gamma as given with an
+    empty memory."""
+    xp, space = backend.xp, problem.space
+    assert ops.metric_solve is not None and ops.metric_apply is not None
+    solve, apply = ops.metric_solve, ops.metric_apply
+    m, zero, nan = capacity(memory), xp.asarray(0), xp.asarray(xp.nan)
+    uses_yy, uses_ss = problem.scaling in ("y", "geometric"), problem.scaling in ("s", "geometric")
+
+    def refit(_: Any) -> tuple[Any, Any, Any]:
+        j = xp.take(xp.argsort(memory.stamp), m - 1)          # the newest slot
+        s_j, y_j = space.vector_member(memory.S, j), space.covector_member(memory.Y, j)
+        yy = space.pair(y_j, solve(y_j)) if uses_yy else nan
+        ss = space.pair(apply(s_j), s_j) if uses_ss else nan
+        return (_fit(problem, xp, space.pair(y_j, s_j), ss, yy, gamma),
+                xp.asarray(int(uses_yy)), xp.asarray(int(uses_ss)))
+
+    return run_cond(backend, memory_count(backend, memory) > 0, refit, lambda _: (gamma, zero, zero), None)
+
+
 def restart(problem: LbfgsProblem, backend: Backend, state: LbfgsState) -> LbfgsState:
-    """The state with the memory cleared (the scalings are kept)."""
-    return dataclasses.replace(state, memory=memory_clear(problem.space, backend, state.memory))
+    """The state with the memory cleared. The scalings are kept: gamma is
+    the fit to the newest pair, so where it is fitted lazily (with a
+    preconditioner) it is fitted first, before the pair is gone; the state's
+    counts are then those of that fit."""
+    xp = backend.xp
+    zero = xp.asarray(0)
+    ops = point_operators(problem, state.x, state.data)
+    gamma, solves, applies = state.gamma, zero, zero
+    if _lazy_gamma(problem, ops.precond_solve is not None):
+        gamma, solves, applies = _newest_fit(problem, backend, state.memory, ops, state.gamma)
+    return dataclasses.replace(state, memory=memory_clear(problem.space, backend, state.memory), gamma=gamma,
+                               metric_solves=solves, precond_solves=zero, metric_applies=applies)
 
 
 def _floor(problem: LbfgsProblem, xp: Any, gs: Any, ss: Any, yy: Any, metric_gnorm: Any) -> Any:
@@ -425,22 +467,12 @@ def lbfgs_step(problem: LbfgsProblem, backend: Backend, state: LbfgsState
 
     def refitted_gamma() -> tuple[Any, Any, Any]:
         """(gamma, solves, products): gamma of the M base refitted to the
-        newest stored pair, at this point (with a preconditioner the M base
-        is a fallback, so its fit is made only when it is used); gamma as it
-        is with an empty memory, or when it is kept up to date at storage."""
-        if not has_P or problem.fixed_metric or problem.scaling == "none":
+        newest stored pair, at this point, where it is fitted lazily (see
+        _lazy_gamma); gamma as it is with an empty memory, or when it is kept
+        up to date at storage."""
+        if not _lazy_gamma(problem, has_P):
             return state.gamma, zero, zero
-        uses_yy, uses_ss = problem.scaling in ("y", "geometric"), problem.scaling in ("s", "geometric")
-
-        def refit(_: Any) -> tuple[Any, Any, Any]:
-            j = xp.take(xp.argsort(memory.stamp), m - 1)          # the newest slot
-            s_j, y_j = space.vector_member(memory.S, j), space.covector_member(memory.Y, j)
-            yy = space.pair(y_j, solve(y_j)) if uses_yy else nan
-            ss = space.pair(apply(s_j), s_j) if uses_ss else nan
-            return (_fit(problem, xp, space.pair(y_j, s_j), ss, yy, state.gamma),
-                    xp.asarray(int(uses_yy)), xp.asarray(int(uses_ss)))
-
-        return run_cond(backend, pairs > 0, refit, lambda _: (state.gamma, zero, zero), None)
+        return _newest_fit(problem, backend, memory, ops, state.gamma)
 
     if not has_P:
         d, Md, base_solves, base_applies = m_direction(state.gamma)
@@ -536,8 +568,8 @@ def lbfgs_step(problem: LbfgsProblem, backend: Backend, state: LbfgsState
             isometry = xp.asarray(0.0)
         else:
             metric_pair = None
-            # with a preconditioner the M base's fit is made when it is used
-            fit_M = problem.scaling != "none" and not has_P
+            # with a preconditioner the M base's fit is made when it is used (see _lazy_gamma)
+            fit_M = problem.scaling != "none" and not _lazy_gamma(problem, has_P)
             uses_ss = need_ss and (fit_M or problem.curvature_test in ("dennis-schnabel", "cautious"))
             uses_yy = need_yy and (fit_M or problem.curvature_test == "dennis-schnabel")
             ss = nan
@@ -578,8 +610,8 @@ def lbfgs_step(problem: LbfgsProblem, backend: Backend, state: LbfgsState
                                                   full_pairings=full, metric_pair=metric_pair,
                                                   precond_y=precond_y),
                           lambda m_: m_, moved)
-        gamma = xp.where(ok, _fit(problem, xp, ys, ss, yy, gamma_M), gamma_M) if (fixed or not has_P) \
-            else gamma_M
+        gamma = gamma_M if _lazy_gamma(problem, has_P) else xp.where(ok, _fit(problem, xp, ys, ss, yy, gamma_M),
+                                                                      gamma_M)
         new = LbfgsState(x=x1, f=f1, g=g1, data=data1, Mg=Mg1, Pg=Pg1, gnorm=gnorm1,
                          metric_gnorm=metric_gnorm1, memory=stored, gamma=gamma, gamma_P=gamma_P,
                          stamp=state.stamp + xp.where(ok, 1, 0), metric_solves=solves,
@@ -595,7 +627,8 @@ def lbfgs_step(problem: LbfgsProblem, backend: Backend, state: LbfgsState
                      dropped, defect, isometry, solves, psolves, applies, vectors, covectors, blocks)
 
     def stay(_: Any) -> tuple[LbfgsState, tuple[Any, ...]]:
-        kept = dataclasses.replace(state, gamma=gamma_M)
+        # the memory as this iteration left it: cleared if the direction was a fallback
+        kept = dataclasses.replace(state, gamma=gamma_M, memory=memory)
         return kept, (nan, nan, xp.asarray(NO_UPDATE), zero, nan, nan, zero, zero, zero, zero, zero, zero)
 
     new_state, (ys, curvature, update, dropped, defect, isometry, solves, psolves, applies, vectors,
