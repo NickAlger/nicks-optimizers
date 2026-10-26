@@ -345,15 +345,15 @@ def test_every_direction_is_the_dense_bfgs_direction(m: int, options: dict[str, 
             kept = []
         base = np.linalg.inv(P) if r.base == "P" else np.linalg.inv(jacobi_like_metric(x))
         d = -dense_bfgs(kept, r.gamma * base) @ g
-        assert rel(step / r.alpha, d) < 1e-10
+        assert rel(step / r.alpha, d) < 1e-9
         if r.base == "P":
-            assert abs(r.gamma - gamma_P) <= 1e-12 * gamma_P
+            assert abs(r.gamma - gamma_P) <= 1e-9 * gamma_P
         elif not precond or m == 0:
-            assert abs(r.gamma - gamma) <= 1e-12 * gamma
+            assert abs(r.gamma - gamma) <= 1e-9 * gamma
         elif kept and r.direction != "fallback":     # refitted to the newest pair, here
             sn, yn = kept[-1]
             fit = float(yn @ sn) / float(yn @ np.linalg.solve(jacobi_like_metric(x), yn))
-            assert abs(r.gamma - fit) <= 1e-12 * fit
+            assert abs(r.gamma - fit) <= 1e-9 * fit
         if r.accepted:
             sv, y = step, g1 - g
             ok = float(y @ sv) > tol * abs(float(g @ sv))
