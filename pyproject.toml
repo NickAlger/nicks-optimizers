@@ -42,6 +42,8 @@ addopts = "-q"
 [tool.mypy]
 strict = true
 files = ["src", "tests", "examples"]
+# Deliberate type errors, checked by tests/test_typing.py.
+exclude = ["tests/typing_errors/"]
 mypy_path = "tests:examples"
 
 [[tool.mypy.overrides]]

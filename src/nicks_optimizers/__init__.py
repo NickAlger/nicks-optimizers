@@ -9,6 +9,8 @@ Modules, in dependency order:
                             covectors are represented (VectorSpace records)
   metrics                   the Hilbert structure: the metric M, given by
                             operators, and norms
+  transport                 vector transports: how vectors and covectors
+                            move between tangent spaces
   dense                     small dense linear algebra in coordinates
   krylov                    Krylov processes (preconditioned Lanczos and CG)
   criteria                  tests shared by inexact Newton methods
@@ -31,9 +33,11 @@ Modules, in dependency order:
                             piece
   newton_line_search        line_search_newton, the driver, and Newton
                             directions for a line search
+  lbfgs_memory              the memory of lbfgs and the two-loop recursion
+                            in coordinates, as pure functions
 
-backend, trees, spaces, metrics, dense, krylov, criteria and line_search do
-not depend on the optimizers and are meant to be reused by other methods; krylov_solvers,
+backend, trees, spaces, metrics, transport, dense, krylov, criteria and
+line_search do not depend on the optimizers and are meant to be reused by other methods; krylov_solvers,
 newton_core and newton_driver are shared by the Newton optimizers. The names
 below are the public interface; lower-level pieces are available from their
 modules.
@@ -118,6 +122,7 @@ from .newton_line_search_diagnostics import (
     ls_history_array,
     merge_ls_summaries,
 )
+from .transport import VectorTransport, identity_transport, riesz_covector_transport
 from .trees import Tree, as_tuple_tree, tree_leaves, tree_map, tree_map2
 from .trust_region import PointOperators, trust_region_newton
 from .trust_region_diagnostics import (
@@ -190,6 +195,10 @@ __all__ = [
     "euclidean_metric_solve",
     "extend_metric_gram",
     "vector_norm",
+    # transport
+    "VectorTransport",
+    "identity_transport",
+    "riesz_covector_transport",
     # dense
     "pencil_ritz",
     "solve_projected_newton",

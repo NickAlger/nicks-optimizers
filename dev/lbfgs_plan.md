@@ -661,3 +661,28 @@ asks for it.
   - tuple_block_space: from pair.
 
   check_space tests the three entries.
+- **Phase 1 (2026-10-26).**
+  - `transport` holds VectorTransport, identity_transport and
+    riesz_covector_transport.
+  - `lbfgs_memory` holds the memory and the split two-loop recursion,
+    generic and numpy-free:
+    - slots ordered by stamps;
+    - free slots hold zero, so linear transports and masked coefficients
+      are safe;
+    - a pair is stored in the lowest free slot, else the oldest;
+    - transports go by block or member by member (fresh blocks, built by
+      appending);
+    - memory_recompute drops pairs whose curvature falls to the floor they
+      passed when stored.
+  - Tests: the coordinate recursion against the textbook sequential
+    recursion and the dense BFGS recursion (capacities 1, 2, 5, n,
+    wrapped); 200 trials of stale pairings (symmetric positive definite,
+    newest secant exact); pairing-preserving transports keep the stored
+    pairings current; recomputed pairings give the BFGS operator of the
+    transported pairs, and a flipped pair is dropped; block and member
+    transports agree; riesz_covector_transport preserves pairings for
+    isometries; the strict backend agrees with numpy.
+  - Typing: `tests/typing_errors/` holds mix-ups that mypy must reject
+    (arg-type, or misc where swapped generic arguments defeat inference),
+    checked by `tests/test_typing.py`. With memory_store untyped, the test
+    fails.
