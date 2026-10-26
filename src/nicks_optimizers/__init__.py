@@ -25,7 +25,12 @@ Modules, in dependency order:
   trust_region_diagnostics  records, resumption state and text output
   trust_region_core         the trust-region update as a pure piece
   trust_region              trust_region_newton, the driver around them
-  newton_line_search        Newton directions for a line search
+  newton_line_search_diagnostics  records, resumption state and text output
+                            of the line search
+  newton_line_search_core   the line-search part of an iteration as a pure
+                            piece
+  newton_line_search        line_search_newton, the driver, and Newton
+                            directions for a line search
 
 backend, trees, spaces, metrics, dense, krylov, criteria and line_search do
 not depend on the optimizers and are meant to be reused by other methods; krylov_solvers,
@@ -94,9 +99,24 @@ from .spaces import (
 )
 from .line_search import LineSearchResult, backtracking
 from .newton_line_search import (
+    line_search_newton,
     solve_newton_direction,
     solve_newton_direction_cg,
     solve_newton_direction_flexible,
+)
+from .newton_line_search_diagnostics import (
+    LineSearchInfo,
+    LineSearchReason,
+    LineSearchRecord,
+    LineSearchResume,
+    LineSearchSummary,
+    format_ls_header,
+    format_ls_krylov_trace,
+    format_ls_row,
+    format_ls_summary,
+    format_ls_trials,
+    ls_history_array,
+    merge_ls_summaries,
 )
 from .trees import Tree, as_tuple_tree, tree_leaves, tree_map, tree_map2
 from .trust_region import PointOperators, trust_region_newton
@@ -211,8 +231,21 @@ __all__ = [
     "solve_tr_subproblem_flexible",
     "trust_region_newton",
     # line search
+    "LineSearchInfo",
+    "LineSearchReason",
+    "LineSearchRecord",
     "LineSearchResult",
+    "LineSearchResume",
+    "LineSearchSummary",
     "backtracking",
+    "format_ls_header",
+    "format_ls_krylov_trace",
+    "format_ls_row",
+    "format_ls_summary",
+    "format_ls_trials",
+    "line_search_newton",
+    "ls_history_array",
+    "merge_ls_summaries",
     "solve_newton_direction",
     "solve_newton_direction_cg",
     "solve_newton_direction_flexible",
