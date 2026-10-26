@@ -21,11 +21,11 @@ display_lbfgs_iteration prints them.
 """
 
 from dataclasses import dataclass
-from typing import Callable, Generic, Literal
+from typing import Callable, Generic, Literal, Optional
 
 import numpy as np
 
-from .lbfgs_core import Direction, Update
+from .lbfgs_core import Base, Direction, Update
 from .newton_line_search_diagnostics import format_trials
 from .spaces import Array, CovectorT, VectorT
 
@@ -43,7 +43,8 @@ class LbfgsRecord:
                          memory: -gamma M^{-1} g), or "fallback" (the
                          memory's direction failed the descent or angle test;
                          -gamma M^{-1} g instead, and the memory was cleared)
-      base               "M" (the base gamma M^{-1})
+      base               "M" (the base gamma M^{-1}) or "P" (the preconditioner's
+                         base gamma_P P^{-1}): the base of the direction taken
       pairs, gamma       the pairs in the memory and the scaling the
                          direction used
       step_norm          ||d||_M
@@ -75,7 +76,7 @@ class LbfgsRecord:
     gnorm: float
     gnorm_ratio: float
     direction: Direction
-    base: str
+    base: Base
     pairs: int
     gamma: float
     step_norm: float
@@ -117,6 +118,9 @@ class LbfgsResume(Generic[VectorT, CovectorT]):
                       (empty otherwise; when resuming with fixed_metric
                       without them, they are recomputed: one solve and one
                       product per pair)
+      gamma_P         the scaling of the preconditioner's base
+      precond_vectors with fixed_preconditioner, P^{-1} y_i for each pair
+                      (empty otherwise; recomputed when missing)
 
     The pairs are the user's vectors and covectors: save them like x and g.
     """
@@ -129,6 +133,8 @@ class LbfgsResume(Generic[VectorT, CovectorT]):
     floors: tuple[float, ...]
     slots: tuple[int, ...]
     metric_pairs: tuple[tuple[VectorT, CovectorT], ...] = ()
+    gamma_P: Optional[float] = None
+    precond_vectors: tuple[VectorT, ...] = ()
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -155,9 +161,11 @@ class LbfgsSummary(Generic[VectorT, CovectorT]):
       iterations    one LbfgsRecord per iteration
       f, gnorm      at the returned point; gnorm0 is the reference norm
       *_calls       work over the whole run: calls of fun (including every
-                    line-search trial), grad, M^{-1}, M, and of the
+                    line-search trial), grad, M^{-1}, M, P^{-1}, and of the
                     transport's maps (single vectors, single covectors,
                     blocks)
+      precond_directions   iterations whose direction came from the
+                    preconditioner's base
       trials        line-search evaluations of f over the run
       restarts      memories cleared after a failed line search
       skipped       pairs not stored (curvature test)
@@ -177,6 +185,8 @@ class LbfgsSummary(Generic[VectorT, CovectorT]):
     vector_transport_calls: int
     covector_transport_calls: int
     block_transport_calls: int
+    precond_solve_calls: int
+    precond_directions: int
     trials: int
     restarts: int
     skipped: int
@@ -198,6 +208,8 @@ def merge_lbfgs_summaries(first: LbfgsSummary[VectorT, CovectorT],
         vector_transport_calls=first.vector_transport_calls + second.vector_transport_calls,
         covector_transport_calls=first.covector_transport_calls + second.covector_transport_calls,
         block_transport_calls=first.block_transport_calls + second.block_transport_calls,
+        precond_solve_calls=first.precond_solve_calls + second.precond_solve_calls,
+        precond_directions=first.precond_directions + second.precond_directions,
         trials=first.trials + second.trials, restarts=first.restarts + second.restarts,
         skipped=first.skipped + second.skipped, dropped=first.dropped + second.dropped,
         elapsed=first.elapsed + second.elapsed, resume=second.resume)
@@ -259,8 +271,12 @@ def format_lbfgs_summary(summary: LbfgsSummary[VectorT, CovectorT]) -> str:
         f"{summary.restarts} restarts, {summary.skipped} pairs skipped, {summary.elapsed:.2f} s",
         f"  f = {summary.f:.6e}   |g| = {summary.gnorm:.2e}   |g|/|g0| = {ratio:.2e}",
         f"  work: {summary.fun_calls} objective and {summary.grad_calls} gradient evaluations, "
-        f"{summary.metric_solve_calls} metric solves, {summary.metric_apply_calls} metric products",
+        f"{summary.metric_solve_calls} metric solves, {summary.metric_apply_calls} metric products"
+        + (f", {summary.precond_solve_calls} preconditioner solves" if summary.precond_solve_calls else ""),
     ]
+    if summary.precond_solve_calls:
+        lines.append(f"  preconditioner: its direction taken in {summary.precond_directions} of "
+                     f"{len(summary.iterations)} iterations")
     if transports or summary.block_transport_calls:
         lines.append(f"  transports: {summary.vector_transport_calls} vectors, "
                      f"{summary.covector_transport_calls} covectors, "

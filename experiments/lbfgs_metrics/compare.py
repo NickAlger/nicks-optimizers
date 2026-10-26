@@ -16,6 +16,8 @@ Configurations
   lbfgs ... m=k        memory k (default 10)
   lbfgs Kacanov        operators_at with point_data: one factorization per point
   lbfgs Kacanov kw     keyword operators: the factorization redone at every call
+  lbfgs H1 fixed, P Kac   M = H1 on the fixed path, P = M(u) as the safeguarded
+                       accelerant (phase 3), scale fitted ("fit") or not ("none")
   TR, LS               trust_region_newton and line_search_newton with M = P (CG)
 
 Run:  python experiments/lbfgs_metrics/compare.py [--json results.json] [--N 31 63 127 255]
@@ -92,7 +94,14 @@ def p_laplacian(N: int, count: Count, p: float = 4.0, eps: float = 1e-2) -> dict
         A, lu = data
         return PointOperators(metric_solve=lambda w: lu.solve(w), metric_apply=lambda v: A @ v)
 
+    def h1_with_kacanov(u: Any, data: Any) -> PointOperators[Any, Any]:
+        """M = H1 (constant), P = M(u) (the point's factorization)."""
+        _, lu = data
+        return PointOperators(metric_solve=lambda w: h1_solve(u, w), metric_apply=lambda v: H1 @ v,
+                              precond_solve=lambda w: lu.solve(w))
+
     return dict(fun=fun, grad=grad, hessvec=hessvec, x0=np.zeros(n),
+                h1_kacanov=dict(operators_at=h1_with_kacanov, point_data=point_data),
                 h1=dict(metric_solve=h1_solve, metric_apply=lambda u, v: H1 @ v),
                 kacanov=dict(operators_at=operators_at, point_data=point_data),
                 kacanov_kw=dict(metric_solve=lambda u, w: factor(kacanov(u)).solve(w),
@@ -109,7 +118,8 @@ def run(label: str, N: int, call: Callable[[dict[str, Any]], Any]) -> dict[str, 
                 fun=s.fun_calls, grad=s.grad_calls, hessvec=getattr(s, "hessvec_calls", 0),
                 solves=s.metric_solve_calls + getattr(s, "precond_solve_calls", 0),
                 applies=s.metric_apply_calls, factorizations=count.factorizations, seconds=seconds,
-                skipped=getattr(s, "skipped", 0), restarts=getattr(s, "restarts", 0))
+                skipped=getattr(s, "skipped", 0), restarts=getattr(s, "restarts", 0),
+                precond_directions=getattr(s, "precond_directions", 0))
 
 
 def configurations() -> list[tuple[str, Callable[[dict[str, Any]], Any]]]:
@@ -128,6 +138,9 @@ def configurations() -> list[tuple[str, Callable[[dict[str, Any]], Any]]]:
             ("lbfgs H1 fixed m=1", q("h1", fixed_metric=True, memory=1)),
             ("lbfgs Kacanov", q("kacanov")), ("lbfgs Kacanov none", q("kacanov", scaling="none")),
             ("lbfgs Kacanov m=1", q("kacanov", memory=1)), ("lbfgs Kacanov m=3", q("kacanov", memory=3)),
+            ("lbfgs H1 fixed, P Kac", q("h1_kacanov", fixed_metric=True)),
+            ("lbfgs H1 fixed, P Kac m=1", q("h1_kacanov", fixed_metric=True, memory=1)),
+            ("lbfgs H1 fixed, P Kac none", q("h1_kacanov", fixed_metric=True, scaling_P="none")),
             ("TR H1", newton(trust_region_newton, "h1")), ("LS H1", newton(line_search_newton, "h1")),
             ("TR Kacanov", lambda pb: trust_region_newton(pb["fun"], pb["grad"], None, pb["x0"],
                                                           operators_at=lambda u, d: PointOperators(
@@ -142,8 +155,8 @@ def main() -> None:
     parser.add_argument("--N", type=int, nargs="+", default=[31, 63, 127, 255])
     args = parser.parse_args()
     rows = []
-    print(f"{'N':>4s} {'method':22s} {'reason':10s} {'its':>5s} {'f':>13s} {'fun':>5s} {'grad':>5s} "
-          f"{'Hv':>5s} {'solves':>6s} {'M':>5s} {'LU':>4s} {'skip':>4s} {'time':>8s}")
+    print(f"{'N':>4s} {'method':26s} {'reason':10s} {'its':>5s} {'f':>13s} {'fun':>5s} {'grad':>5s} "
+          f"{'Hv':>5s} {'solves':>6s} {'M':>5s} {'LU':>4s} {'P':>4s} {'time':>8s}")
     for N in args.N:
         configs = configurations()
         if N == 63:
@@ -152,9 +165,9 @@ def main() -> None:
         for label, call in configs:
             row = run(label, N, call)
             rows.append(row)
-            print(f"{N:4d} {label:22s} {row['reason']:10s} {row['iterations']:5d} {row['f']:13.6e} "
+            print(f"{N:4d} {label:26s} {row['reason']:10s} {row['iterations']:5d} {row['f']:13.6e} "
                   f"{row['fun']:5d} {row['grad']:5d} {row['hessvec']:5d} {row['solves']:6d} "
-                  f"{row['applies']:5d} {row['factorizations']:4d} {row['skipped']:4d} "
+                  f"{row['applies']:5d} {row['factorizations']:4d} {row['precond_directions']:4d} "
                   f"{row['seconds']:7.2f}s", flush=True)
     if args.json:
         with open(args.json, "w") as fh:

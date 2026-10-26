@@ -36,10 +36,10 @@ times include every factorization.
 
 | N | path | its | M^{-1} solves | M products | time |
 |---|---|---|---|---|---|
-| 127 | general | 49 | 147 | 49 | 0.90 s |
-| 127 | fixed | 49 | **50** | **0** | **0.60 s** |
-| 255 | general | 59 | 177 | 59 | 5.69 s |
-| 255 | fixed | 59 | **60** | **0** | **3.53 s** |
+| 127 | general | 49 | 147 | 49 | 1.00 s |
+| 127 | fixed | 49 | **50** | **0** | **0.61 s** |
+| 255 | general | 59 | 177 | 59 | 5.99 s |
+| 255 | fixed | 59 | **60** | **0** | **3.61 s** |
 
 - **The same runs.** The decisions and iterates are the same (the tests
   check this to rounding).
@@ -83,16 +83,17 @@ the memory:
 
 | method | its | grad | Hv | solves | factorizations | time |
 |---|---|---|---|---|---|---|
-| lbfgs H1 fixed | 59 | 60 | 0 | 60 | 1 | 3.53 s |
-| lbfgs H1 fixed, m=1 | 65 | 66 | 0 | 66 | 1 | **2.64 s** |
-| lbfgs Kacanov, m=1 | 17 | 18 | 0 | 51 | 18 | 12.26 s |
-| lbfgs Kacanov | 74 | 75 | 0 | 222 | 75 | 46.82 s |
-| TR H1 | 11 | 12 | 95 | 106 | 1 | 3.89 s |
-| TR Kacanov | 13 | 10 | 23 | 24 | 10 | 5.91 s |
+| lbfgs H1 fixed | 59 | 60 | 0 | 60 | 1 | 3.61 s |
+| lbfgs H1 fixed, m=1 | 65 | 66 | 0 | 66 | 1 | **2.99 s** |
+| lbfgs H1 fixed, P = Kacanov, m=1 | 21 | 22 | 0 | 64 | 23 | 16.77 s |
+| lbfgs Kacanov, m=1 | 17 | 18 | 0 | 51 | 18 | 14.08 s |
+| lbfgs Kacanov | 74 | 75 | 0 | 222 | 75 | 50.55 s |
+| TR H1 | 11 | 12 | 95 | 106 | 1 | 4.76 s |
+| TR Kacanov | 13 | 10 | 23 | 24 | 10 | 8.73 s |
 
 - **The fastest runs here.** With sparse LU, a factorization costs far more
   than a gradient or a solve. So the constant metric on the fixed path is
-  the fastest lbfgs configuration, and it edges out the trust region at the
+  the fastest lbfgs configuration, and it beats the trust region at the
   finest mesh: memory 1 is quicker per iteration (smaller blocks) despite
   more iterations.
 - **The point-dependent metric** needs the fewest gradients by far (18 with
@@ -103,9 +104,35 @@ the memory:
 At N = 63, the Kacanov metric passed as keyword operators refactorizes at
 every call:
 
-- 66 factorizations for 22 iterations, 1.18 s;
-- with operators_at and point_data, 23 factorizations, 0.53 s, the same
+- 66 factorizations for 22 iterations, 1.20 s;
+- with operators_at and point_data, 23 factorizations, 0.63 s, the same
   iterates.
+
+## A constant metric with a point-dependent preconditioner (phase 3)
+
+M = H1 on the fixed path (the geometry: norms, angles, the M direction),
+and P = M(u), the Kacanov operator, as the safeguarded accelerant (the same
+point_data, so one factorization per point). Iterations, with the
+iterations whose direction came from P in brackets:
+
+| N | P Kacanov, m=10 | P Kacanov, m=1 | P Kacanov, scaling_P "none" | for reference: H1 alone | Kacanov as M, m=1 |
+|---|---|---|---|---|---|
+| 31 | 17 (17) | 20 (20) | 33 (33) | 33 | 18 |
+| 63 | 19 (19) | 20 (20) | 51 (51) | 41 | 17 |
+| 127 | 27 (27) | 21 (21) | 63 (63) | 49 | 17 |
+| 255 | 36 (36) | 21 (21) | 75 (75) | 59 | 17 |
+
+- **P's proposal is always taken.** It passes the angle test in H1 every
+  time.
+- **Memory.** With memory 1 the iterations stay at about 21; with memory 10
+  they grow as before. P's base changes from point to point, and the older
+  pairs conflict with it, just as with the Kacanov metric.
+- **The scale fit matters.** Without it (gamma_P = 1) the runs are worse
+  than H1 alone. The Kacanov operator lies below the Hessian (M(u) <= H <=
+  3 M(u)), and the fit in the H1 norm finds the factor.
+- **Cost.** Per iteration this costs one H1 solve (the gradient norm), two
+  P solves (the base and the fit) and two products with H1. One
+  factorization per point again dominates the time.
 
 ## What this does not show
 
@@ -127,10 +154,10 @@ nonlinearity (p = 4) and one kind of solver (sparse LU).
 
 ## To try
 
-- **The preconditioner as accelerant (phase 3):** M = H1 (constant, fixed
-  path), P = Kacanov (point-dependent, safeguarded by the angle test in
-  H1). Possibly the cheap geometry of one and the curvature of the other.
-- **Memory policies for point-dependent metrics** (phase 8): clear or age
+- **The preconditioner as accelerant:** done (section above). With
+  memory 1 it gets the Kacanov iteration counts with the H1 geometry.
+- **Memory policies for point-dependent metrics or preconditioners**
+  (phase 8): clear or age
   out pairs when the metric changes by more than a threshold, measured for
   example on the newest pair through <y, M_new^{-1} y> / <y, M_old^{-1} y>,
   or keep only the pairs formed since the last large change.

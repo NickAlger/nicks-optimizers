@@ -33,17 +33,24 @@ import numpy as np
 from .backend import Backend, compile_function, numpy_backend
 from .criteria import gradient_converged
 from .lbfgs_core import (
+    BASES,
+    CONVERGENCE_NORMS,
     CURVATURE_TESTS,
     CURVATURE_TOL,
     DIRECTIONS,
     PAIRINGS,
+    PRECOND_MODES,
     SCALINGS,
+    SCALINGS_P,
     UPDATES,
+    ConvergenceNorm,
     CurvatureTest,
     LbfgsProblem,
     LbfgsState,
     Pairings,
+    PrecondMode,
     Scaling,
+    ScalingP,
     init,
     lbfgs_step,
     point_operators,
@@ -67,14 +74,15 @@ from .transport import VectorTransport, identity_transport
 
 
 def _check(*, space: Any, retract: Any, transport: Any, metric_solve: Any, metric_apply: Any,
-           operators_at: Any, point_data: Any, memory: int, scaling: str, gamma0: float,
-           initial_step: Optional[float], pairings: str, curvature_test: str,
+           precond_solve: Any, operators_at: Any, point_data: Any, memory: int, scaling: str,
+           gamma0: float, initial_step: Optional[float], pairings: str, curvature_test: str,
            curvature_tol: Optional[float], angle_tol: float, c1: float, max_backtracks: int,
-           step_max: Optional[float], fixed_metric: bool) -> None:
+           step_max: Optional[float], fixed_metric: bool, precond_mode: str, scaling_P: str,
+           convergence_norm: str, fixed_preconditioner: bool) -> None:
     """Raise ValueError for an inconsistent combination of arguments."""
-    if operators_at is not None and (metric_solve is not None or metric_apply is not None):
-        raise ValueError("operators_at gives the operators at a point: pass no metric_solve or "
-                         "metric_apply")
+    if operators_at is not None and any(f is not None for f in (metric_solve, metric_apply, precond_solve)):
+        raise ValueError("operators_at gives the operators at a point: pass no metric_solve, "
+                         "metric_apply or precond_solve")
     if point_data is not None and operators_at is None:
         raise ValueError("point_data is passed to operators_at: give operators_at too")
     if operators_at is None and (metric_solve is None) != (metric_apply is None):
@@ -109,8 +117,17 @@ def _check(*, space: Any, retract: Any, transport: Any, metric_solve: Any, metri
         raise ValueError(f"max_backtracks must be positive, not {max_backtracks}")
     if step_max is not None and not step_max > 0.0:
         raise ValueError(f"step_max must be positive (or None for no cap), not {step_max}")
-    if fixed_metric and transport is not None and transport is not identity_transport:
-        raise ValueError("fixed_metric needs a flat space: the identity transport")
+    if (fixed_metric or fixed_preconditioner) and transport is not None and transport is not identity_transport:
+        raise ValueError("fixed_metric and fixed_preconditioner need a flat space: the identity transport")
+    if precond_mode not in PRECOND_MODES:
+        raise ValueError(f"precond_mode must be one of {PRECOND_MODES}, not {precond_mode!r}")
+    if scaling_P not in SCALINGS_P:
+        raise ValueError(f"scaling_P must be one of {SCALINGS_P}, not {scaling_P!r}")
+    if convergence_norm not in CONVERGENCE_NORMS:
+        raise ValueError(f"convergence_norm must be one of {CONVERGENCE_NORMS}, not {convergence_norm!r}")
+    if operators_at is None and precond_solve is None and (convergence_norm == "preconditioner"
+                                                           or fixed_preconditioner):
+        raise ValueError("convergence_norm='preconditioner' and fixed_preconditioner need precond_solve")
 
 
 def _resume_of(space: VectorSpace[Any, Any, Any, Any], state: LbfgsState, gnorm0: float, it: int,
@@ -120,14 +137,16 @@ def _resume_of(space: VectorSpace[Any, Any, Any, Any], state: LbfgsState, gnorm0
     stamp = np.asarray(memory.stamp)
     order = [int(j) for j in np.argsort(stamp, kind="stable") if stamp[j] >= 0]
     P = np.asarray(memory.pairings)[np.ix_(order, order)]
-    Z, W = memory.Z, memory.W
+    Z, W, ZP = memory.Z, memory.W, memory.ZP
     return LbfgsResume(
         gnorm0=gnorm0, next_iteration=it, f=f, gamma=number(state.gamma),
         pairs=tuple((space.vector_member(memory.S, j), space.covector_member(memory.Y, j)) for j in order),
         pairings=tuple(tuple(float(v) for v in row) for row in P),
         floors=tuple(float(np.asarray(memory.floor)[j]) for j in order), slots=tuple(order),
         metric_pairs=() if Z is None or W is None else
-        tuple((space.vector_member(Z, j), space.covector_member(W, j)) for j in order))
+        tuple((space.vector_member(Z, j), space.covector_member(W, j)) for j in order),
+        gamma_P=number(state.gamma_P),
+        precond_vectors=() if ZP is None else tuple(space.vector_member(ZP, j) for j in order))
 
 
 def lbfgs(
@@ -140,6 +159,7 @@ def lbfgs(
         transport: Optional[VectorTransport[PointT, VectorT, CovectorT, VectorBlockT, CovectorBlockT]] = None,
         metric_solve: Optional[Callable[[PointT, CovectorT], VectorT]] = None,
         metric_apply: Optional[Callable[[PointT, VectorT], CovectorT]] = None,
+        precond_solve: Optional[Callable[[PointT, CovectorT], VectorT]] = None,
         operators_at: Optional[Callable[[PointT, Any], PointOperators[VectorT, CovectorT]]] = None,
         point_data: Optional[Callable[[PointT], Any]] = None,
         project_covector: Optional[Callable[[PointT, CovectorT], CovectorT]] = None,
@@ -160,6 +180,10 @@ def lbfgs(
         g0: Optional[CovectorT] = None,
         backend: Optional[Backend] = None,
         fixed_metric: bool = False,
+        precond_mode: PrecondMode = "safeguarded",
+        scaling_P: ScalingP = "fit",
+        convergence_norm: ConvergenceNorm = "metric",
+        fixed_preconditioner: bool = False,
         ) -> tuple[PointT, LbfgsSummary[VectorT, CovectorT]]:
     """Limited-memory BFGS in the geometry of the metric M (see the module
     docstring).
@@ -177,6 +201,11 @@ def lbfgs(
                              space)
       metric_solve(x, w)     M^{-1} w, and metric_apply(x, v), M v: both
                              required (default for plain numpy arrays: M = I)
+      precond_solve(x, w)    P^{-1} w, an optional accelerant: the same
+                             recursion with the base gamma_P P^{-1} proposes
+                             each direction (see precond_mode). P may be
+                             nonsymmetric, nonlinear or random; it never
+                             defines a norm or a fit
       operators_at(x, data), point_data(x)
                              alternatively, the operators at a point from
                              operators_at (a PointOperators; hessvec is not
@@ -226,6 +255,23 @@ def lbfgs(
                              with a compiling backend every iteration is one
                              compiled piece, and the functions given must be
                              traceable, see trust_region_newton)
+      precond_mode           "safeguarded" (default): P's direction is used if
+                             it passes the angle test in M, else the M
+                             direction; "trusted": the descent test only
+                             (classic preconditioned L-BFGS, for a symmetric
+                             positive definite P)
+      scaling_P              "fit" (default): gamma_P = <M u, s> / <M u, u>,
+                             u = P^{-1} y, the fit of gamma_P P^{-1} y = s in
+                             the M-norm (one P^{-1} solve and one M product
+                             per stored pair); "none": gamma_P stays gamma0
+      convergence_norm       "metric" (default, ||g||_{M^{-1}}) or
+                             "preconditioner" (||g||_{P^{-1}}, one P^{-1}
+                             solve per point; for a symmetric positive
+                             definite P)
+      fixed_preconditioner   declare that P is linear and does not depend on
+                             x (a flat space): P^{-1} y is kept with each pair
+                             and P^{-1} g computed at each point, so P's base
+                             and its fit need no further P^{-1}
       fixed_metric           declare that M does not depend on x (a flat space:
                              the identity transport). M^{-1} y and M s are then
                              kept with each pair (two more blocks of memory),
@@ -244,11 +290,13 @@ def lbfgs(
     Returns (x, summary): the final iterate and an LbfgsSummary.
     """
     _check(space=space, retract=retract, transport=transport, metric_solve=metric_solve,
-           metric_apply=metric_apply, operators_at=operators_at, point_data=point_data,
-           memory=memory, scaling=scaling, gamma0=gamma0, initial_step=initial_step,
-           pairings=pairings, curvature_test=curvature_test, curvature_tol=curvature_tol,
-           angle_tol=angle_tol, c1=c1, max_backtracks=max_backtracks, step_max=step_max,
-           fixed_metric=fixed_metric)
+           metric_apply=metric_apply, precond_solve=precond_solve, operators_at=operators_at,
+           point_data=point_data, memory=memory, scaling=scaling, gamma0=gamma0,
+           initial_step=initial_step, pairings=pairings, curvature_test=curvature_test,
+           curvature_tol=curvature_tol, angle_tol=angle_tol, c1=c1, max_backtracks=max_backtracks,
+           step_max=step_max, fixed_metric=fixed_metric, precond_mode=precond_mode,
+           scaling_P=scaling_P, convergence_norm=convergence_norm,
+           fixed_preconditioner=fixed_preconditioner)
     bk = numpy_backend if backend is None else backend
     xp = bk.xp
     sp: VectorSpace[Any, Any, Any, Any] = numpy_space if space is None else space
@@ -261,7 +309,9 @@ def lbfgs(
         gamma0=gamma0, initial_step=initial_step, pairings=pairings, curvature_test=curvature_test,
         curvature_tol=CURVATURE_TOL[curvature_test] if curvature_tol is None else curvature_tol,
         angle_tol=angle_tol, c1=c1, max_backtracks=max_backtracks, step_max=step_max,
-        fixed_metric=fixed_metric)
+        fixed_metric=fixed_metric, precond_solve=precond_solve, precond_mode=precond_mode,
+        scaling_P=scaling_P, convergence_norm=convergence_norm,
+        fixed_preconditioner=fixed_preconditioner)
     start_piece = compile_function(bk, partial(init, problem, bk))
     step_piece = compile_function(bk, partial(lbfgs_step, problem, bk))
     restart_piece = compile_function(bk, partial(restart, problem, bk))
@@ -270,9 +320,10 @@ def lbfgs(
     state: LbfgsState = start_piece(x0, g0)
     fx = number(state.f)
     fun_calls, grad_calls = 1, (0 if g0 is not None else 1)
-    metric_solves, metric_applies = 1, 0
+    metric_solves, metric_applies = int(np.asarray(state.metric_solves)), int(np.asarray(state.metric_applies))
+    precond_solves = int(np.asarray(state.precond_solves))
     vector_transports = covector_transports = block_transports = 0
-    trials = restarts = skipped = dropped = 0
+    trials = restarts = skipped = dropped = precond_directions = 0
     it = 0
     if resume is not None:
         check_resumed_f(resume.f, fx)
@@ -282,6 +333,15 @@ def lbfgs(
         slots = kept if max(kept, default=-1) < memory else tuple(range(k))
         pairs = resume.pairs[len(resume.pairs) - k:]
         metric_pairs = None
+        precond_vectors = None
+        if fixed_preconditioner:
+            if len(resume.precond_vectors) == len(resume.pairs):
+                precond_vectors = resume.precond_vectors[len(resume.precond_vectors) - k:]
+            else:                       # saved without them: P^{-1} y at x
+                ops = point_operators(problem, state.x, state.data)
+                assert ops.precond_solve is not None
+                precond_vectors = tuple(ops.precond_solve(y) for _, y in pairs)
+                precond_solves += k
         if fixed_metric:
             if len(resume.metric_pairs) == len(resume.pairs):
                 metric_pairs = resume.metric_pairs[len(resume.metric_pairs) - k:]
@@ -293,11 +353,14 @@ def lbfgs(
                 metric_applies += k
         state = LbfgsState(
             x=state.x, f=state.f, g=state.g, data=state.data, Mg=state.Mg, gnorm=state.gnorm,
-            metric_gnorm=state.metric_gnorm, gamma=xp.asarray(resume.gamma), stamp=xp.asarray(k),
+            metric_gnorm=state.metric_gnorm, gamma=xp.asarray(resume.gamma), Pg=state.Pg,
+            gamma_P=state.gamma_P if resume.gamma_P is None else xp.asarray(resume.gamma_P),
+            stamp=xp.asarray(k), metric_solves=state.metric_solves, precond_solves=state.precond_solves,
+            metric_applies=state.metric_applies,
             memory=memory_from_pairs(sp, bk, pairs,
                                      [row[len(row) - k:] for row in resume.pairings[len(resume.pairings) - k:]],
                                      resume.floors[len(resume.floors) - k:], slots, state.Mg, state.g,
-                                     memory, metric_pairs))
+                                     memory, metric_pairs, precond_vectors))
     gnorm = number(state.gnorm)
     if gnorm0 is None:
         gnorm0 = gnorm
@@ -326,12 +389,15 @@ def lbfgs(
         dropped += n_dropped
         metric_solves += int(np.asarray(raw.metric_solves))
         metric_applies += int(np.asarray(raw.metric_applies))
+        precond_solves += int(np.asarray(raw.precond_solves))
+        base = BASES[int(np.asarray(raw.base))]
+        precond_directions += base == "P"
         vector_transports += int(np.asarray(raw.vector_transports))
         covector_transports += int(np.asarray(raw.covector_transports))
         block_transports += int(np.asarray(raw.block_transports))
         record = LbfgsRecord(
             iteration=it, f=fx, gnorm=gnorm, gnorm_ratio=gnorm / gnorm0 if gnorm0 > 0.0 else 0.0,
-            direction=direction, base="M", pairs=n_pairs, gamma=number(raw.gamma),
+            direction=direction, base=base, pairs=n_pairs, gamma=number(raw.gamma),
             step_norm=number(raw.step_norm), cosine=number(raw.cosine), slope=number(raw.slope),
             alpha=number(raw.alpha), trials=n_trials, actual=number(raw.actual), accepted=accepted,
             curvature=number(raw.curvature), update=update, dropped=n_dropped,
@@ -365,7 +431,7 @@ def lbfgs(
         fun_calls=fun_calls, grad_calls=grad_calls, metric_solve_calls=metric_solves,
         metric_apply_calls=metric_applies, vector_transport_calls=vector_transports,
         covector_transport_calls=covector_transports, block_transport_calls=block_transports,
-        trials=trials, restarts=restarts, skipped=skipped, dropped=dropped,
+        precond_solve_calls=precond_solves, precond_directions=precond_directions, trials=trials, restarts=restarts, skipped=skipped, dropped=dropped,
         elapsed=time.perf_counter() - start, resume=_resume_of(sp, state, gnorm0, it, fx))
     if display >= 1:
         print_fn(format_lbfgs_summary(summary))

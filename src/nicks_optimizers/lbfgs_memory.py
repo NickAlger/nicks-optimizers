@@ -60,9 +60,10 @@ EMPTY = -1                       # the stamp of a free slot
 @backend_state
 @dataclass(frozen=True, kw_only=True)
 class Memory(Generic[VectorBlockT, CovectorBlockT]):
-    """The stored pairs and their pairings (see the module docstring), and
-    for a constant metric the blocks Z = M^{-1} Y (vectors) and W = M S
-    (covectors), slot for slot (None otherwise)."""
+    """The stored pairs and their pairings (see the module docstring); for a
+    constant metric the blocks Z = M^{-1} Y (vectors) and W = M S
+    (covectors), and for a constant preconditioner ZP = P^{-1} Y, slot for
+    slot (None otherwise)."""
     S: VectorBlockT
     Y: CovectorBlockT
     pairings: Any
@@ -70,6 +71,7 @@ class Memory(Generic[VectorBlockT, CovectorBlockT]):
     floor: Any
     Z: Optional[VectorBlockT] = None
     W: Optional[CovectorBlockT] = None
+    ZP: Optional[VectorBlockT] = None
 
 
 @backend_state
@@ -91,49 +93,59 @@ def capacity(memory: Memory[Any, Any]) -> int:
 
 
 def memory_empty(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
-                 backend: Backend, v: VectorT, w: CovectorT, m: int, *, metric_blocks: bool = False
-                 ) -> Memory[VectorBlockT, CovectorBlockT]:
+                 backend: Backend, v: VectorT, w: CovectorT, m: int, *, metric_blocks: bool = False,
+                 precond_block: bool = False) -> Memory[VectorBlockT, CovectorBlockT]:
     """A memory with room for m pairs, none stored; v and w are a sample
     vector and covector (for the shapes). With metric_blocks, also the
-    blocks Z = M^{-1} Y and W = M S (for a constant metric)."""
+    blocks Z = M^{-1} Y and W = M S (for a constant metric); with
+    precond_block, ZP = P^{-1} Y (for a constant preconditioner)."""
     xp = backend.xp
     zero_v, zero_w = space.scale_vector(0.0, v), space.scale_covector(0.0, w)
     return Memory(S=space.vector_block(zero_v, m), Y=space.covector_block(zero_w, m),
                   pairings=xp.zeros((m, m)), stamp=xp.full(m, EMPTY), floor=xp.zeros(m),
                   Z=space.vector_block(zero_v, m) if metric_blocks else None,
-                  W=space.covector_block(zero_w, m) if metric_blocks else None)
+                  W=space.covector_block(zero_w, m) if metric_blocks else None,
+                  ZP=space.vector_block(zero_v, m) if precond_block else None)
 
 
 def memory_from_pairs(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
                       backend: Backend, pairs: Sequence[tuple[VectorT, CovectorT]],
                       pairings: Sequence[Sequence[float]], floors: Sequence[float], slots: Sequence[int],
                       v: VectorT, w: CovectorT, m: int,
-                      metric_pairs: Optional[Sequence[tuple[VectorT, CovectorT]]] = None
+                      metric_pairs: Optional[Sequence[tuple[VectorT, CovectorT]]] = None,
+                      precond_vectors: Optional[Sequence[VectorT]] = None
                       ) -> Memory[VectorBlockT, CovectorBlockT]:
     """A memory with room for m pairs holding the given pairs (oldest first)
     in the given slots, with their stored pairings (pairings[j][i] =
     <y_j, s_i>, in the same order) and floors, and with metric_pairs
-    (M^{-1} y_i, M s_i) the metric blocks too: for resuming a run. Keeping
-    the slots keeps the arithmetic of the block operations unchanged."""
+    (M^{-1} y_i, M s_i) the metric blocks too, with precond_vectors
+    P^{-1} y_i the preconditioner block: for resuming a run. Keeping the
+    slots keeps the arithmetic of the block operations unchanged."""
     xp, put = backend.xp, backend.index_update
     k = len(pairs)
     if k > m or len(set(slots)) != k or any(not 0 <= j < m for j in slots):
         raise ValueError(f"{k} pairs in slots {tuple(slots)} do not fit a memory of {m}")
     if metric_pairs is not None and len(metric_pairs) != k:
         raise ValueError(f"{len(metric_pairs)} metric pairs for {k} pairs")
-    memory = memory_empty(space, backend, v, w, m, metric_blocks=metric_pairs is not None)
-    S, Y, Z, W = memory.S, memory.Y, memory.Z, memory.W
+    if precond_vectors is not None and len(precond_vectors) != k:
+        raise ValueError(f"{len(precond_vectors)} preconditioner vectors for {k} pairs")
+    memory = memory_empty(space, backend, v, w, m, metric_blocks=metric_pairs is not None,
+                          precond_block=precond_vectors is not None)
+    S, Y, Z, W, ZP = memory.S, memory.Y, memory.Z, memory.W, memory.ZP
     for j, (s, y) in sorted(zip(slots, pairs), key=lambda item: item[0]):
         S, Y = space.set_vector(S, j, s), space.set_covector(Y, j, y)
     if metric_pairs is not None and Z is not None and W is not None:
         for j, (z, Ms) in sorted(zip(slots, metric_pairs), key=lambda item: item[0]):
             Z, W = space.set_vector(Z, j, z), space.set_covector(W, j, Ms)
+    if precond_vectors is not None and ZP is not None:
+        for j, zp in sorted(zip(slots, precond_vectors), key=lambda item: item[0]):
+            ZP = space.set_vector(ZP, j, zp)
     P, stamp, floor = memory.pairings, memory.stamp, memory.floor
     for a, ja in enumerate(slots):
         stamp, floor = put(stamp, ja, a), put(floor, ja, floors[a])
         for b, jb in enumerate(slots):
             P = put(P, (ja, jb), pairings[a][b])
-    return Memory(S=S, Y=Y, pairings=P, stamp=stamp, floor=floor, Z=Z, W=W)
+    return Memory(S=S, Y=Y, pairings=P, stamp=stamp, floor=floor, Z=Z, W=W, ZP=ZP)
 
 
 def memory_clear(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
@@ -142,7 +154,7 @@ def memory_clear(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBl
     """The same memory with no pairs (zero blocks of the same capacity)."""
     return memory_empty(space, backend, space.vector_member(memory.S, 0),
                         space.covector_member(memory.Y, 0), capacity(memory),
-                        metric_blocks=memory.Z is not None)
+                        metric_blocks=memory.Z is not None, precond_block=memory.ZP is not None)
 
 
 def memory_count(backend: Backend, memory: Memory[Any, Any]) -> Any:
@@ -154,11 +166,12 @@ def memory_count(backend: Backend, memory: Memory[Any, Any]) -> Any:
 def memory_store(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
                  backend: Backend, memory: Memory[VectorBlockT, CovectorBlockT], s: VectorT,
                  y: CovectorT, stamp: Any, floor: Any, *, full_pairings: bool = False,
-                 metric_pair: Optional[tuple[VectorT, CovectorT]] = None
-                 ) -> Memory[VectorBlockT, CovectorBlockT]:
+                 metric_pair: Optional[tuple[VectorT, CovectorT]] = None,
+                 precond_y: Optional[VectorT] = None) -> Memory[VectorBlockT, CovectorBlockT]:
     """Store the pair (s, y) in a free slot, or in the oldest one when the
     memory is full; with metric blocks, metric_pair = (M^{-1} y, M s) goes
-    into the same slot of Z and W. One block pairing gives the pairings of y
+    into the same slot of Z and W, and with a preconditioner block,
+    precond_y = P^{-1} y into ZP. One block pairing gives the pairings of y
     with every stored step (its row, 1/rho included); with full_pairings, a
     second one gives those of every stored y with s (its column), else the
     column is zero (it is not needed when the stored pairings are kept)."""
@@ -179,8 +192,13 @@ def memory_store(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBl
         if metric_pair is None:
             raise ValueError("a memory with metric blocks needs metric_pair = (M^{-1} y, M s)")
         Z, W = space.set_vector(Z, slot, metric_pair[0]), space.set_covector(W, slot, metric_pair[1])
+    ZP = memory.ZP
+    if ZP is not None:
+        if precond_y is None:
+            raise ValueError("a memory with a preconditioner block needs precond_y = P^{-1} y")
+        ZP = space.set_vector(ZP, slot, precond_y)
     return Memory(S=S, Y=Y, pairings=pairings, stamp=put(memory.stamp, slot, stamp),
-                  floor=put(memory.floor, slot, floor), Z=Z, W=W)
+                  floor=put(memory.floor, slot, floor), Z=Z, W=W, ZP=ZP)
 
 
 def _transport_members(backend: Backend, block: Any, member: Callable[[Any, Any], Any],
@@ -211,8 +229,8 @@ def memory_transport(space: VectorSpace[VectorT, CovectorT, VectorBlockT, Covect
     The pairings are left as they are (see memory_recompute)."""
     if transport is identity_transport:
         return memory
-    if memory.Z is not None:
-        raise ValueError("the metric blocks (a constant metric) need the identity transport")
+    if memory.Z is not None or memory.ZP is not None:
+        raise ValueError("the blocks of a constant metric or preconditioner need the identity transport")
     m, active = capacity(memory), memory.stamp >= 0
     if transport.vector_block is not None:
         S = transport.vector_block(x, x_new, memory.S)
@@ -236,8 +254,8 @@ def memory_recompute(space: VectorSpace[VectorT, CovectorT, VectorBlockT, Covect
     block pairing per slot), and the pairs whose curvature <y_i, s_i> no
     longer exceeds the floor they passed when stored dropped (their slots
     zeroed). Returns (memory, the number dropped)."""
-    if memory.Z is not None:
-        raise ValueError("the metric blocks (a constant metric) keep the stored pairings current")
+    if memory.Z is not None or memory.ZP is not None:
+        raise ValueError("with a constant metric or preconditioner the stored pairings stay current")
     xp, put = backend.xp, backend.index_update
     m = capacity(memory)
     index = xp.arange(m)
@@ -295,7 +313,7 @@ def two_loop_project(space: VectorSpace[VectorT, CovectorT, VectorBlockT, Covect
     return q, a
 
 
-def _finish_coefficients(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
+def finish_coefficients(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
                          backend: Backend, memory: Memory[VectorBlockT, CovectorBlockT], layout: Layout,
                          a: Any, r0: VectorT) -> Any:
     """a - b by slot, for r0 = H0 q."""
@@ -310,8 +328,18 @@ def two_loop_finish(space: VectorSpace[VectorT, CovectorT, VectorBlockT, Covecto
                     backend: Backend, memory: Memory[VectorBlockT, CovectorBlockT], layout: Layout,
                     a: Any, r0: VectorT) -> VectorT:
     """The second half: H g = r0 + S (a - b), for r0 = H0 q."""
-    coefficients = _finish_coefficients(space, backend, memory, layout, a, r0)
+    coefficients = finish_coefficients(space, backend, memory, layout, a, r0)
     return space.axpy_vector(1.0, space.combine_vectors(memory.S, coefficients, capacity(memory)), r0)
+
+
+def block_base(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT], backend: Backend,
+               memory: Memory[VectorBlockT, CovectorBlockT], layout: Layout, a: Any, block: VectorBlockT,
+               known: VectorT, gamma: Any) -> VectorT:
+    """The base gamma A q = gamma (A g - (A Y) a) of a constant linear
+    operator A (M^{-1} or P^{-1}), from known = A g and block = A Y: no
+    application of A."""
+    combined = space.combine_vectors(block, backend.xp.take(a, layout.inverse), capacity(memory))
+    return space.scale_vector(gamma, space.axpy_vector(-1.0, combined, known))
 
 
 def apply_inverse(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
@@ -336,9 +364,8 @@ def apply_inverse_fixed(space: VectorSpace[VectorT, CovectorT, VectorBlockT, Cov
     m = capacity(memory)
     layout = memory_layout(backend, memory)
     q, a = two_loop_project(space, backend, memory, layout, g)
-    xp = backend.xp
-    r0 = space.scale_vector(gamma, space.axpy_vector(-1.0, space.combine_vectors(Z, xp.take(a, layout.inverse), m), Mg))
-    coefficients = _finish_coefficients(space, backend, memory, layout, a, r0)
+    r0 = block_base(space, backend, memory, layout, a, Z, Mg, gamma)
+    coefficients = finish_coefficients(space, backend, memory, layout, a, r0)
     Hg = space.axpy_vector(1.0, space.combine_vectors(memory.S, coefficients, m), r0)
     MHg = space.axpy_covector(1.0, space.combine_covectors(W, coefficients, m), space.scale_covector(gamma, q))
     return Hg, MHg

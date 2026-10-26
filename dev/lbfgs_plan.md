@@ -751,3 +751,34 @@ asks for it.
     constant H^1 metric on the fixed path here.
   - **Both kinds stay supported.** To try: P = Kacanov with M = H^1
     (phase 3), and memory policies for changing metrics (phase 8).
+- **Phase 3 (2026-10-26).** precond_solve (keyword or from operators_at)
+  as an accelerant.
+  - The memory's recursion with the base gamma_P P^{-1} proposes each
+    direction.
+  - "safeguarded" (default) takes it if it passes the angle test in M,
+    else the M direction. "trusted" applies the descent test only.
+  - The M base's gamma is refitted lazily, to the newest pair, only when
+    the M direction is used.
+  - scaling_P: "fit" (the fit of gamma_P P^{-1} y = s in the M-norm) or
+    "none".
+  - convergence_norm="preconditioner" stops on ||g||_{P^{-1}}.
+  - fixed_preconditioner keeps P^{-1} Y (Memory.ZP) and P^{-1} g per
+    point, so phase 6 is done.
+  - Records show the base of each direction; the summary counts P solves
+    and the directions taken from P.
+  - Tests:
+    - P = M gives the run without P;
+    - a P that proposes ascent falls back to the M direction, bitwise the
+      run without P;
+    - trusted and safeguarded runs with an SPD P;
+    - nonsymmetric, nonlinear, random and rotated P all converge (the
+      rotated one is often refused);
+    - gamma_P = 1 when P is the curvature;
+    - the P convergence norm;
+    - call counts;
+    - fixed_preconditioner, with fixed_metric too, and resumption;
+    - operators_at giving P; argument checks;
+    - the strict backend with unconventional P.
+  - In `experiments/lbfgs_metrics/`, M = H^1 (fixed) with P = Kacanov
+    takes P's proposal every iteration. With memory 1 that is about 21
+    iterations at every N; scaling_P "none" is much worse than "fit".
