@@ -782,3 +782,33 @@ asks for it.
   - In `experiments/lbfgs_metrics/`, M = H^1 (fixed) with P = Kacanov
     takes P's proposal every iteration. With memory 1 that is about 21
     iterations at every N; scaling_P "none" is much worse than "fit".
+- **Phase 4 (2026-10-26).**
+  - **pairings="corrected"** (memory_correct): the transported covectors
+    get the least correction in the M'^{-1}-norm that makes them pair with
+    the transported steps as stored. One M product per pair; the full
+    stored pairings are kept for it.
+  - **The isometry defect** ||T s||_{M'} / ||s||_M - 1 in the records, for
+    a non-identity transport.
+  - **Fixed-rank matrix completion** (`examples/matrix_completion.py`):
+    the projection transport for tangent vectors and canonical covectors,
+    complete_lbfgs, and lbfgs rank continuation, printed next to the trust
+    region's (the same fit at every rank).
+  - **`examples/lbfgs_p_laplacian.py`** (run in CI, checked by
+    `tests/test_lbfgs_example.py`): the Euclidean metric, the constant H^1
+    metric on the fixed path, the Kacanov metric through operators_at and
+    point_data, and H^1 with the Kacanov operator as P.
+  - **Tests:**
+    - corrected covectors pair as stored and change least;
+    - the strict backend;
+    - the sphere in all three pairing modes, with the exact isometry defect
+      1 / sqrt(1 + a^2) - 1;
+    - the fixed-rank transport is the Frobenius projection and preserves
+      pairings to second order;
+    - lbfgs reaches the trust region's fit, also in rank continuation;
+    - three threads in lockstep with a serial run (with M, M and P, fixed M
+      and P);
+    - tuple trees;
+    - tuple_block_space.
+  - **A bug fixed on the way:** tuple_block_space's block pairings assumed
+    that k members were set. check_space now tests k beyond the members
+    set.
