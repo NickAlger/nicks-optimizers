@@ -35,6 +35,11 @@ Modules, in dependency order:
                             directions for a line search
   lbfgs_memory              the memory of lbfgs and the two-loop recursion
                             in coordinates, as pure functions
+  lbfgs_core                an iteration of lbfgs as pure pieces
+  lbfgs_diagnostics         records, resumption state and text output of
+                            lbfgs
+  quasi_newton              lbfgs, limited-memory BFGS in the geometry of a
+                            metric M, the driver
 
 backend, trees, spaces, metrics, transport, dense, krylov, criteria and
 line_search do not depend on the optimizers and are meant to be reused by other methods; krylov_solvers,
@@ -101,6 +106,18 @@ from .spaces import (
     tuple_block_space,
     tuple_tree_space,
 )
+from .lbfgs_diagnostics import (
+    LbfgsInfo,
+    LbfgsReason,
+    LbfgsRecord,
+    LbfgsResume,
+    LbfgsSummary,
+    format_lbfgs_header,
+    format_lbfgs_row,
+    format_lbfgs_summary,
+    lbfgs_history_array,
+    merge_lbfgs_summaries,
+)
 from .line_search import LineSearchResult, backtracking
 from .newton_line_search import (
     line_search_newton,
@@ -122,6 +139,7 @@ from .newton_line_search_diagnostics import (
     ls_history_array,
     merge_ls_summaries,
 )
+from .quasi_newton import lbfgs
 from .transport import VectorTransport, identity_transport, riesz_covector_transport
 from .trees import Tree, as_tuple_tree, tree_leaves, tree_map, tree_map2
 from .trust_region import PointOperators, trust_region_newton
@@ -258,6 +276,18 @@ __all__ = [
     "solve_newton_direction",
     "solve_newton_direction_cg",
     "solve_newton_direction_flexible",
+    # lbfgs
+    "LbfgsInfo",
+    "LbfgsReason",
+    "LbfgsRecord",
+    "LbfgsResume",
+    "LbfgsSummary",
+    "format_lbfgs_header",
+    "format_lbfgs_row",
+    "format_lbfgs_summary",
+    "lbfgs",
+    "lbfgs_history_array",
+    "merge_lbfgs_summaries",
 ]
 
 __version__ = "0.1.0"

@@ -31,6 +31,7 @@ def main() -> int:
         ops = pl.operators_at(loc, e, "jacobi", u)
         ops_s = pl.operators_at(serial, e_serial, "jacobi", Point(u_all))
         assert ops.precond_solve is not None and ops_s.precond_solve is not None
+        assert ops.hessvec is not None and ops_s.hessvec is not None
         parts = (pl.gradient(loc, e, u), ops.hessvec(v), ops.precond_solve(Covector(np.asarray(v))), e.b)
         references = (pl.gradient(serial, e_serial, Point(u_all)), ops_s.hessvec(Vector(v_all)),
                       ops_s.precond_solve(Covector(v_all)), e_serial.b)

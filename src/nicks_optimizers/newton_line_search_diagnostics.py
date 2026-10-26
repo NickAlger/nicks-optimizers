@@ -229,17 +229,24 @@ def format_ls_krylov_trace(stats: SubproblemStats) -> str:
     return "\n".join(lines)
 
 
-def format_ls_trials(record: LineSearchRecord) -> str:
-    """The trials of the line search, indented under the row: the step, f
-    there, and the Armijo ratio (f - f_k) / (alpha slope), at least c1 for an
-    accepted step (up to the rounding allowance)."""
+def format_trials(f0: float, slope: float, accepted: bool, trace_alpha: tuple[float, ...],
+                  trace_f: tuple[float, ...]) -> str:
+    """The trials of a line search from f0 with the slope <g, d>, indented
+    under an iteration's row: the step, f there, and the Armijo ratio
+    (f - f0) / (alpha slope), at least c1 for an accepted step (up to the
+    rounding allowance); the last trial is marked if it was accepted."""
     pad = " " * 8
     lines = [f"{pad}{'trial':>5}  {'alpha':>9}  {'f':>13}  {'(f-f0)/(alpha slope)':>20}"]
-    for j, (a, f) in enumerate(zip(record.trace_alpha, record.trace_f), start=1):
-        armijo = (f - record.f) / (a * record.slope) if a * record.slope != 0.0 else float("nan")
-        mark = "  accepted" if record.accepted and j == record.trials else ""
+    for j, (a, f) in enumerate(zip(trace_alpha, trace_f), start=1):
+        armijo = (f - f0) / (a * slope) if a * slope != 0.0 else float("nan")
+        mark = "  accepted" if accepted and j == len(trace_alpha) else ""
         lines.append(f"{pad}{j:>5}  {a:9.2e}  {f:13.6e}  {armijo:20.3f}{mark}")
     return "\n".join(lines)
+
+
+def format_ls_trials(record: LineSearchRecord) -> str:
+    """The trials of the line search of an iteration (see format_trials)."""
+    return format_trials(record.f, record.slope, record.accepted, record.trace_alpha, record.trace_f)
 
 
 def format_ls_summary(summary: LineSearchSummary) -> str:

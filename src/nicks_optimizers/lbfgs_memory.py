@@ -30,7 +30,7 @@ L-BFGS operator. So the stored pairings may be kept when the pairs are
 transported (they are the values T(B)(T u, T v) = B(u, v) prescribes), or
 recomputed from the transported pairs (memory_recompute).
 
-  memory_empty, memory_clear, memory_store, memory_count
+  memory_empty, memory_from_pairs, memory_clear, memory_store, memory_count
   memory_transport            carry S and Y to a new point
   memory_recompute            the pairings of the current vectors; pairs
                               whose curvature no longer exceeds their floor
@@ -44,7 +44,7 @@ verifies that steps stay vectors and gradient changes covectors.
 
 import dataclasses
 from dataclasses import dataclass
-from typing import Any, Callable, Generic
+from typing import Any, Callable, Generic, Sequence
 
 from .backend import Backend, backend_state, run_cond, run_loop
 from .spaces import CovectorBlockT, CovectorT, PointT, VectorBlockT, VectorSpace, VectorT
@@ -91,6 +91,30 @@ def memory_empty(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBl
     return Memory(S=space.vector_block(space.scale_vector(0.0, v), m),
                   Y=space.covector_block(space.scale_covector(0.0, w), m),
                   pairings=xp.zeros((m, m)), stamp=xp.full(m, EMPTY), floor=xp.zeros(m))
+
+
+def memory_from_pairs(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
+                      backend: Backend, pairs: Sequence[tuple[VectorT, CovectorT]],
+                      pairings: Sequence[Sequence[float]], floors: Sequence[float], slots: Sequence[int],
+                      v: VectorT, w: CovectorT, m: int) -> Memory[VectorBlockT, CovectorBlockT]:
+    """A memory with room for m pairs holding the given pairs (oldest first)
+    in the given slots, with their stored pairings (pairings[j][i] =
+    <y_j, s_i>, in the same order) and floors: for resuming a run. Keeping
+    the slots keeps the arithmetic of the block operations unchanged."""
+    xp, put = backend.xp, backend.index_update
+    k = len(pairs)
+    if k > m or len(set(slots)) != k or any(not 0 <= j < m for j in slots):
+        raise ValueError(f"{k} pairs in slots {tuple(slots)} do not fit a memory of {m}")
+    memory = memory_empty(space, backend, v, w, m)
+    S, Y = memory.S, memory.Y
+    for j, (s, y) in sorted(zip(slots, pairs), key=lambda item: item[0]):
+        S, Y = space.set_vector(S, j, s), space.set_covector(Y, j, y)
+    P, stamp, floor = memory.pairings, memory.stamp, memory.floor
+    for a, ja in enumerate(slots):
+        stamp, floor = put(stamp, ja, a), put(floor, ja, floors[a])
+        for b, jb in enumerate(slots):
+            P = put(P, (ja, jb), pairings[a][b])
+    return Memory(S=S, Y=Y, pairings=P, stamp=stamp, floor=floor)
 
 
 def memory_clear(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT],

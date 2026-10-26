@@ -49,14 +49,16 @@ class PointOperators(Generic[VectorT, CovectorT]):
     """The linear operators at one point, frozen: what operators_at(x, data)
     returns, everything the method uses at that point.
 
-      hessvec(v) -> Covector         H v
+      hessvec(v) -> Covector         H v (needed by the Newton methods; lbfgs
+                                     uses no Hessian)
       metric_solve(w) -> Vector      M^{-1} w (None: M = I, for numpy arrays
                                      without a space only)
       precond_solve(w) -> Vector     P^{-1} w (None: P = M)
       metric_apply(v) -> Covector    M v, the inverse of metric_solve (needed
-                                     only with precond_solve)
+                                     by the Newton methods only with
+                                     precond_solve; always by lbfgs)
     """
-    hessvec: Callable[[VectorT], CovectorT]
+    hessvec: Optional[Callable[[VectorT], CovectorT]] = None
     metric_solve: Optional[Callable[[CovectorT], VectorT]] = None
     precond_solve: Optional[Callable[[CovectorT], VectorT]] = None
     metric_apply: Optional[Callable[[VectorT], CovectorT]] = None
@@ -141,6 +143,8 @@ def operators(problem: CoreProblem, x: Any, data: Any) -> PointOperators[Any, An
             metric_solve=None if ms is None else (lambda w: ms(x, w)),
             metric_apply=None if ma is None else (lambda v: ma(x, v)),
             precond_solve=None if ps is None else (lambda w: ps(x, w)))
+    if given.hessvec is None:
+        raise ValueError("operators_at must give hessvec for the Newton methods")
     Ms, Ma = given.metric_solve, given.metric_apply
     if Ms is None:
         if Ma is not None:
@@ -214,7 +218,7 @@ def subproblem_at(problem: CoreProblem, state: OuterState
     current point."""
     ops = operators(problem, state.x, state.data)
     pc, x = problem.project_covector, state.x
-    assert ops.metric_solve is not None
+    assert ops.metric_solve is not None and ops.hessvec is not None
     sub_ops = SubproblemOperators(
         hessvec=ops.hessvec, metric_solve=ops.metric_solve, precond_solve=ops.precond_solve,
         metric_apply=ops.metric_apply,

@@ -40,7 +40,7 @@ def test_derivatives_of_the_eigen_functional() -> None:
         g = pe.gradient(loc, e, u)
         ops = pe.operators_at(loc, e, "amg", u)
         hessvec, precond = ops.hessvec, ops.precond_solve
-        assert precond is not None
+        assert hessvec is not None and precond is not None
         Hv = np.asarray(hessvec(v))
         errors: list[tuple[float, float]] = []
         for t in (1e-3, 1e-4):

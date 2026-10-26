@@ -686,3 +686,30 @@ asks for it.
     (arg-type, or misc where swapped generic arguments defeat inference),
     checked by `tests/test_typing.py`. With memory_store untyped, the test
     fails.
+- **Phase 2 (2026-10-26).** `lbfgs_core` (LbfgsProblem, LbfgsState, init,
+  lbfgs_step, restart: one compiled piece per iteration),
+  `lbfgs_diagnostics` (records, resume, summary, display) and
+  `quasi_newton.lbfgs`, with the scalings, gamma0 and initial_step, the
+  "stored" and "recomputed" pairings, the four curvature tests, the angle
+  test with fallback, restarts and step_max. PointOperators.hessvec became
+  optional. Resumption keeps each pair's slot, so it is bitwise exact. The
+  trials table (format_trials) is shared with line_search_newton.
+  - Tests:
+    - with M = I, textbook L-BFGS over a whole convex run (1e-8) and the
+      first 40 Rosenbrock iterates (1e-10); beyond that, rounding
+      differences grow along the valley, as between any two
+      implementations;
+    - with a constant M, textbook L-BFGS on f(L^{-T} z);
+    - every option converges to a local minimizer;
+    - a quadratic with a strongly varying M(x) keeps exact pairs;
+    - on the sphere with projection transports, the transport defect equals
+      -a^2 / (1 + a^2), and the transports are called as counted;
+    - restarts, fallbacks and skipped pairs;
+    - bitwise resumption;
+    - display;
+    - operator calls against the work table for four option sets;
+    - argument checks;
+    - the strict backend, also with member-by-member transports.
+  - A quick check: compiled with JAX on the p-Laplacian (H^1 metric), the
+    same 32 iterations as numpy, f to 1e-15. The full JAX tests come in
+    phase 5.

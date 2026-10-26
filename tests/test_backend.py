@@ -41,7 +41,7 @@ SRC = pathlib.Path(__file__).resolve().parent.parent / "src" / "nicks_optimizers
 # the backend's xp and never numpy. Grows as the refactor converts modules.
 NUMPY_FREE: list[str] = ["newton_core", "trust_region_core", "dense", "krylov", "krylov_solvers",
                          "trust_region_subproblem", "line_search", "newton_line_search_core",
-                         "transport", "lbfgs_memory"]
+                         "transport", "lbfgs_memory", "lbfgs_core"]
 
 
 def modules() -> dict[str, ast.Module]:
