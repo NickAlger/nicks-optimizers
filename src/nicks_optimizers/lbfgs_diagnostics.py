@@ -65,6 +65,10 @@ class LbfgsRecord:
       transport_defect   <Tb g, T s> / <g, s> - 1: how far the transport is
                          from preserving pairings on this step (0 for the
                          identity)
+      isometry_defect    ||T s||_{M(x_new)} / ||s||_{M(x)} - 1: how far it is
+                         from preserving lengths (measured for a transport
+                         other than the identity; 0 for a fixed metric, nan
+                         otherwise)
       restart            the search failed and the memory was cleared for the
                          next iteration
       elapsed            seconds since the start of the run, at the end of
@@ -90,6 +94,7 @@ class LbfgsRecord:
     update: Update
     dropped: int
     transport_defect: float
+    isometry_defect: float
     restart: bool
     elapsed: float
     trace_alpha: tuple[float, ...]
@@ -285,6 +290,13 @@ def format_lbfgs_summary(summary: LbfgsSummary[VectorT, CovectorT]) -> str:
     return "\n".join(lines)
 
 
+def format_lbfgs_transport(record: LbfgsRecord) -> str:
+    """The transport's diagnostics of an iteration, indented under its row
+    (display level 2, for a transport other than the identity)."""
+    return (f"{' ' * 8}transport: pairing defect {record.transport_defect:.2e}, "
+            f"isometry defect {record.isometry_defect:.2e}")
+
+
 def display_lbfgs_iteration(record: LbfgsRecord, level: int, print_fn: Callable[[str], None],
                             header_every: int = 20) -> None:
     """Print one iteration: the header every header_every rows, the row, and
@@ -295,3 +307,5 @@ def display_lbfgs_iteration(record: LbfgsRecord, level: int, print_fn: Callable[
     if level >= 2:
         print_fn(format_trials(record.f, record.slope, record.accepted, record.trace_alpha,
                                record.trace_f))
+        if np.isfinite(record.isometry_defect) and record.isometry_defect != 0.0:
+            print_fn(format_lbfgs_transport(record))

@@ -24,6 +24,7 @@ from nicks_optimizers.lbfgs_memory import (
     Memory,
     apply_inverse,
     memory_clear,
+    memory_correct,
     memory_count,
     memory_empty,
     memory_recompute,
@@ -268,3 +269,61 @@ def test_strict_backend_agrees_with_numpy(count: int) -> None:
     again, _ = memory_recompute(space, strict_backend, moved)
     again_ref, _ = memory_recompute(numpy_space, numpy_backend, moved_ref)
     assert np.allclose(np.asarray(plain(again.pairings)), np.asarray(again_ref.pairings))
+
+
+def test_corrected_covectors_pair_as_stored_with_the_least_change() -> None:
+    """memory_correct: after a transport that does not preserve pairings, the
+    corrected covectors pair with the transported steps exactly as the
+    stored pairings say (so recomputing changes nothing), the change is the
+    smallest in the M^{-1}-norm, free slots stay zero, and it costs one
+    product with M per pair."""
+    rng = np.random.default_rng(12)
+    A = spd(rng, N, float(N))
+    memory = stored(pairs(rng, A, 4), 6, full=True)
+    T = np.eye(N) + 0.3 * rng.standard_normal((N, N))
+    Tb = np.eye(N) + 0.3 * rng.standard_normal((N, N))
+    moved = memory_transport(numpy_space, numpy_backend, matrix_transport(T, Tb), None, None, memory)
+    M = spd(rng, N)
+    calls = [0]
+
+    def apply(v: Any) -> Any:
+        calls[0] += 1
+        return Covector(M @ v)
+    fixed, products = memory_correct(numpy_space, numpy_backend, moved, apply)
+    assert int(products) == calls[0] == 4
+    again, dropped = memory_recompute(numpy_space, numpy_backend, fixed)
+    assert int(dropped) == 0
+    assert rel(np.asarray(again.pairings), np.asarray(memory.pairings)) < 1e-10
+    S = np.stack([numpy_space.vector_member(moved.S, j) for j in range(4)], axis=1)
+    before = np.stack([numpy_space.covector_member(moved.Y, j) for j in range(4)], axis=1)
+    after = np.stack([numpy_space.covector_member(fixed.Y, j) for j in range(4)], axis=1)
+    change = after - before
+    other = change + (np.eye(N) - M @ S @ np.linalg.solve(S.T @ M @ S, S.T)) @ rng.standard_normal((N, 4))
+    assert np.allclose(other.T @ S, change.T @ S)                       # also feasible
+    def norm(X: Array) -> float:
+        return float(np.trace(X.T @ np.linalg.solve(M, X)))
+    assert norm(change) < norm(other)
+    assert np.all(numpy_space.covector_member(fixed.Y, 5) == 0.0)
+
+
+def test_strict_backend_corrects_like_numpy() -> None:
+    rng = np.random.default_rng(13)
+    A = spd(rng, N, float(N))
+    steps = pairs(rng, A, 3)
+    space = array_space(strict_backend)
+    sample = np.zeros(N)
+    memory: Mem = memory_empty(space, strict_backend, sample, sample, 4)
+    reference: Mem = memory_empty(numpy_space, numpy_backend, Vector(sample), Covector(sample), 4)
+    for k, (s, y) in enumerate(steps):
+        memory = memory_store(space, strict_backend, memory, s, y, np.asarray(k), np.asarray(0.0),
+                              full_pairings=True)
+        reference = memory_store(numpy_space, numpy_backend, reference, s, y, np.asarray(k), np.asarray(0.0),
+                                 full_pairings=True)
+    T, Tb = np.eye(N) + 0.3 * rng.standard_normal((N, N)), np.eye(N) + 0.3 * rng.standard_normal((N, N))
+    M = spd(rng, N)
+    moved = memory_transport(space, strict_backend, matrix_transport(T, Tb), None, None, memory)
+    moved_ref = memory_transport(numpy_space, numpy_backend, matrix_transport(T, Tb), None, None, reference)
+    fixed, _ = memory_correct(space, strict_backend, moved, lambda v: M @ v)
+    fixed_ref, _ = memory_correct(numpy_space, numpy_backend, moved_ref, lambda v: Covector(M @ v))
+    assert np.allclose(np.asarray(plain(fixed.Y)), np.stack([numpy_space.covector_member(fixed_ref.Y, j)
+                                                             for j in range(4)]))

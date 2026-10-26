@@ -35,6 +35,9 @@ recomputed from the transported pairs (memory_recompute).
   memory_recompute            the pairings of the current vectors; pairs
                               whose curvature no longer exceeds their floor
                               are dropped
+  memory_correct              the transported covectors corrected (least
+                              change in the M^{-1}-norm) so that they pair with
+                              the transported steps as the stored pairings say
   memory_layout, two_loop_project, two_loop_finish, apply_inverse
   apply_inverse_fixed         H g and M H g for a constant metric, from the
                               blocks Z = M^{-1} Y and W = M S kept next to
@@ -285,6 +288,74 @@ def memory_recompute(space: VectorSpace[VectorT, CovectorT, VectorBlockT, Covect
     dropped = xp.sum(xp.where(drop, 1, 0))
     return Memory(S=S, Y=Y, pairings=pairings, stamp=xp.where(drop, EMPTY, memory.stamp),
                   floor=xp.where(drop, 0.0, memory.floor)), dropped
+
+
+def memory_correct(space: VectorSpace[VectorT, CovectorT, VectorBlockT, CovectorBlockT],
+                   backend: Backend, memory: Memory[VectorBlockT, CovectorBlockT],
+                   metric_apply: Callable[[VectorT], CovectorT], regularization: float = 1e-12
+                   ) -> tuple[Memory[VectorBlockT, CovectorBlockT], Any]:
+    """The transport of a bilinear form B moves the pairs consistently when
+    T(B)(T u, T v) = B(u, v); the stored pairings are the values that
+    identity keeps. After a transport that does not preserve pairings,
+    replace each covector y_j (already transported) by the nearest covector
+    in the M^{-1}-norm, M = metric_apply at the new point, that pairs with
+    the transported steps s_i as stored, <y_j', s_i> = pairings[j, i]:
+
+        y_j' = y_j + sum_l C_jl M s_l,   C = (Pi - Y^T S) G^{-1},  G = S^T M S
+
+    (one product with M per pair, one block pairing per pair for G and one
+    for Y^T S, one block combination per pair; G is regularized by
+    regularization times its mean diagonal). Needs the full stored
+    pairings (memory_store(..., full_pairings=True)). Afterwards the stored
+    and the recomputed pairings agree. Returns (memory, products with M)."""
+    if memory.Z is not None or memory.ZP is not None:
+        raise ValueError("with a constant metric or preconditioner the stored pairings stay current")
+    xp = backend.xp
+    m = capacity(memory)
+    active = memory.stamp >= 0
+    index = xp.arange(m)
+    zero_w = space.scale_covector(0.0, space.covector_member(memory.Y, 0))
+
+    def apply_member(j: Any) -> Any:
+        return run_cond(backend, xp.take(active, j), lambda v: metric_apply(v), lambda v: zero_w,
+                        space.vector_member(memory.S, j))
+
+    def step(c: tuple[Any, Any]) -> tuple[Any, Any]:
+        j, MS = c
+        return j + 1, space.set_covector(MS, j, apply_member(j))
+
+    MS = run_loop(backend, lambda c: c[0] >= m, step,
+                  (xp.asarray(1), space.covector_block(apply_member(xp.asarray(0)), m)), m - 1)[1]
+
+    def rows(c: tuple[Any, Any, Any]) -> tuple[Any, Any, Any]:
+        j, G, P = c
+        g_row = space.pair_block(memory.S, space.covector_member(MS, j), m)       # <M s_j, s_i>
+        p_row = space.pair_block(memory.S, space.covector_member(memory.Y, j), m)  # <y_j, s_i>
+        here = index[:, None] == j
+        return j + 1, xp.where(here, g_row[None, :], G), xp.where(here, p_row[None, :], P)
+
+    _, G, P = run_loop(backend, lambda c: c[0] >= m, rows,
+                       (xp.asarray(0), xp.zeros((m, m)), xp.zeros((m, m))), m)
+    both = active[:, None] & active[None, :]
+    eye = xp.eye(m)
+    G = xp.where(both, G, eye)
+    scale = xp.sum(G * eye) / m
+    G = G + regularization * scale * eye
+    C = xp.linalg.solve(G, xp.where(both, memory.pairings - P, 0.0).T).T
+
+    def corrected(j: Any) -> Any:
+        y = space.covector_member(memory.Y, j)
+        return run_cond(backend, xp.take(active, j),
+                        lambda y: space.axpy_covector(1.0, space.combine_covectors(MS, xp.take(C, j, axis=0), m), y),
+                        lambda y: y, y)
+
+    def store(c: tuple[Any, Any]) -> tuple[Any, Any]:
+        j, Y = c
+        return j + 1, space.set_covector(Y, j, corrected(j))
+
+    Y = run_loop(backend, lambda c: c[0] >= m, store,
+                 (xp.asarray(1), space.covector_block(corrected(xp.asarray(0)), m)), m - 1)[1]
+    return dataclasses.replace(memory, Y=Y), xp.sum(xp.where(active, 1, 0))
 
 
 def memory_layout(backend: Backend, memory: Memory[Any, Any]) -> Layout:

@@ -244,7 +244,7 @@ def sphere_problem(n: int = 30, seed: int = 2) -> dict[str, Any]:
                              project_covector=project))
 
 
-@pytest.mark.parametrize("pairings", ["stored", "recomputed"])
+@pytest.mark.parametrize("pairings", ["stored", "recomputed", "corrected"])
 def test_sphere_with_projection_transports(pairings: Pairings) -> None:
     """The smallest eigenvector is found; the transports are called as
     counted, and their pairing defect is second order in the step: for a
@@ -262,6 +262,14 @@ def test_sphere_with_projection_transports(pairings: Pairings) -> None:
     used = sum(r.pairs for r in s.iterations if r.accepted and r.direction != "fallback")
     assert s.vector_transport_calls == s.covector_transport_calls == accepted + used
     assert s.block_transport_calls == 0
+    # the isometry defect of the projection: ||P' s|| / ||s|| = 1 / sqrt(1 + a^2)
+    for r in s.iterations:
+        if r.accepted:
+            a2 = (r.alpha * r.step_norm) ** 2
+            assert abs(r.isometry_defect - (1.0 / np.sqrt(1.0 + a2) - 1.0)) <= 1e-9 * a2 + 1e-15
+    # products with M: ||d||_M, the isometry defect, and for "corrected" one per pair
+    corrections = used if pairings == "corrected" else 0
+    assert s.metric_apply_calls == len(s.iterations) + accepted + corrections
 
 
 # --- restarts, fallbacks, skipped pairs -----------------------------------------------------
@@ -383,7 +391,7 @@ def test_arguments_are_checked() -> None:
         dict(space=numpy_space, retract=lambda x, s: x + s),             # no transport
         dict(space=numpy_space, transport=identity_transport),           # no retract
         dict(space=numpy_space, retract=lambda x, s: x + s, transport=identity_transport),  # no metric
-        dict(point_data=lambda x: None), dict(memory=0), dict(scaling="bb"), dict(pairings="corrected"),
+        dict(point_data=lambda x: None), dict(memory=0), dict(scaling="bb"), dict(pairings="fresh"),
         dict(curvature_test="wolfe"), dict(curvature_tol=-1.0), dict(angle_tol=1.0), dict(gamma0=0.0),
         dict(initial_step=0.0), dict(c1=1.0), dict(max_backtracks=0), dict(step_max=0.0),
         dict(operators_at=lambda x, d: None, metric_solve=euclidean_metric_solve,

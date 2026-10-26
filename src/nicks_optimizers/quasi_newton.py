@@ -225,10 +225,15 @@ def lbfgs(
                              step of M-length initial_step
       pairings               "stored" (default: the pairings <y_j, s_i>
                              computed when pairs were stored are kept when
-                             the memory is transported) or "recomputed"
+                             the memory is transported), "recomputed"
                              (those of the transported pairs; pairs whose
                              curvature falls to the floor they passed are
-                             dropped)
+                             dropped) or "corrected" (the transported
+                             covectors corrected, least change in the
+                             M^{-1}-norm, so that they pair with the
+                             transported steps as stored: one M product per
+                             pair per iteration). With the identity transport
+                             the three are the same
       curvature_test         a pair is stored only if <y, s> exceeds:
                              curvature_tol alpha |<g, d>| ("relative",
                              default; curvature_tol 1e-8), 0 ("positive"),
@@ -401,7 +406,8 @@ def lbfgs(
             step_norm=number(raw.step_norm), cosine=number(raw.cosine), slope=number(raw.slope),
             alpha=number(raw.alpha), trials=n_trials, actual=number(raw.actual), accepted=accepted,
             curvature=number(raw.curvature), update=update, dropped=n_dropped,
-            transport_defect=number(raw.transport_defect), restart=cleared,
+            transport_defect=number(raw.transport_defect),
+            isometry_defect=number(raw.isometry_defect), restart=cleared,
             elapsed=time.perf_counter() - start,
             trace_alpha=tuple(np.asarray(raw.trace_alpha)[:n_trials].tolist()),
             trace_f=tuple(np.asarray(raw.trace_f)[:n_trials].tolist()))

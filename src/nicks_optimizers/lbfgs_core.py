@@ -42,6 +42,7 @@ from .lbfgs_memory import (
     block_base,
     finish_coefficients,
     memory_clear,
+    memory_correct,
     memory_count,
     memory_empty,
     memory_layout,
@@ -57,7 +58,7 @@ from .transport import VectorTransport, identity_transport
 
 Scaling = Literal["y", "s", "geometric", "none"]
 ScalingP = Literal["fit", "none"]
-Pairings = Literal["stored", "recomputed"]
+Pairings = Literal["stored", "recomputed", "corrected"]
 CurvatureTest = Literal["relative", "positive", "dennis-schnabel", "cautious"]
 PrecondMode = Literal["safeguarded", "trusted"]
 ConvergenceNorm = Literal["metric", "preconditioner"]
@@ -73,7 +74,7 @@ BASE_M, BASE_P = range(2)
 BASES: tuple[Base, ...] = ("M", "P")
 SCALINGS: tuple[Scaling, ...] = ("y", "s", "geometric", "none")
 SCALINGS_P: tuple[ScalingP, ...] = ("fit", "none")
-PAIRINGS: tuple[Pairings, ...] = ("stored", "recomputed")
+PAIRINGS: tuple[Pairings, ...] = ("stored", "recomputed", "corrected")
 CURVATURE_TESTS: tuple[CurvatureTest, ...] = ("relative", "positive", "dennis-schnabel", "cautious")
 PRECOND_MODES: tuple[PrecondMode, ...] = ("safeguarded", "trusted")
 CONVERGENCE_NORMS: tuple[ConvergenceNorm, ...] = ("metric", "preconditioner")
@@ -97,9 +98,12 @@ class LbfgsProblem:
                        gamma_P = initial_step / ||P^{-1} g0||_M): a first step
                        of that M-length
       pairings         "stored" (the pairings computed when pairs were
-                       stored, kept under transport) or "recomputed" (those of
+                       stored, kept under transport), "recomputed" (those of
                        the transported pairs; pairs whose curvature falls to
-                       their floor are dropped)
+                       their floor are dropped) or "corrected" (the
+                       transported covectors corrected, least change in the
+                       M^{-1}-norm, to pair with the transported steps as
+                       stored: one M product per pair per iteration)
       curvature_test   when a new pair is stored: <y, s> > floor with floor
                        curvature_tol alpha |<g, d>| ("relative"), 0
                        ("positive"), curvature_tol ||s||_M ||y||_{M^{-1}}
@@ -212,6 +216,9 @@ class RawLbfgsIteration:
       update             NO_UPDATE (search failed), STORED or SKIPPED
       dropped            pairs dropped by recomputed pairings
       transport_defect   <Tb g, T s> / <g, s> - 1 (0 for the identity)
+      isometry_defect    ||T s||_{M(x_new)} / ||s||_{M(x)} - 1 (measured for a
+                         transport other than the identity; 0 for a fixed
+                         metric, nan otherwise)
       step               alpha d, at x
       trace_alpha, trace_f      the trials
       metric_solves, precond_solves, metric_applies, vector_transports,
@@ -235,6 +242,7 @@ class RawLbfgsIteration:
     update: Any
     dropped: Any
     transport_defect: Any
+    isometry_defect: Any
     step: Any
     trace_alpha: Any
     trace_f: Any
@@ -516,18 +524,27 @@ def lbfgs_step(problem: LbfgsProblem, backend: Backend, state: LbfgsState
         defect = (xp.asarray(0.0) if identity
                   else space.pair(gk, s1) / xp.where(gs != 0.0, gs, 1.0) - 1.0)
         solves, applies, psolves = one, zero, xp.asarray(int(Pg1 is not None))
+        isometry = nan
         if fixed:             # M^{-1} y and M s by linearity, from what is known
             metric_pair = (space.axpy_vector(-1.0, state.Mg, Mg1), space.scale_covector(found.alpha, Md))
             ss, yy = space.pair(metric_pair[1], s1), space.pair(y, metric_pair[0])
+            isometry = xp.asarray(0.0)
         else:
             metric_pair = None
             # with a preconditioner the M base's fit is made when it is used
             fit_M = problem.scaling != "none" and not has_P
             uses_ss = need_ss and (fit_M or problem.curvature_test in ("dennis-schnabel", "cautious"))
             uses_yy = need_yy and (fit_M or problem.curvature_test == "dennis-schnabel")
-            ss = space.pair(ops1.metric_apply(s1), s1) if uses_ss else nan
+            ss = nan
+            if uses_ss or not identity:
+                s1_norm2 = space.pair(ops1.metric_apply(s1), s1)
+                ss = s1_norm2 if uses_ss else nan
+                if not identity:
+                    length = found.alpha * step_norm
+                    isometry = _norm(xp, s1_norm2) / xp.where(length > 0.0, length, 1.0) - 1.0
+                applies = applies + 1
             yy = space.pair(y, ops1.metric_solve(y)) if uses_yy else nan
-            solves, applies = solves + int(uses_yy), applies + int(uses_ss)
+            solves = solves + int(uses_yy)
         floor = _floor(problem, xp, gs, ss, yy, state.metric_gnorm)
         ok = xp.isfinite(ys) & (ys > floor)
         precond_y = None
@@ -546,9 +563,14 @@ def lbfgs_step(problem: LbfgsProblem, backend: Backend, state: LbfgsState
         dropped = zero
         if problem.pairings == "recomputed" and not identity:
             moved, dropped = memory_recompute(space, backend, moved)
+        if problem.pairings == "corrected" and not identity:
+            moved, correction_applies = memory_correct(space, backend, moved, ops1.metric_apply)
+            applies = applies + correction_applies
+        full = problem.pairings == "corrected"
         stored = run_cond(backend, ok,
                           lambda m_: memory_store(space, backend, m_, s1, y, state.stamp, floor,
-                                                  metric_pair=metric_pair, precond_y=precond_y),
+                                                  full_pairings=full, metric_pair=metric_pair,
+                                                  precond_y=precond_y),
                           lambda m_: m_, moved)
         gamma = xp.where(ok, _fit(problem, xp, ys, ss, yy, gamma_M), gamma_M) if (fixed or not has_P) \
             else gamma_M
@@ -564,19 +586,19 @@ def lbfgs_step(problem: LbfgsProblem, backend: Backend, state: LbfgsState
             vectors = 1 + (zero if transport.vector_block is not None else used)
             covectors = 1 + (zero if transport.covector_block is not None else used)
         return new, (ys, ys / xp.where(gs != 0.0, xp.abs(gs), 1.0), xp.where(ok, STORED, SKIPPED),
-                     dropped, defect, solves, psolves, applies, vectors, covectors, blocks)
+                     dropped, defect, isometry, solves, psolves, applies, vectors, covectors, blocks)
 
     def stay(_: Any) -> tuple[LbfgsState, tuple[Any, ...]]:
         kept = dataclasses.replace(state, gamma=gamma_M)
-        return kept, (nan, nan, xp.asarray(NO_UPDATE), zero, nan, zero, zero, zero, zero, zero, zero)
+        return kept, (nan, nan, xp.asarray(NO_UPDATE), zero, nan, nan, zero, zero, zero, zero, zero, zero)
 
-    new_state, (ys, curvature, update, dropped, defect, solves, psolves, applies, vectors, covectors,
-                blocks) = run_cond(backend, accepted, move, stay, None)
+    new_state, (ys, curvature, update, dropped, defect, isometry, solves, psolves, applies, vectors,
+                covectors, blocks) = run_cond(backend, accepted, move, stay, None)
     return new_state, RawLbfgsIteration(
         direction=direction, base=base, pairs=pairs, gamma=gamma_used, step_norm=step_norm,
         cosine=cosine, slope=slope, alpha=found.alpha, trials=found.trials, status=found.status,
         actual=state.f - found.f, ys=ys, curvature=curvature, update=update, dropped=dropped,
-        transport_defect=defect, step=s, trace_alpha=found.trace_alpha, trace_f=found.trace_f,
+        transport_defect=defect, isometry_defect=isometry, step=s, trace_alpha=found.trace_alpha, trace_f=found.trace_f,
         metric_solves=base_solves + solves, precond_solves=precond_solves + psolves,
         metric_applies=base_applies + applies, vector_transports=vectors,
         covector_transports=covectors, block_transports=blocks)
