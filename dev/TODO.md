@@ -327,22 +327,36 @@ Done:
   with the two-loop recursion in coordinates;
 - user-supplied transports;
 - the fixed paths for a constant metric and a constant preconditioner;
-- P as a safeguarded accelerant.
+- P as a safeguarded accelerant;
+- manifolds (phase 4): the "corrected" pairings, the isometry defect,
+  fixed-rank completion, other vector spaces;
+- memory=0, steepest descent in M with Barzilai-Borwein steps, as a
+  baseline.
 
 Notes so far:
 
 - `experiments/lbfgs_checkin/`: the H^1 metric makes lbfgs nearly
   mesh-independent.
 - `experiments/lbfgs_metrics/`, on one problem: a point-dependent metric
-  (or P) does best with memory 1, since older pairs conflict with a changing
-  base. Both constant and point-dependent metrics stay supported.
+  (or P) does best with memory 1. Both constant and point-dependent metrics
+  stay supported.
+- `experiments/lbfgs_memory/`, against memory 0 (steepest descent in M with
+  BB steps):
+  - With the Kacanov metric the memory adds nothing; memory 0 is the
+    Kacanov iteration.
+  - With H^1 the memory saves 5 to 17%.
+  - Where M leaves much of the Hessian out, the memory matters, also for a
+    point-dependent M (Rosenbrock with the Jacobi metric: 17 times fewer
+    iterations).
+  - The transport is essential in completion and modest on the sphere.
 
 Open:
 
-- phase 4 (manifolds, the "corrected" pairings) and phase 5 (JAX);
+- phase 5 (JAX);
 - the README;
 - the option study (phase 8), including memory policies for changing
-  metrics.
+  metrics: restarts, dropping pairs when M changes a lot, a structured
+  secant update that spends the memory on H - M(x).
 
 ## Compiled iterations with a pluggable backend (2026-10-25)
 

@@ -20,8 +20,9 @@ gradient by hand):
                 the Hessian without its rank-structured part, so
                 M(u) <= H(u) <= (p - 1) M(u). A new matrix at every point:
                 operators_at and point_data factorize it once per point. With
-                memory=1: on this problem older pairs, formed under a
-                different metric, conflict with the new one
+                memory=1: on this problem more memory slows it on fine
+                meshes, and memory 0 (the Kacanov iteration with
+                Barzilai-Borwein steps) is as fast (experiments/lbfgs_memory/)
   H1, P Kacanov M = H1 for the geometry (norms, angles, the M direction), and
                 P = M(u) as the accelerant: its direction is taken when it
                 passes the angle test in H1 (precond_mode="safeguarded")

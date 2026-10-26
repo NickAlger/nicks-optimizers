@@ -812,3 +812,26 @@ asks for it.
   - **A bug fixed on the way:** tuple_block_space's block pairings assumed
     that k members were set. check_space now tests k beyond the members
     set.
+- **memory=0 and a note on the memory and the transport (2026-10-26)**,
+  `experiments/lbfgs_memory/`.
+  - **memory=0** keeps no pairs: steepest descent in M with
+    Barzilai-Borwein steps, as a baseline (pairs still fit gamma).
+  - **The Kacanov metric does the work.** Memory 0 is best or within one
+    iteration of best at every mesh and p (14 or 15 iterations to N = 255).
+    On the p-Laplacian it is the Kacanov iteration with a BB step length.
+  - **H^1:** the memory saves 5 to 17%.
+  - **Where M leaves much out, the memory matters,** including a
+    point-dependent M: Rosenbrock with the Jacobi metric takes 1936
+    iterations at memory 0 and 110 to 187 with memory. So the earlier
+    reading, "older pairs conflict with a changing base", is not the whole
+    story. Stale curvature from a rapidly changing Hessian is a candidate.
+  - **The transport:** modest on the sphere (up to 29% fewer iterations);
+    essential in completion (without it, four of five memories fail).
+  - **Completion from X = 0:** memory 3 and more ends at a worse fit, with
+    one component grown to singular value about 2300.
+  - **To try (phase 8):**
+    - periodic restarts;
+    - dropping pairs when M changes a lot;
+    - a structured secant update (Dennis-Martinez-Tapia), spending the
+      memory on H - M(x) with y - M(x_new) s;
+    - a long BB step on negative curvature at memory 0.
