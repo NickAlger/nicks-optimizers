@@ -1,0 +1,514 @@
+[
+ {
+  "problem": "sphere, projection",
+  "memory": 0,
+  "start": 0,
+  "reason": "converged",
+  "iterations": 3463,
+  "fun": 3571
+ },
+ {
+  "problem": "sphere, projection",
+  "memory": 0,
+  "start": 1,
+  "reason": "converged",
+  "iterations": 3561,
+  "fun": 3653
+ },
+ {
+  "problem": "sphere, projection",
+  "memory": 0,
+  "start": 2,
+  "reason": "converged",
+  "iterations": 3967,
+  "fun": 4100
+ },
+ {
+  "problem": "sphere, projection",
+  "memory": 0,
+  "start": 3,
+  "reason": "converged",
+  "iterations": 3265,
+  "fun": 3364
+ },
+ {
+  "problem": "sphere, projection",
+  "memory": 0,
+  "start": 4,
+  "reason": "converged",
+  "iterations": 3357,
+  "fun": 3444
+ },
+ {
+  "problem": "sphere, projection",
+  "memory": 0,
+  "start": 5,
+  "reason": "converged",
+  "iterations": 3891,
+  "fun": 4005
+ },
+ {
+  "problem": "sphere, projection",
+  "memory": 0,
+  "start": 6,
+  "reason": "converged",
+  "iterations": 3407,
+  "fun": 3505
+ },
+ {
+  "problem": "sphere, projection",
+  "memory": 0,
+  "start": 7,
+  "reason": "converged",
+  "iterations": 2634,
+  "fun": 2716
+ },
+ {
+  "problem": "sphere, projection",
+  "memory": 1,
+  "start": 0,
+  "reason": "converged",
+  "iterations": 2241,
+  "fun": 2440
+ },
+ {
+  "problem": "sphere, projection",
+  "memory": 1,
+  "start": 1,
+  "reason": "converged",
+  "iterations": 2072,
+  "fun": 2250
+ },
+ {
+  "problem": "sphere, projection",
+  "memory": 1,
+  "start": 2,
+  "reason": "converged",
+  "iterations": 2014,
+  "fun": 2175
+ },
+ {
+  "problem": "sphere, projection",
+  "memory": 1,
+  "start": 3,
+  "reason": "converged",
+  "iterations": 2293,
+  "fun": 2455
+ },
+ {
+  "problem": "sphere, projection",
+  "memory": 1,
+  "start": 4,
+  "reason": "converged",
+  "iterations": 2441,
+  "fun": 2641
+ },
+ {
+  "problem": "sphere, projection",
+  "memory": 1,
+  "start": 5,
+  "reason": "converged",
+  "iterations": 2034,
+  "fun": 2203
+ },
+ {
+  "problem": "sphere, projection",
+  "memory": 1,
+  "start": 6,
+  "reason": "converged",
+  "iterations": 2118,
+  "fun": 2282
+ },
+ {
+  "problem": "sphere, projection",
+  "memory": 1,
+  "start": 7,
+  "reason": "converged",
+  "iterations": 2439,
+  "fun": 2642
+ },
+ {
+  "problem": "sphere, projection",
+  "memory": 3,
+  "start": 0,
+  "reason": "converged",
+  "iterations": 2265,
+  "fun": 2386
+ },
+ {
+  "problem": "sphere, projection",
+  "memory": 3,
+  "start": 1,
+  "reason": "converged",
+  "iterations": 2018,
+  "fun": 2113
+ },
+ {
+  "problem": "sphere, projection",
+  "memory": 3,
+  "start": 2,
+  "reason": "converged",
+  "iterations": 2308,
+  "fun": 2445
+ },
+ {
+  "problem": "sphere, projection",
+  "memory": 3,
+  "start": 3,
+  "reason": "converged",
+  "iterations": 2045,
+  "fun": 2155
+ },
+ {
+  "problem": "sphere, projection",
+  "memory": 3,
+  "start": 4,
+  "reason": "converged",
+  "iterations": 2030,
+  "fun": 2131
+ },
+ {
+  "problem": "sphere, projection",
+  "memory": 3,
+  "start": 5,
+  "reason": "converged",
+  "iterations": 2243,
+  "fun": 2362
+ },
+ {
+  "problem": "sphere, projection",
+  "memory": 3,
+  "start": 6,
+  "reason": "converged",
+  "iterations": 1881,
+  "fun": 1968
+ },
+ {
+  "problem": "sphere, projection",
+  "memory": 3,
+  "start": 7,
+  "reason": "converged",
+  "iterations": 2046,
+  "fun": 2158
+ },
+ {
+  "problem": "sphere, projection",
+  "memory": 10,
+  "start": 0,
+  "reason": "converged",
+  "iterations": 1487,
+  "fun": 1541
+ },
+ {
+  "problem": "sphere, projection",
+  "memory": 10,
+  "start": 1,
+  "reason": "converged",
+  "iterations": 1567,
+  "fun": 1615
+ },
+ {
+  "problem": "sphere, projection",
+  "memory": 10,
+  "start": 2,
+  "reason": "converged",
+  "iterations": 1570,
+  "fun": 1618
+ },
+ {
+  "problem": "sphere, projection",
+  "memory": 10,
+  "start": 3,
+  "reason": "converged",
+  "iterations": 1692,
+  "fun": 1741
+ },
+ {
+  "problem": "sphere, projection",
+  "memory": 10,
+  "start": 4,
+  "reason": "converged",
+  "iterations": 1560,
+  "fun": 1605
+ },
+ {
+  "problem": "sphere, projection",
+  "memory": 10,
+  "start": 5,
+  "reason": "converged",
+  "iterations": 1853,
+  "fun": 1901
+ },
+ {
+  "problem": "sphere, projection",
+  "memory": 10,
+  "start": 6,
+  "reason": "converged",
+  "iterations": 1481,
+  "fun": 1524
+ },
+ {
+  "problem": "sphere, projection",
+  "memory": 10,
+  "start": 7,
+  "reason": "converged",
+  "iterations": 1852,
+  "fun": 1900
+ },
+ {
+  "problem": "sphere, no transport",
+  "memory": 0,
+  "start": 0,
+  "reason": "converged",
+  "iterations": 4458,
+  "fun": 4559
+ },
+ {
+  "problem": "sphere, no transport",
+  "memory": 0,
+  "start": 1,
+  "reason": "converged",
+  "iterations": 3734,
+  "fun": 3844
+ },
+ {
+  "problem": "sphere, no transport",
+  "memory": 0,
+  "start": 2,
+  "reason": "converged",
+  "iterations": 4260,
+  "fun": 4372
+ },
+ {
+  "problem": "sphere, no transport",
+  "memory": 0,
+  "start": 3,
+  "reason": "converged",
+  "iterations": 2951,
+  "fun": 3042
+ },
+ {
+  "problem": "sphere, no transport",
+  "memory": 0,
+  "start": 4,
+  "reason": "converged",
+  "iterations": 3581,
+  "fun": 3677
+ },
+ {
+  "problem": "sphere, no transport",
+  "memory": 0,
+  "start": 5,
+  "reason": "converged",
+  "iterations": 3162,
+  "fun": 3258
+ },
+ {
+  "problem": "sphere, no transport",
+  "memory": 0,
+  "start": 6,
+  "reason": "converged",
+  "iterations": 2729,
+  "fun": 2809
+ },
+ {
+  "problem": "sphere, no transport",
+  "memory": 0,
+  "start": 7,
+  "reason": "converged",
+  "iterations": 4247,
+  "fun": 4366
+ },
+ {
+  "problem": "sphere, no transport",
+  "memory": 1,
+  "start": 0,
+  "reason": "converged",
+  "iterations": 2672,
+  "fun": 2867
+ },
+ {
+  "problem": "sphere, no transport",
+  "memory": 1,
+  "start": 1,
+  "reason": "converged",
+  "iterations": 2342,
+  "fun": 2510
+ },
+ {
+  "problem": "sphere, no transport",
+  "memory": 1,
+  "start": 2,
+  "reason": "converged",
+  "iterations": 2304,
+  "fun": 2494
+ },
+ {
+  "problem": "sphere, no transport",
+  "memory": 1,
+  "start": 3,
+  "reason": "converged",
+  "iterations": 2295,
+  "fun": 2462
+ },
+ {
+  "problem": "sphere, no transport",
+  "memory": 1,
+  "start": 4,
+  "reason": "converged",
+  "iterations": 2382,
+  "fun": 2575
+ },
+ {
+  "problem": "sphere, no transport",
+  "memory": 1,
+  "start": 5,
+  "reason": "converged",
+  "iterations": 1923,
+  "fun": 2079
+ },
+ {
+  "problem": "sphere, no transport",
+  "memory": 1,
+  "start": 6,
+  "reason": "converged",
+  "iterations": 2064,
+  "fun": 2225
+ },
+ {
+  "problem": "sphere, no transport",
+  "memory": 1,
+  "start": 7,
+  "reason": "converged",
+  "iterations": 2269,
+  "fun": 2425
+ },
+ {
+  "problem": "sphere, no transport",
+  "memory": 3,
+  "start": 0,
+  "reason": "converged",
+  "iterations": 2247,
+  "fun": 2345
+ },
+ {
+  "problem": "sphere, no transport",
+  "memory": 3,
+  "start": 1,
+  "reason": "converged",
+  "iterations": 1985,
+  "fun": 2083
+ },
+ {
+  "problem": "sphere, no transport",
+  "memory": 3,
+  "start": 2,
+  "reason": "converged",
+  "iterations": 2038,
+  "fun": 2147
+ },
+ {
+  "problem": "sphere, no transport",
+  "memory": 3,
+  "start": 3,
+  "reason": "converged",
+  "iterations": 2344,
+  "fun": 2460
+ },
+ {
+  "problem": "sphere, no transport",
+  "memory": 3,
+  "start": 4,
+  "reason": "converged",
+  "iterations": 2266,
+  "fun": 2384
+ },
+ {
+  "problem": "sphere, no transport",
+  "memory": 3,
+  "start": 5,
+  "reason": "converged",
+  "iterations": 2055,
+  "fun": 2161
+ },
+ {
+  "problem": "sphere, no transport",
+  "memory": 3,
+  "start": 6,
+  "reason": "converged",
+  "iterations": 2178,
+  "fun": 2269
+ },
+ {
+  "problem": "sphere, no transport",
+  "memory": 3,
+  "start": 7,
+  "reason": "converged",
+  "iterations": 1740,
+  "fun": 1815
+ },
+ {
+  "problem": "sphere, no transport",
+  "memory": 10,
+  "start": 0,
+  "reason": "converged",
+  "iterations": 1630,
+  "fun": 1672
+ },
+ {
+  "problem": "sphere, no transport",
+  "memory": 10,
+  "start": 1,
+  "reason": "converged",
+  "iterations": 1731,
+  "fun": 1778
+ },
+ {
+  "problem": "sphere, no transport",
+  "memory": 10,
+  "start": 2,
+  "reason": "converged",
+  "iterations": 1531,
+  "fun": 1578
+ },
+ {
+  "problem": "sphere, no transport",
+  "memory": 10,
+  "start": 3,
+  "reason": "converged",
+  "iterations": 1767,
+  "fun": 1817
+ },
+ {
+  "problem": "sphere, no transport",
+  "memory": 10,
+  "start": 4,
+  "reason": "converged",
+  "iterations": 1635,
+  "fun": 1695
+ },
+ {
+  "problem": "sphere, no transport",
+  "memory": 10,
+  "start": 5,
+  "reason": "converged",
+  "iterations": 1632,
+  "fun": 1678
+ },
+ {
+  "problem": "sphere, no transport",
+  "memory": 10,
+  "start": 6,
+  "reason": "converged",
+  "iterations": 1621,
+  "fun": 1666
+ },
+ {
+  "problem": "sphere, no transport",
+  "memory": 10,
+  "start": 7,
+  "reason": "converged",
+  "iterations": 1651,
+  "fun": 1704
+ }
+]

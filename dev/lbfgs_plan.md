@@ -854,3 +854,21 @@ asks for it.
     textbook equivalence for memories 0, 1 and 3; a memory through skips, a
     dropped pair and slot reuse; resuming with memory 0; the restart fit; a
     failed fallback.
+- **Note: step lengths (2026-10-26)**, `experiments/lbfgs_step_length/`.
+  Memory 0's and memory 1's directions and step lengths were crossed on
+  the flat problems and the sphere, 8 starts each.
+  - **Rounding.** Single long runs spread by some 15% when x0 moves by
+    1e-12. Small single-run differences in `experiments/lbfgs_memory/`
+    were within that; its sphere-transport finding is corrected.
+  - **The frozen gamma** (pairs failing the curvature test leave gamma
+    alone) is why memory 0 fails on Rosenbrock. Even against a memory 0
+    that refits gamma on rejected pairs (||s||_M / ||y||_{M^{-1}}),
+    memory 1 is 4 to 9 times faster there.
+  - **Where gamma never freezes** (the convex problems), memory 1's gain is
+    its direction: its direction at memory 0's predicted decrease keeps
+    most of it, and memory 0's direction at memory 1's length does not.
+  - **Memory 10 against memory 1:** 1.4 to 1.9 times fewer iterations where
+    the metric is poor, none with H1 or Kacanov.
+  - **To try:** a nonmonotone line search for memory 0 (the usual setting
+    of Barzilai-Borwein methods); a refit of gamma on rejected pairs as an
+    lbfgs option, if it helps beyond memory 0.

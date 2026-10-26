@@ -348,7 +348,13 @@ Notes so far:
   - Where M leaves much of the Hessian out, the memory matters, also for a
     point-dependent M (Rosenbrock with the Jacobi metric: 17 times fewer
     iterations).
-  - The transport is essential in completion and modest on the sphere.
+  - The transport is essential in completion; on the sphere it makes no
+    difference beyond rounding (single long runs spread by some 15%).
+- `experiments/lbfgs_step_length/`, 8 starts per arm:
+  - memory 0 fails on Rosenbrock because gamma freezes on rejected pairs;
+  - memory 1 stays 4 to 9 times faster than a memory 0 that refits gamma;
+  - on the convex problems memory 1's gain is its direction;
+  - memory 10 is 1.4 to 1.9 times faster than memory 1 with poor metrics.
 
 Open:
 

@@ -17,6 +17,8 @@ subtraction, as in textbook L-BFGS.
 **Run:**
 - `python experiments/lbfgs_memory/compare.py [--json results.json] [--only sphere ...]`
 - `python experiments/lbfgs_memory/p_laplacian.py [--json p_laplacian.json]`
+- `python experiments/lbfgs_memory/sphere_starts.py [--json sphere_starts.json]`
+  reruns the sphere rows from 8 starts (see "Update: rounding")
 
 The JSON files hold the runs below, which are deterministic. compare.py's
 results were produced in four parts with `--only` and merged.
@@ -104,15 +106,15 @@ a point-dependent M.**
 - So a point-dependent metric does not by itself make the memory useless.
   What matters is how much of the Hessian M leaves out.
 
-**4. On the sphere, the memory helps and the transport helps slightly.**
+**4. On the sphere, the memory helps; the transport makes no difference
+beyond rounding.** (Corrected; see "Update: rounding" below.)
 - Memory 10 to 30 needs 2.2 to 2.3 times fewer iterations than memory 0.
-- Reusing the vectors as they are takes 29%, 19% and 10% more iterations
-  than the projection transport at memory 0, 1 and 10, and about the same
-  at memory 3 and 30.
-- At memory 0 the transport enters only through the gamma fit (y =
-  g_new - T g).
+- In single runs, reusing the vectors as they are took 29%, 19% and 10%
+  more iterations than the projection at memory 0, 1 and 10. From 8 starts
+  (`sphere_starts.py`) the medians differ by 3.5 to 6.5%, well inside the
+  spread.
 - The projection's defects are second order in the step, and near the
-  minimizer the steps are short, so the two transports converge together.
+  minimizer the steps are short.
 
 **5. In completion, the transport is essential.**
 - From the spectral start with the projection transport, all five memories
@@ -158,7 +160,8 @@ On these problems:
   - Kacanov gains nothing: memory 0 is best.
   - The suspicion that the Kacanov runs lean on M is right.
 - **The transport matters on a strongly curved manifold:** in completion,
-  without it most runs fail. On the sphere it is a modest gain.
+  without it most runs fail. On the sphere it makes no measurable
+  difference.
 - **No problem here shows a good metric, memory and a nontrivial transport
   each pulling their weight together.** That would be the case to look for
   next.
@@ -184,4 +187,35 @@ On these problems:
   still needs the M^{-1} solve, which dominates here. With the Kacanov
   metric, the fewest iterations are also the fewest factorizations.
 
-**Status:** first round.
+## Update: rounding (2026-10-26)
+
+Over thousands of iterations, rounding differences grow until single
+iteration counts are unreliable.
+- Moving x0 by 1e-12 spreads lbfgs's counts by some 15% on the long runs.
+  For memory 1: Rosenbrock with M = I 203 to 255, p-Laplacian with M = I
+  1096 to 1506, sphere 2014 to 2441.
+- Differences of that size between single runs in the tables above say
+  nothing:
+  - the sphere's transports (corrected in finding 4);
+  - memory 3 against memory 1 on the sphere;
+  - the ordering of memories 10 and 30.
+- The large effects stand: failures, the Euclidean runs' memory gains, the
+  Kacanov degradation (short runs, which barely move), and completion's
+  failures without the transport.
+
+With 8 starts each, `experiments/lbfgs_step_length/` finds that memory
+beyond 1 does help where the metric is poor. lbfgs's medians from memory 1
+to memory 10:
+
+| problem | memory 1 | memory 10 | ratio |
+|---|---|---|---|
+| Rosenbrock, M = I | 236 | 127 | 1.9 |
+| Rosenbrock, Jacobi metric | 185 | 116 | 1.6 |
+| p-Laplacian, M = I | 1277 | 795 | 1.6 |
+| sphere | 2179 | 1568 | 1.4 |
+
+It also finds that memory 0's frozen gamma (finding 7) is why memory 0
+fails on Rosenbrock. Even against a memory 0 that refits gamma, memory 1
+stays 4 to 9 times faster there.
+
+**Status:** first round, corrected for rounding.
