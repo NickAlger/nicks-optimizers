@@ -32,9 +32,7 @@ Model = Literal["gauss_newton", "full"]
 
 DEFAULT_TAU = 0.25
 DEFAULT_K = 2
-DEFAULT_PRE_POWER = 0.5        # the forcing power before the switch
-DEFAULT_POST_POWER = 1.0       # the forcing power after it
-DEFAULT_POWER = 0.5            # the forcing power with hessian="full"
+DEFAULT_POWER = 0.5            # the forcing power: hessian="full", and both phases of a switch
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -59,15 +57,17 @@ def resolve_switch(*, hessian: str, gn_hessvec: Optional[Any], operators_at: Opt
                    pre_switch_forcing_power: Optional[float],
                    forcing_power: Optional[float]) -> SwitchSettings:
     """Check the switch keywords and resolve their defaults. The forcing
-    powers (before, after) of a switch run are (0.5, 1.0) by default; a
-    given forcing_power alone sets both, a given pre_switch_forcing_power
-    alone the first:
+    powers (before, after) of a switch run are 0.5 by default; forcing_power
+    sets both, and pre_switch_forcing_power the first:
 
         pre_switch_forcing_power  forcing_power  ->  before  after
-        None                      None               0.5     1.0
-        p                         None               p       1.0
+        None                      None               0.5     0.5
+        p                         None               p       0.5
         None                      q                  q       q
         p                         q                  p       q
+
+    (0.5 after the switch was cheaper than 1.0 in 46 of 58 runs of
+    experiments/gn_newton_switch.)
 
     With hessian="full" the forcing power is forcing_power (None: 0.5), and
     the switch keywords raise."""
@@ -96,12 +96,8 @@ def resolve_switch(*, hessian: str, gn_hessvec: Optional[Any], operators_at: Opt
     k = DEFAULT_K if switch_k is None else switch_k
     if isinstance(k, bool) or not isinstance(k, (int, np.integer)) or k < 1:
         raise ValueError(f"switch_k must be a positive integer, not {k!r}")
-    if forcing_power is None:
-        pre = DEFAULT_PRE_POWER if pre_switch_forcing_power is None else pre_switch_forcing_power
-        post = DEFAULT_POST_POWER
-    else:
-        pre = forcing_power if pre_switch_forcing_power is None else pre_switch_forcing_power
-        post = forcing_power
+    post = DEFAULT_POWER if forcing_power is None else forcing_power
+    pre = post if pre_switch_forcing_power is None else pre_switch_forcing_power
     return SwitchSettings(switch=True, tau=float(tau), k=int(k), pre_power=pre, post_power=post)
 
 

@@ -18,6 +18,12 @@ cheaper than the default 1.0 in 46 of 58 runs (1.0 cheaper in 5, by 0% to
 usually wins with the line search and usually loses or ties with the trust
 region.
 
+**Outcome** (Nick, 2026-11-11; the plan's D10): the default forcing power
+after the switch is now 0.5, so the "switch p=0.5" variant below is
+today's default `hessian="switch"`, and "switch" is the old default (1.0
+after the switch). No delayed start of the tracking for now; tau stays
+0.25.
+
     python compare.py [--only rosenbrock,diffusion,mc] [--jobs 8]   # appends to results.jsonl, resumes
     python summarize.py > tables.md
 
@@ -46,8 +52,8 @@ and max_krylov = 200. Five variants per case and method:
 | variant | model Hessian | forcing power |
 |---|---|---|
 | gn | Gauss-Newton | 0.5 |
-| switch | `hessian="switch"`, defaults | 0.5, then 1.0 |
-| switch p=0.5 | `hessian="switch"`, `forcing_power=0.5` | 0.5, then 0.5 |
+| switch | `hessian="switch"`, `forcing_power` 1.0 after the switch (the default when this ran) | 0.5, then 1.0 |
+| switch p=0.5 | `hessian="switch"`, `forcing_power=0.5` (the default since D10) | 0.5, then 0.5 |
 | full | full | 0.5 |
 | full p=1 | full | 1.0 |
 
@@ -124,7 +130,7 @@ Caveats: one seed per configuration (as in the study); unweighted product
 counts except where noted; f(x + s) - f(x) by subtraction, as the library
 computes it (the study used cancellation-free differences).
 
-## Questions for the check-in
+## Questions for the check-in (answered: see Outcome above)
 
 1. The default power after the switch: 1.0 (decided) or 0.5, which was
    cheaper in 46 of 58 runs here?
