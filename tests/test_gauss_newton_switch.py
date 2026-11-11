@@ -22,6 +22,7 @@ import pytest
 from nicks_optimizers import (
     PointOperators,
     ResumeState,
+    array_space,
     euclidean_metric_apply,
     euclidean_metric_solve,
     format_ls_summary,
@@ -39,6 +40,7 @@ from nicks_optimizers.newton_line_search_core import LineSearchOptions, line_sea
 from nicks_optimizers.newton_switch import SwitchSettings, SwitchTracker
 from nicks_optimizers.trust_region_core import TrustRegionOptions, step_finish
 from problems import LeastSquares, linear_least_squares, regularized_rosenbrock
+from strict_backend import strict_backend
 
 
 class Counter:
@@ -452,3 +454,38 @@ def test_forcing_powers_of_the_phases(method: str, pre: Optional[float], power: 
     for r in s.iterations:
         q = expected[0] if r.model == "gauss_newton" else expected[1]
         assert r.forcing == pytest.approx(min(0.5, r.gnorm_ratio ** q), rel=1e-13)
+
+
+# --- the strict backend ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("method", METHODS)
+@pytest.mark.parametrize("krylov", KRYLOV)
+def test_strict_backend(method: str, krylov: str) -> None:
+    """The code path of a compiling backend, without a framework: the switch
+    run on the strict backend (tiny capacities) is the numpy run."""
+    p = regularized_rosenbrock()
+    opts = solver_options(krylov)
+
+    def spaced(backend: Any) -> dict[str, Any]:
+        """Lanczos and flexible keep Krylov blocks of fixed capacity, as
+        compiling backends need: array_space (on both sides, so that the
+        comparison sees the backend only)."""
+        if krylov == "cg":
+            return opts
+        return {"metric_solve": euclidean_metric_solve, **opts, "space": array_space(backend),
+                "retract": lambda x, s: x + s}
+
+    _, reference = switch_run(method, p, krylov_capacity=2, **spaced(numpy_backend))
+    _, strict = switch_run(method, p, backend=strict_backend, krylov_capacity=2,
+                           **spaced(strict_backend))
+    assert reference.switch_iteration is not None
+    assert strict.switch_iteration == reference.switch_iteration
+    assert [(r.model, r.accepted, r.subproblem.krylov_steps, r.switch_hits)
+            for r in strict.iterations] == \
+        [(r.model, r.accepted, r.subproblem.krylov_steps, r.switch_hits)
+         for r in reference.iterations]
+    for a, b in zip(strict.iterations, reference.iterations):     # as tests/test_newton_line_search
+        assert abs(a.f - b.f) <= 1e-10 * max(1.0, abs(b.f))
+    assert (strict.hessvec_calls, strict.gn_hessvec_calls) == \
+        (reference.hessvec_calls, reference.gn_hessvec_calls)
