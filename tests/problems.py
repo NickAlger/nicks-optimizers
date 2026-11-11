@@ -2,7 +2,7 @@
 inside, wrapped in Vector(...) / Covector(...) on the way out."""
 
 import threading
-from typing import Callable
+from typing import Callable, NamedTuple
 
 import numpy as np
 
@@ -253,3 +253,83 @@ def make_thread_allreduce(n_ranks: int, timeout: float = 30.0) -> Callable[[int]
             return total
         return allreduce
     return for_rank
+
+
+# --- least squares with a Gauss-Newton and a full Hessian (the switch) ----------------------
+
+
+class LeastSquares(NamedTuple):
+    """f = 1/2 ||r(x)||^2 with its gradient J^T r, the Gauss-Newton Hessian
+    J^T J and the full Hessian J^T J + S, S = sum_k r_k Hess(r_k), and a
+    start. The functions are traceable (no float() of values, no Python
+    control flow on data), so they run on the strict backend too."""
+    fun: Callable[[Point], float]
+    grad: Callable[[Point], Covector]
+    gn_hessvec: Callable[[Point, Vector], Covector]
+    hessvec: Callable[[Point, Vector], Covector]
+    x0: Point
+
+
+def regularized_rosenbrock(n: int = 20, alpha: float = 0.1, cscale: float = 0.5,
+                           seed: int = 1, a: float = 10.0) -> LeastSquares:
+    """The regularized extended Rosenbrock problem of the switching study:
+    for each pair (u, w) = (x[2k], x[2k+1]) the residuals a (w - u^2) and
+    1 - u, plus sqrt(alpha) (x - c) with c = 1 + cscale N(0, 1). With
+    cscale > 0 the residual at the solution is nonzero and Gauss-Newton
+    converges linearly; with cscale = 0 the solution x = 1 has residual
+    zero. S is diagonal on the u components: -2 a times the valley residual.
+    Start (-1.2, 1, -1.2, 1, ...)."""
+    c = 1.0 + cscale * np.random.default_rng(seed).standard_normal(n)
+    root = float(np.sqrt(alpha))
+
+    def parts(x: Point) -> tuple[Array, Array, Array, Array, Array]:
+        u, w = x[0::2], x[1::2]
+        return u, w, a * (w - u**2), 1.0 - u, root * (x - c)
+
+    def interleave(du: Array, dw: Array) -> Array:
+        out: Array = np.stack([du, dw], axis=1).reshape(-1)
+        return out
+
+    def fun(x: Point) -> float:
+        _, _, rv, rl, rr = parts(x)
+        value: float = 0.5 * (np.sum(rv**2) + np.sum(rl**2) + np.sum(rr**2))
+        return value
+
+    def grad(x: Point) -> Covector:
+        u, _, rv, rl, rr = parts(x)
+        return Covector(interleave(-2.0 * a * u * rv - rl, a * rv) + root * rr)
+
+    def gn_hessvec(x: Point, v: Vector) -> Covector:
+        u = x[0::2]
+        vu, vw = v[0::2], v[1::2]
+        jv = a * (vw - 2.0 * u * vu)
+        return Covector(interleave(-2.0 * a * u * jv + vu, a * jv) + alpha * v)
+
+    def hessvec(x: Point, v: Vector) -> Covector:
+        _, _, rv, _, _ = parts(x)
+        s = interleave(-2.0 * a * rv * v[0::2], 0.0 * v[1::2])
+        return Covector(gn_hessvec(x, v) + s)
+
+    return LeastSquares(fun, grad, gn_hessvec, hessvec, Point(np.tile([-1.2, 1.0], n // 2)))
+
+
+def linear_least_squares(m: int = 30, n: int = 12, seed: int = 0) -> LeastSquares:
+    """f = 1/2 ||A x - b||^2: S = 0, so the Gauss-Newton and the full Hessian
+    are the same operator (computed by separate functions)."""
+    rng = np.random.default_rng(seed)
+    A, b = rng.standard_normal((m, n)), rng.standard_normal(m)
+
+    def fun(x: Point) -> float:
+        value: float = 0.5 * np.sum((A @ x - b) ** 2)
+        return value
+
+    def grad(x: Point) -> Covector:
+        return Covector(A.T @ (A @ x - b))
+
+    def gn_hessvec(x: Point, v: Vector) -> Covector:
+        return Covector(A.T @ (A @ v))
+
+    def hessvec(x: Point, v: Vector) -> Covector:
+        return Covector((A.T @ A) @ v)
+
+    return LeastSquares(fun, grad, gn_hessvec, hessvec, Point(np.zeros(n)))

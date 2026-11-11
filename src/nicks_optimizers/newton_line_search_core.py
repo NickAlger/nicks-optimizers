@@ -28,7 +28,15 @@ from typing import Any, Literal, Optional
 from .backend import Backend, backend_state, run_cond
 from .krylov_solvers import NEGATIVE
 from .line_search import ARMIJO, backtracking
-from .newton_core import CoreProblem, OuterState, canonical, forcing_term, state_at, subproblem_at
+from .newton_core import (
+    CoreProblem,
+    OuterState,
+    canonical,
+    forcing_term,
+    state_at,
+    subproblem_at,
+    tracked_models,
+)
 
 Direction = Literal["newton", "truncated", "steepest", "fallback"]
 NEWTON, TRUNCATED, STEEPEST, FALLBACK = range(4)
@@ -63,6 +71,9 @@ class RawLineSearchIteration:
       step                alpha d
       trace_alpha, trace_f    the trials
       precond_solves, metric_applies   applications made for a fallback
+      gn_model, full_model   when tracking for the switch, the Gauss-Newton
+                          and full model values at alpha d (nan otherwise;
+                          gn_model is nan for a fallback direction too)
     """
     forcing: Any
     direction: Any
@@ -79,14 +90,19 @@ class RawLineSearchIteration:
     trace_f: Any
     precond_solves: Any
     metric_applies: Any
+    gn_model: Any
+    full_model: Any
 
 
 def line_search_finish(problem: CoreProblem, options: LineSearchOptions, backend: Backend,
-                       state: OuterState, carry: Any, gnorm0: Any
+                       state: OuterState, carry: Any, gnorm0: Any, *,
+                       track: Optional[CoreProblem] = None
                        ) -> tuple[OuterState, RawLineSearchIteration]:
     """The rest of the iteration once the solve has stopped: the direction,
     the line search, and the state at the next point (the accepted point,
-    or the same point when the search failed)."""
+    or the same point when the search failed). With track (the problem
+    with the full Hessian, before a switch) also the two model values at
+    alpha d, by one product with the full Hessian (tracked_models)."""
     xp, space = backend.xp, problem.space
     solver, ops = subproblem_at(problem, state)
     d, sub = solver.result(backend, space, ops, carry)
@@ -143,10 +159,13 @@ def line_search_finish(problem: CoreProblem, options: LineSearchOptions, backend
     predicted = xp.where(descent, -(alpha * slope + 0.5 * alpha ** 2 * curvature), xp.nan)
     direction = xp.where(~descent, FALLBACK, xp.where(
         sub.status == NEGATIVE, xp.where(sub.krylov_steps == 1, STEEPEST, TRUNCATED), NEWTON))
+    step = space.scale_vector(alpha, d)
+    gn_model, full_model = tracked_models(problem, backend, state, step, -predicted, track)
     return new_state, RawLineSearchIteration(
         forcing=forcing_term(xp, state.gnorm, gnorm0, problem.forcing_max, problem.forcing_power),
         direction=direction,
         slope=slope, step_norm=step_norm, alpha=alpha, trials=found.trials, status=found.status,
         predicted=predicted, actual=state.f - found.f, subproblem=sub,
-        step=space.scale_vector(alpha, d), trace_alpha=found.trace_alpha, trace_f=found.trace_f,
-        precond_solves=precond_solves, metric_applies=metric_applies)
+        step=step, trace_alpha=found.trace_alpha, trace_f=found.trace_f,
+        precond_solves=precond_solves, metric_applies=metric_applies, gn_model=gn_model,
+        full_model=full_model)
