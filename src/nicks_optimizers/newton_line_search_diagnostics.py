@@ -22,12 +22,13 @@ display_ls_iteration prints them.
 """
 
 from dataclasses import dataclass
-from typing import Callable, Generic, Literal
+from typing import Callable, Generic, Literal, Optional
 
 import numpy as np
 
 from .krylov_solvers import SubproblemStats
 from .newton_line_search_core import Direction
+from .newton_switch import Hessian, Model, switch_columns, switch_header, switch_summary_line
 from .spaces import Array, CovectorT, VectorT
 
 LineSearchReason = Literal["converged", "max_iter", "callback", "line_search"]
@@ -64,6 +65,10 @@ class LineSearchRecord:
                          this iteration
       subproblem         SubproblemStats of the direction computation (lam = 0)
       trace_alpha, trace_f   the steps tried and f there
+
+    With hessian="switch" (None otherwise), as in IterationRecord: model,
+    error_gn, error_full, switch_hits and switch_fired (the model errors at
+    alpha d).
     """
     iteration: int
     f: float
@@ -82,6 +87,11 @@ class LineSearchRecord:
     subproblem: SubproblemStats
     trace_alpha: tuple[float, ...]
     trace_f: tuple[float, ...]
+    model: Optional[Model] = None
+    error_gn: Optional[float] = None
+    error_full: Optional[float] = None
+    switch_hits: Optional[int] = None
+    switch_fired: Optional[bool] = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -96,12 +106,17 @@ class LineSearchResume:
                       budget for the whole run)
       f               f(x) at the checkpoint, to detect a state that does not
                       belong to the x it is resumed from
+      switched, switch_hits
+                      hessian="switch": whether the run has switched to the
+                      full Hessian, and the consecutive hits so far
 
     Plain numbers only, so it round-trips through JSON exactly.
     """
     gnorm0: float
     next_iteration: int
     f: float
+    switched: bool = False
+    switch_hits: int = 0
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -133,6 +148,8 @@ class LineSearchSummary:
       elapsed       seconds
       resume        the LineSearchResume at the returned point
       capacity_growths  how often a Krylov basis doubled its capacity
+      hessian, switch_iteration, gn_hessvec_calls
+                    as in RunSummary
     """
     reason: LineSearchReason
     iterations: tuple[LineSearchRecord, ...]
@@ -149,6 +166,9 @@ class LineSearchSummary:
     elapsed: float
     resume: LineSearchResume
     capacity_growths: int = 0
+    hessian: Hessian = "full"
+    switch_iteration: Optional[int] = None
+    gn_hessvec_calls: int = 0
 
 
 def merge_ls_summaries(first: LineSearchSummary, second: LineSearchSummary) -> LineSearchSummary:
@@ -164,7 +184,11 @@ def merge_ls_summaries(first: LineSearchSummary, second: LineSearchSummary) -> L
         precond_solve_calls=first.precond_solve_calls + second.precond_solve_calls,
         metric_apply_calls=first.metric_apply_calls + second.metric_apply_calls,
         trials=first.trials + second.trials, elapsed=first.elapsed + second.elapsed,
-        resume=second.resume, capacity_growths=first.capacity_growths + second.capacity_growths)
+        resume=second.resume, capacity_growths=first.capacity_growths + second.capacity_growths,
+        hessian=second.hessian,
+        switch_iteration=(first.switch_iteration if first.switch_iteration is not None
+                          else second.switch_iteration),
+        gn_hessvec_calls=first.gn_hessvec_calls + second.gn_hessvec_calls)
 
 
 def ls_history_array(summary: LineSearchSummary) -> Array:
@@ -187,27 +211,30 @@ _REASONS: dict[str, str] = {
 }
 
 
-def format_ls_header() -> str:
-    """Column headings for format_ls_row."""
-    return _ROW.format(it="it", f="f", g="|g|", gr="|g|/|g0|", eta="eta", k="k", stop="stop",
-                       neg="neg", dir="direction", d="|d|", slope="slope", alpha="alpha",
-                       ls="ls", ratio="act/pred")
+def format_ls_header(switch: bool = False) -> str:
+    """Column headings for format_ls_row (switch: of a hessian="switch" run)."""
+    header = _ROW.format(it="it", f="f", g="|g|", gr="|g|/|g0|", eta="eta", k="k", stop="stop",
+                         neg="neg", dir="direction", d="|d|", slope="slope", alpha="alpha",
+                         ls="ls", ratio="act/pred")
+    return header + switch_header() if switch else header
 
 
 def format_ls_row(record: LineSearchRecord) -> str:
     """One line per iteration: k, stop and neg describe the Krylov solve; |d|
     and slope the direction (||d||_M, <g, d>); alpha and ls the step length
     and the evaluations of f; act/pred the actual over the predicted
-    decrease at the step taken (near 1 when the quadratic model is good)."""
+    decrease at the step taken (near 1 when the quadratic model is good). A
+    hessian="switch" run adds the columns of newton_switch.switch_columns."""
     s = record.subproblem
     ratio = (record.actual / record.predicted
              if np.isfinite(record.predicted) and record.predicted > 0.0 else float("nan"))
-    return _ROW.format(
+    row = _ROW.format(
         it=record.iteration, f=f"{record.f:.6e}", g=f"{record.gnorm:.1e}",
         gr=f"{record.gnorm_ratio:.1e}", eta=f"{record.forcing:.1e}", k=s.krylov_steps,
         stop=s.stop_reason, neg=s.n_negative, dir=record.direction, d=f"{record.step_norm:.2e}",
         slope=f"{record.slope:.2e}", alpha=f"{record.alpha:.2e}",
         ls=record.trials if record.accepted else f"{record.trials}!", ratio=f"{ratio:.3f}")
+    return row if record.model is None else row + switch_columns(record)
 
 
 def format_ls_krylov_trace(stats: SubproblemStats) -> str:
@@ -252,6 +279,8 @@ def format_ls_trials(record: LineSearchRecord) -> str:
 def format_ls_summary(summary: LineSearchSummary) -> str:
     """The end-of-run report: stopping reason, final values and total work."""
     ratio = summary.gnorm / summary.gnorm0 if summary.gnorm0 > 0.0 else 0.0
+    switch = switch_summary_line(summary.hessian, summary.switch_iteration,
+                                 summary.hessvec_calls, summary.gn_hessvec_calls)
     return "\n".join([
         f"Stopped: {_REASONS[summary.reason]}",
         f"  iterations {len(summary.iterations)}, {summary.trials} line-search trials, "
@@ -261,7 +290,7 @@ def format_ls_summary(summary: LineSearchSummary) -> str:
         f"{summary.metric_solve_calls} metric solves, {summary.precond_solve_calls} "
         f"preconditioner solves, {summary.metric_apply_calls} metric products, "
         f"{summary.fun_calls} objective and {summary.grad_calls} gradient evaluations",
-    ])
+    ] + ([] if switch is None else [switch]))
 
 
 def display_ls_iteration(record: LineSearchRecord, level: int, print_fn: Callable[[str], None],
@@ -269,7 +298,7 @@ def display_ls_iteration(record: LineSearchRecord, level: int, print_fn: Callabl
     """Print one iteration: the header every header_every rows, the row, and
     at level 2 the Krylov trace and the line-search trials."""
     if record.iteration % header_every == 0:
-        print_fn(format_ls_header())
+        print_fn(format_ls_header(record.model is not None))
     print_fn(format_ls_row(record))
     if level >= 2:
         print_fn(format_ls_krylov_trace(record.subproblem))

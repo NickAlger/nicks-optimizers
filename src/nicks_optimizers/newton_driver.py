@@ -1,9 +1,11 @@
 """What the drivers of the inexact Newton optimizers share (Python, around
 the compiled pieces of newton_core): the checks of the arguments, the
 CoreProblem with its defaults, the compiled pieces of the step solve with
-the growth of its Krylov basis, and the consistency check of a resumed run.
+the growth of its Krylov basis, the pieces of each phase of a
+hessian="switch" run, and the consistency check of a resumed run.
 """
 
+import dataclasses
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Callable, Literal, Optional, cast
@@ -24,7 +26,7 @@ def check_arguments(*, hessvec: Optional[Callable[..., Any]], space: Optional[Ve
                     metric_apply: Optional[Callable[..., Any]], precond_solve: Optional[Callable[..., Any]],
                     operators_at: Optional[Callable[..., Any]], point_data: Optional[Callable[..., Any]],
                     saddle_free: bool, krylov: str, convergence_norm: str,
-                    krylov_capacity: Optional[int], forcing_power: Optional[float] = None) -> None:
+                    krylov_capacity: Optional[int]) -> None:
     """Raise ValueError for an inconsistent combination of arguments."""
     if operators_at is not None:
         if any(f is not None for f in (hessvec, metric_solve, metric_apply, precond_solve)):
@@ -52,12 +54,11 @@ def check_arguments(*, hessvec: Optional[Callable[..., Any]], space: Optional[Ve
                          f"not {convergence_norm!r}")
     if krylov_capacity is not None and krylov_capacity < 1:
         raise ValueError(f"krylov_capacity must be positive, not {krylov_capacity}")
-    if forcing_power is not None and not (0.0 < forcing_power < np.inf):
-        raise ValueError(f"forcing_power must be positive and finite, not {forcing_power}")
 
 
 def make_problem(*, fun: Callable[[Any], Any], grad: Callable[[Any], Any],
                  hessvec: Optional[Callable[[Any, Any], Any]],
+                 gn_hessvec: Optional[Callable[[Any, Any], Any]] = None,
                  space: Optional[VectorSpace[Any, Any, Any, Any]], retract: Optional[Callable[[Any, Any], Any]],
                  metric_solve: Optional[Callable[[Any, Any], Any]],
                  metric_apply: Optional[Callable[[Any, Any], Any]],
@@ -78,7 +79,8 @@ def make_problem(*, fun: Callable[[Any], Any], grad: Callable[[Any], Any],
         operators_at=operators_at, point_data=point_data, project_covector=project_covector,
         saddle_free=saddle_free, krylov=krylov, convergence_norm=convergence_norm,
         forcing_max=forcing_max, stall_tol=stall_tol, max_krylov=max_krylov,
-        trust_region=trust_region, curvature_floor=curvature_floor, forcing_power=forcing_power)
+        trust_region=trust_region, curvature_floor=curvature_floor, forcing_power=forcing_power,
+        gn_hessvec=gn_hessvec)
 
 
 @dataclass(frozen=True)
@@ -127,6 +129,54 @@ def step_solve(problem: CoreProblem, backend: Backend, krylov_capacity: Optional
         return carry, growths
 
     return StepSolve(start=compile_function(backend, partial(init, problem, backend)), solve=solve)
+
+
+Finish = Callable[..., Any]
+
+
+class PhasePieces:
+    """The compiled pieces of each phase of a run, built on first use: the
+    full-Hessian phase (problem; the only phase with hessian="full") and,
+    for hessian="switch", the Gauss-Newton phase (before: the problem with
+    model="gauss_newton" and the pre-switch forcing power), whose finish
+    piece tracks the full model (track=problem). finish(problem, track)
+    makes a finish piece of the globalization (step_finish or
+    line_search_finish, compiled); the pieces after the switch are thus
+    compiled only if the switch happens."""
+
+    def __init__(self, problem: CoreProblem, before: Optional[CoreProblem], backend: Backend,
+                 krylov_capacity: Optional[int],
+                 finish: Callable[[CoreProblem, Optional[CoreProblem]], Finish]) -> None:
+        self.problem, self.before, self.backend = problem, before, backend
+        self.krylov_capacity, self.finish = krylov_capacity, finish
+        self._built: dict[bool, tuple[StepSolve, Finish]] = {}
+
+    def __call__(self, gauss_newton: bool) -> tuple[StepSolve, Finish]:
+        """(StepSolve, finish piece) of the Gauss-Newton phase or the full one."""
+        if gauss_newton not in self._built:
+            if gauss_newton:
+                assert self.before is not None
+                pieces = (step_solve(self.before, self.backend, self.krylov_capacity),
+                          self.finish(self.before, self.problem))
+            else:
+                pieces = (step_solve(self.problem, self.backend, self.krylov_capacity),
+                          self.finish(self.problem, None))
+            self._built[gauss_newton] = pieces
+        return self._built[gauss_newton]
+
+
+def gauss_newton_phase(problem: CoreProblem, pre_power: float) -> CoreProblem:
+    """The problem of the phase before the switch: gn_hessvec as the model
+    Hessian, with the pre-switch forcing power."""
+    return dataclasses.replace(problem, model="gauss_newton", forcing_power=pre_power)
+
+
+def check_resumed_switch(hessian: str, switched: bool, switch_hits: int) -> None:
+    """A resume state from a switch run that has switched or counted hits
+    belongs to a switch run."""
+    if hessian != "switch" and (switched or switch_hits):
+        raise ValueError("the resume state belongs to a hessian='switch' run (switched="
+                         f"{switched}, switch_hits={switch_hits}); resume it with hessian='switch'")
 
 
 def number(v: Any) -> float:

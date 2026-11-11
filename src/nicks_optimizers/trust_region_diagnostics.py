@@ -21,12 +21,20 @@ format_summary turn records into text; display_iteration prints them.
 """
 
 from dataclasses import dataclass
-from typing import Callable, Generic, Literal
+from typing import Callable, Generic, Literal, Optional
 
 import numpy as np
 
 from .spaces import Array, CovectorT, VectorT
 from .krylov_solvers import SubproblemStats
+from .newton_switch import (
+    Hessian,
+    Model,
+    split_hessvec_calls,
+    switch_columns,
+    switch_header,
+    switch_summary_line,
+)
 
 
 RunReason = Literal["converged", "radius", "max_iter", "callback"]
@@ -49,6 +57,18 @@ class IterationRecord:
       accepted           whether x_{k+1} = retract(x_k, s)
       elapsed            seconds since the start of the run, at the end of this iteration
       subproblem         SubproblemStats of the step computation
+
+    With hessian="switch" (None otherwise):
+      model              "gauss_newton" or "full": the model Hessian of this
+                         iteration
+      error_gn, error_full
+                         before the switch: |change - m(s)| for the
+                         Gauss-Newton and the full model, change = f(trial)
+                         - f(x_k) (criteria.switch_sample)
+      switch_hits        before the switch: consecutive hits after this
+                         iteration
+      switch_fired       before the switch: whether the run switched after
+                         this iteration
     """
     iteration: int
     f: float
@@ -63,6 +83,11 @@ class IterationRecord:
     accepted: bool
     elapsed: float
     subproblem: SubproblemStats
+    model: Optional[Model] = None
+    error_gn: Optional[float] = None
+    error_full: Optional[float] = None
+    switch_hits: Optional[int] = None
+    switch_fired: Optional[bool] = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -78,6 +103,9 @@ class ResumeState:
                       budget for the whole run, and records keep their numbering
       f               f(x) at the checkpoint, used to detect a state that does
                       not belong to the x it is resumed from
+      switched, switch_hits
+                      hessian="switch": whether the run has switched to the
+                      full Hessian, and the consecutive hits so far
 
     Plain numbers only, so dataclasses.asdict / ResumeState(**d) round-trip
     through JSON or any other format exactly. P, M, f and g are recomputed
@@ -88,6 +116,8 @@ class ResumeState:
     gnorm0: float
     next_iteration: int
     f: float
+    switched: bool = False
+    switch_hits: int = 0
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -129,6 +159,12 @@ class RunSummary:
                     run (e.g. after max_iter) with resume=summary.resume
       capacity_growths  how often a Krylov basis doubled its capacity, over
                     all the solves (see krylov_capacity in trust_region_newton)
+      hessian       "full" or "switch"
+      switch_iteration  hessian="switch": the first iteration with the full
+                    Hessian, if the switch happened in this run (None
+                    otherwise)
+      gn_hessvec_calls  products with gn_hessvec (hessvec_calls counts those
+                    with hessvec, the tracking products included)
     """
     reason: RunReason
     iterations: tuple[IterationRecord, ...]
@@ -145,6 +181,9 @@ class RunSummary:
     elapsed: float
     resume: ResumeState
     capacity_growths: int = 0
+    hessian: Hessian = "full"
+    switch_iteration: Optional[int] = None
+    gn_hessvec_calls: int = 0
 
 
 def merge_summaries(first: RunSummary, second: RunSummary) -> RunSummary:
@@ -163,7 +202,11 @@ def merge_summaries(first: RunSummary, second: RunSummary) -> RunSummary:
         precond_solve_calls=first.precond_solve_calls + second.precond_solve_calls,
         metric_apply_calls=first.metric_apply_calls + second.metric_apply_calls,
         elapsed=first.elapsed + second.elapsed, resume=second.resume,
-        capacity_growths=first.capacity_growths + second.capacity_growths)
+        capacity_growths=first.capacity_growths + second.capacity_growths,
+        hessian=second.hessian,
+        switch_iteration=(first.switch_iteration if first.switch_iteration is not None
+                          else second.switch_iteration),
+        gn_hessvec_calls=first.gn_hessvec_calls + second.gn_hessvec_calls)
 
 
 def history_array(summary: RunSummary) -> Array:
@@ -178,20 +221,23 @@ def history_array(summary: RunSummary) -> Array:
 def build_summary(reason: RunReason, records: list[IterationRecord], f: float, gnorm: float,
                   gnorm0: float, fun_calls: int, grad_calls: int, outer_metric_solve_calls: int,
                   outer_precond_solve_calls: int, elapsed: float, resume: ResumeState,
-                  capacity_growths: int = 0) -> RunSummary:
+                  capacity_growths: int = 0, hessian: Hessian = "full",
+                  switch_iteration: Optional[int] = None) -> RunSummary:
     """Assemble the RunSummary, adding up the work recorded per iteration.
     The outer_* counts are solves made outside the subproblems (gradient
     norms)."""
     subs = [r.subproblem for r in records]
+    hessvec_calls, gn_hessvec_calls = split_hessvec_calls(records)
     return RunSummary(
         reason=reason, iterations=tuple(records), f=f, gnorm=gnorm, gnorm0=gnorm0,
         accepted_steps=sum(r.accepted for r in records),
         fun_calls=fun_calls, grad_calls=grad_calls,
-        hessvec_calls=sum(s.hessvec_calls for s in subs),
+        hessvec_calls=hessvec_calls,
         metric_solve_calls=outer_metric_solve_calls + sum(s.metric_solve_calls for s in subs),
         precond_solve_calls=outer_precond_solve_calls + sum(s.precond_solve_calls for s in subs),
         metric_apply_calls=sum(s.metric_apply_calls for s in subs),
-        elapsed=elapsed, resume=resume, capacity_growths=capacity_growths)
+        elapsed=elapsed, resume=resume, capacity_growths=capacity_growths, hessian=hessian,
+        switch_iteration=switch_iteration, gn_hessvec_calls=gn_hessvec_calls)
 
 
 _ROW = ("{it:>4}  {f:>13}  {g:>8}  {gr:>8}  {r:>8}  {sr:>5}  {pred:>9}  {ared:>9}  "
@@ -206,25 +252,30 @@ _RUN_REASONS: dict[str, str] = {
 }
 
 
-def format_header() -> str:
-    """Column headings for format_row."""
-    return _ROW.format(it="it", f="f", g="|g|", gr="|g|/|g0|", r="radius", sr="|s|/r",
-                       pred="pred", ared="actual", rho="rho", acc="acc", k="k",
-                       stop="stop", neg="neg")
+def format_header(switch: bool = False) -> str:
+    """Column headings for format_row (switch: of a hessian="switch" run)."""
+    header = _ROW.format(it="it", f="f", g="|g|", gr="|g|/|g0|", r="radius", sr="|s|/r",
+                         pred="pred", ared="actual", rho="rho", acc="acc", k="k",
+                         stop="stop", neg="neg")
+    return header + switch_header() if switch else header
 
 
 def format_row(record: IterationRecord) -> str:
     """One line per iteration. |s|/r = 1.00 means the step reached the
     trust-region boundary; pred and actual are the model and true decreases;
-    k and stop describe the Krylov solve; neg counts negative curvature values."""
+    k and stop describe the Krylov solve; neg counts negative curvature values.
+    A hessian="switch" run adds the model Hessian (GN or N), the ratio of the
+    full to the Gauss-Newton model error before the switch, and * where the
+    switch happened (newton_switch.switch_columns)."""
     s = record.subproblem
-    return _ROW.format(
+    row = _ROW.format(
         it=record.iteration, f=f"{record.f:.6e}", g=f"{record.gnorm:.1e}",
         gr=f"{record.gnorm_ratio:.1e}", r=f"{record.radius:.2e}",
         sr=f"{s.step_norm / record.radius:.2f}", pred=f"{record.predicted:.2e}",
         ared=f"{record.actual:.2e}", rho=f"{record.rho:+.3f}",
         acc="yes" if record.accepted else "no", k=s.krylov_steps, stop=s.stop_reason,
         neg=s.n_negative)
+    return row if record.model is None else row + switch_columns(record)
 
 
 def format_krylov_trace(stats: SubproblemStats) -> str:
@@ -249,6 +300,8 @@ def format_krylov_trace(stats: SubproblemStats) -> str:
 def format_summary(summary: RunSummary) -> str:
     """The end-of-run report: stopping reason, final values and total work."""
     ratio = summary.gnorm / summary.gnorm0 if summary.gnorm0 > 0.0 else 0.0
+    switch = switch_summary_line(summary.hessian, summary.switch_iteration,
+                                 summary.hessvec_calls, summary.gn_hessvec_calls)
     return "\n".join([
         f"Stopped: {_RUN_REASONS[summary.reason]}",
         f"  iterations {len(summary.iterations)} ({summary.accepted_steps} accepted), "
@@ -258,7 +311,7 @@ def format_summary(summary: RunSummary) -> str:
         f"{summary.metric_solve_calls} metric solves, {summary.precond_solve_calls} "
         f"preconditioner solves, {summary.metric_apply_calls} metric products, "
         f"{summary.fun_calls} objective and {summary.grad_calls} gradient evaluations",
-    ])
+    ] + ([] if switch is None else [switch]))
 
 
 def display_iteration(record: IterationRecord, level: int, print_fn: Callable[[str], None],
@@ -266,7 +319,7 @@ def display_iteration(record: IterationRecord, level: int, print_fn: Callable[[s
     """Print one iteration: the header every header_every rows, the row, and
     at level 2 the Lanczos trace."""
     if record.iteration % header_every == 0:
-        print_fn(format_header())
+        print_fn(format_header(record.model is not None))
     print_fn(format_row(record))
     if level >= 2:
         print_fn(format_krylov_trace(record.subproblem))

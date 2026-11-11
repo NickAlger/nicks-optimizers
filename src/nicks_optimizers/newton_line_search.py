@@ -66,8 +66,17 @@ from .krylov_solvers import (
     subproblem_stats,
 )
 from .line_search import ARMIJO
-from .newton_core import OuterState, PointOperators
-from .newton_driver import check_arguments, check_resumed_f, make_problem, number, step_solve
+from .newton_core import CoreProblem, OuterState, PointOperators
+from .newton_driver import (
+    PhasePieces,
+    check_arguments,
+    check_resumed_f,
+    check_resumed_switch,
+    gauss_newton_phase,
+    make_problem,
+    number,
+)
+from .newton_switch import Hessian, SwitchTracker, resolve_switch, split_hessvec_calls
 from .newton_line_search_core import DIRECTIONS, LineSearchOptions, line_search_finish
 from .newton_line_search_diagnostics import (
     LineSearchInfo,
@@ -184,6 +193,10 @@ def line_search_newton(
         convergence_norm: Literal["metric", "preconditioner"] = "metric",
         gtol: float = 0.0, rtol: float = 1e-8, gnorm0: Optional[float] = None,
         forcing_max: float = 0.5, forcing_power: Optional[float] = None,
+        hessian: Hessian = "full",
+        gn_hessvec: Optional[Callable[[PointT, VectorT], CovectorT]] = None,
+        switch_tau: Optional[float] = None, switch_k: Optional[int] = None,
+        pre_switch_forcing_power: Optional[float] = None,
         max_iter: int = 500, max_krylov: int = 50,
         c1: float = 1e-4, max_backtracks: int = 30, step_max: Optional[float] = None,
         curvature_floor: float = 1e-6,
@@ -200,9 +213,11 @@ def line_search_newton(
     space, retract, metric_solve, metric_apply, precond_solve,
     project_covector), the Krylov solver choice (krylov: "auto" is CG for
     P = M without saddle_free, else Lanczos), convergence_norm, gtol, rtol,
-    gnorm0, forcing_max, forcing_power, max_iter, max_krylov, display,
-    print_fn, callback, g0, backend and krylov_capacity are those of
-    trust_region_newton.
+    gnorm0, forcing_max, forcing_power, the switch from Gauss-Newton to the
+    full Hessian (hessian, gn_hessvec, switch_tau, switch_k,
+    pre_switch_forcing_power; the model errors are measured at the step
+    alpha d taken), max_iter, max_krylov, display, print_fn, callback, g0,
+    backend and krylov_capacity are those of trust_region_newton.
 
     Each iteration computes a direction d by a Krylov solve of H d = -g to
     the relative tolerance min(forcing_max, (||g|| / ||g0||)^forcing_power)
@@ -235,7 +250,15 @@ def line_search_newton(
                     metric_apply=metric_apply, precond_solve=precond_solve,
                     operators_at=operators_at, point_data=point_data, saddle_free=saddle_free,
                     krylov=krylov, convergence_norm=convergence_norm,
-                    krylov_capacity=krylov_capacity, forcing_power=forcing_power)
+                    krylov_capacity=krylov_capacity)
+    settings = resolve_switch(hessian=hessian, gn_hessvec=gn_hessvec, operators_at=operators_at,
+                              switch_tau=switch_tau, switch_k=switch_k,
+                              pre_switch_forcing_power=pre_switch_forcing_power,
+                              forcing_power=forcing_power)
+    if resume is not None:
+        check_resumed_switch(hessian, resume.switched, resume.switch_hits)
+    tracker = (SwitchTracker(settings) if resume is None
+               else SwitchTracker(settings, resume.switched, resume.switch_hits))
     if not 0.0 < c1 < 1.0:
         raise ValueError(f"c1 must lie in (0, 1), not {c1}")
     if max_backtracks < 1:
@@ -248,20 +271,25 @@ def line_search_newton(
     bk = numpy_backend if backend is None else backend
     xp = bk.xp
     problem = make_problem(
-        fun=fun, grad=grad, hessvec=hessvec, space=space, retract=retract,
+        fun=fun, grad=grad, hessvec=hessvec, gn_hessvec=gn_hessvec, space=space, retract=retract,
         metric_solve=metric_solve, metric_apply=metric_apply, precond_solve=precond_solve,
         operators_at=operators_at, point_data=point_data, project_covector=project_covector,
         saddle_free=saddle_free, krylov=krylov, convergence_norm=convergence_norm,
         forcing_max=forcing_max, stall_tol=0.0, max_krylov=max_krylov, trust_region=False,
-        curvature_floor=curvature_floor,
-        forcing_power=0.5 if forcing_power is None else forcing_power)
-    pieces = step_solve(problem, bk, krylov_capacity)
+        curvature_floor=curvature_floor, forcing_power=settings.post_power)
     options = LineSearchOptions(c1=c1, max_backtracks=max_backtracks, step_max=step_max)
-    finish_piece = compile_function(bk, partial(line_search_finish, problem, options, bk))
+
+    def finish(p: CoreProblem, track: Optional[CoreProblem]) -> Callable[..., Any]:
+        if track is None:
+            return compile_function(bk, partial(line_search_finish, p, options, bk))
+        return compile_function(bk, partial(line_search_finish, p, options, bk, track=track))
+
+    phases = PhasePieces(problem, gauss_newton_phase(problem, settings.pre_power)
+                         if settings.switch else None, bk, krylov_capacity, finish)
     unbounded = xp.asarray(np.inf)                  # the solvers carry a radius; unused here
 
     start = time.perf_counter()
-    state: OuterState = pieces.start(x0, g0)
+    state: OuterState = phases(tracker.tracking)[0].start(x0, g0)
     fx = number(state.f)
     fun_calls, grad_calls, trials, growths = 1, (0 if g0 is not None else 1), 0, 0
     it = 0
@@ -282,6 +310,7 @@ def line_search_newton(
             reason = "max_iter"
             break
         gnorm0_x = xp.asarray(gnorm0)
+        pieces, finish_piece = phases(tracker.tracking)
         carry, grown = pieces.solve(state, unbounded, gnorm0_x)
         growths += grown
         new_state, raw = finish_piece(state, carry, gnorm0_x)
@@ -292,6 +321,8 @@ def line_search_newton(
         trials += n_trials
         precond_solves += int(np.asarray(raw.precond_solves))
         metric_applies += int(np.asarray(raw.metric_applies))
+        switch_fields = tracker.observe(it, fx, number(raw.actual), number(raw.gn_model),
+                                        number(raw.full_model), accepted)
         record = LineSearchRecord(
             iteration=it, f=fx, gnorm=gnorm, gnorm_ratio=gnorm / gnorm0 if gnorm0 > 0.0 else 0.0,
             forcing=number(raw.forcing), direction=DIRECTIONS[int(np.asarray(raw.direction))],
@@ -299,7 +330,7 @@ def line_search_newton(
             trials=n_trials, predicted=number(raw.predicted), actual=number(raw.actual),
             accepted=accepted, elapsed=time.perf_counter() - start, subproblem=stats,
             trace_alpha=tuple(np.asarray(raw.trace_alpha)[:n_trials].tolist()),
-            trace_f=tuple(np.asarray(raw.trace_f)[:n_trials].tolist()))
+            trace_f=tuple(np.asarray(raw.trace_f)[:n_trials].tolist()), **switch_fields)
         records.append(record)
         state = new_state
         if accepted:
@@ -312,7 +343,9 @@ def line_search_newton(
             display_ls_iteration(record, display, print_fn)
         stop = False
         if callback is not None:
-            resume_state = LineSearchResume(gnorm0=gnorm0, next_iteration=it, f=fx)
+            resume_state = LineSearchResume(gnorm0=gnorm0, next_iteration=it, f=fx,
+                                            switched=tracker.switched,
+                                            switch_hits=tracker.hits)
             info: LineSearchInfo[VectorT, CovectorT] = LineSearchInfo(
                 record=record, f=fx, g=state.g, step=raw.step, resume=resume_state)
             stop = bool(callback(state.x, info))
@@ -324,16 +357,19 @@ def line_search_newton(
             break
 
     subs = [r.subproblem for r in records]
+    hessvec_calls, gn_hessvec_calls = split_hessvec_calls(records)
     summary = LineSearchSummary(
         reason=reason, iterations=tuple(records), f=fx, gnorm=gnorm, gnorm0=gnorm0,
         fun_calls=fun_calls, grad_calls=grad_calls,
-        hessvec_calls=sum(s.hessvec_calls for s in subs),
+        hessvec_calls=hessvec_calls,
         metric_solve_calls=metric_solves + sum(s.metric_solve_calls for s in subs),
         precond_solve_calls=precond_solves + sum(s.precond_solve_calls for s in subs),
         metric_apply_calls=metric_applies + sum(s.metric_apply_calls for s in subs),
         trials=trials, elapsed=time.perf_counter() - start,
-        resume=LineSearchResume(gnorm0=gnorm0, next_iteration=it, f=fx),
-        capacity_growths=growths)
+        resume=LineSearchResume(gnorm0=gnorm0, next_iteration=it, f=fx,
+                                switched=tracker.switched, switch_hits=tracker.hits),
+        capacity_growths=growths, hessian=hessian, switch_iteration=tracker.switch_iteration,
+        gn_hessvec_calls=gn_hessvec_calls)
     if display >= 1:
         print_fn(format_ls_summary(summary))
     x: PointT = state.x
