@@ -317,6 +317,36 @@ Open:
 - Wolfe and nonmonotone searches as options of the same loop.
 - The comparison under compilation and on GPUs.
 
+## Switching from Gauss-Newton to the full Hessian (2026-11-11)
+
+Done (`dev/gauss_newton_switch_plan.md`; the idea and the study are Nick's):
+`hessian="switch"` in both Newton optimizers. The run starts with
+`gn_hessvec`. After each step it compares the Gauss-Newton and the full
+model's errors (one more full product per iteration), and switches for good
+after `switch_k` = 2 consecutive accepted hits with `e_N < 0.25 e_GN`. Also
+`forcing_power` (0.5 by default, in both phases of a switch, and
+`pre_switch_forcing_power`). Experiments (`experiments/gn_newton_switch/`,
+the study's three problems, 58 runs): cheaper than Gauss-Newton in 51 runs,
+by up to 96%, and converged in every run, where Gauss-Newton did not in 12;
+mixed against the full Hessian from the start (wins with the line search,
+loses or ties with the trust region).
+
+Open:
+
+- **A delayed start of the tracking.** On Rosenbrock with the trust region
+  the detector fires one or two iterations before convergence, and the
+  tracking products (a median 16% of the run) buy nothing. Starting the
+  tracking only once Gauss-Newton is visibly linear (its `|1 - rho|`, or
+  the ratio of successive gradient norms, levels off) would remove most of
+  that cost. Deferred by Nick (2026-11-11).
+- **tau** stays 0.25. Larger values fire earlier, which helped matrix
+  completion and hurt the diffusion inversion in the study.
+- A rule with no tracking product (Fletcher-Xu: the relative decrease of
+  f), as an alternative trigger to compare against.
+- The comparison under compilation and on GPUs, and weighted by the real
+  cost of a full product (1.6 Gauss-Newton products in matrix completion,
+  1.5 PDE solves in the diffusion inversion).
+
 ## Metric-aware L-BFGS (in progress, 2026-10-26)
 
 Plan in `dev/lbfgs_plan.md`, all decisions settled.

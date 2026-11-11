@@ -174,7 +174,10 @@ test is invariant under changes of variables. The run stops when
 `gnorm0 = ||g(x0)||` by default. With `convergence_norm="preconditioner"`
 the norm is `||g||_{P^{-1}}` instead (the same unless `precond_solve` is
 given; then it costs one more `P` solve per new iterate, which the Krylov
-solve reuses). The Krylov tolerance is a forcing term times `||g||_{M^{-1}}`.
+solve reuses). The Krylov tolerance is a forcing term times `||g||_{M^{-1}}`:
+`min(forcing_max, (||g|| / gnorm0)^forcing_power)`, with `forcing_max = 0.5`
+and `forcing_power = 0.5` by default. A power of 1 gives quadratic local
+convergence with an exact Hessian, at more Krylov steps per iteration.
 
 ### Subproblem solvers
 
@@ -325,6 +328,55 @@ The line search itself, `backtracking(backend, phi, x0, f0, slope, alpha0)`,
 is a pure function that other optimizers can reuse, and the Newton
 directions are available alone as `solve_newton_direction`,
 `solve_newton_direction_cg` and `solve_newton_direction_flexible`.
+
+## Switching from Gauss-Newton to the full Hessian
+
+For least squares, `f = 1/2 ||r(x)||^2`, the Gauss-Newton Hessian `J^T J` is
+cheap and positive semidefinite, but it drops `S = sum_k r_k Hess(r_k)`. When
+the residual at the solution is not zero, Gauss-Newton converges only
+linearly. The full Hessian `J^T J + S` restores fast local convergence, but
+it costs more per product, and far from the solution it can be indefinite
+and a worse model. `hessian="switch"` (both Newton optimizers) starts with
+Gauss-Newton and switches for good once the full model predicts the steps
+clearly better:
+
+```python
+x, summary = trust_region_newton(fun, grad, full_hessvec, x0,
+                                 hessian="switch", gn_hessvec=gauss_newton_hessvec)
+```
+
+After each Gauss-Newton step `s` it applies the full Hessian once more and
+compares the actual change of `f` with each model's prediction:
+`e_GN = |change - m_GN(s)|`, `e_N = |change - m_N(s)|`. Near a minimizer
+with a nonzero residual `e_GN` is of order `||s||^2` and `e_N` of order
+`||s||^3`. The run switches after `switch_k` (default 2) consecutive
+accepted steps with `e_N < switch_tau * e_GN` (default 0.25). A rejected step,
+or a Gauss-Newton error at the level of rounding in `f`, resets the count
+(`criteria.switch_sample`). `gn_hessvec` can be any positive semidefinite
+model Hessian; with `operators_at` it goes into the `PointOperators`. The
+forcing power is `forcing_power` in both phases (0.5 by default), or
+`pre_switch_forcing_power` before the switch. The detector needs a
+second-order retraction: with a first-order one `e_N` stays of order
+`||s||^2`, and the run simply stays with Gauss-Newton.
+
+The records say which model each iteration used (`model`) and the two
+errors; the summary gives `switch_iteration` and the products with each
+Hessian (`gn_hessvec_calls`, and `hessvec_calls` including the one tracking
+product per Gauss-Newton iteration). The display adds a column for the
+model and one for `e_N / e_GN`. On the last stage of the matrix completion
+example (data of higher rank than the fit), Gauss-Newton takes 43
+iterations and 436 Hessian products, the switch 15 and 82, and the full
+Hessian from the start 16 and 73.
+
+On the problems of the study the switch comes from (regularized Rosenbrock,
+a diffusion inversion, matrix completion; 58 runs), it was cheaper than
+pure Gauss-Newton in 51 runs, by up to 96%, and converged in all of them,
+where Gauss-Newton did not converge in 500 iterations in 12. It does not
+always pay: on Rosenbrock with the trust region it fired one or two
+iterations before convergence, so the tracking products bought nothing.
+Against the full Hessian from the start it usually won with the line search
+and lost or tied with the trust region. Details:
+[`experiments/gn_newton_switch`](experiments/gn_newton_switch/README.md).
 
 ## Other representations
 
@@ -559,7 +611,8 @@ framework installed.
 
 Modules in dependency order. The first eight do not depend on the
 optimizers and are meant to be reused by other methods; `krylov_solvers`,
-`newton_core` and `newton_driver` are shared by the two Newton optimizers.
+`newton_core`, `newton_switch` and `newton_driver` are shared by the two
+Newton optimizers.
 
 | module | contents |
 |---|---|
@@ -569,11 +622,12 @@ optimizers and are meant to be reused by other methods; `krylov_solvers`,
 | `metrics` | the Hilbert structure, the metric given by operators: `euclidean_metric_solve`, `euclidean_metric_apply`, `direct_sum`, `vector_norm`, `covector_norm`, M-Gram matrix growth |
 | `dense` | small dense linear algebra in coordinates: Rayleigh–Ritz for a projected pencil, the trust-region problem on a ball (with the hard case), the projected trust-region problem and Newton step of a Krylov method |
 | `krylov` | Krylov processes, immutable: preconditioned Lanczos (`lanczos_start`, `lanczos_advance`, `LanczosState`, `lanczos_tridiagonal`) and conjugate gradients (`cg_start`, `cg_curvature`, `cg_advance`, `CGState`, with recurrences for P-norms); optional covector projection for redundant representations |
-| `criteria` | tests shared by inexact Newton methods: `gradient_converged`, `forcing_term`, `reduction_ratio` |
+| `criteria` | tests shared by inexact Newton methods: `gradient_converged`, `forcing_term`, `reduction_ratio`, `switch_sample` |
 | `line_search` | backtracking with the Armijo condition, as a pure function: `backtracking`, `LineSearchResult` |
 | `krylov_solvers` | the Krylov solvers of the Newton steps (Lanczos, CG, flexible), in trust-region and line-search modes, as pieces a backend can compile; `SubproblemStats` |
 | `trust_region_subproblem` | the trust-region subproblem over a Krylov space: `solve_tr_subproblem` (Lanczos, any M, saddle-free), `solve_tr_subproblem_cg` (Steihaug-Toint, M = P) and `solve_tr_subproblem_flexible` (any preconditioner) |
 | `newton_core` | the shared parts of an inexact Newton iteration as pure pieces: the state at a point, the step solve; `PointOperators` |
+| `newton_switch` | the switch from the Gauss-Newton to the full Hessian, as the two drivers share it: keyword checks, the detector's state, the work by Hessian, the display columns |
 | `newton_driver` | what the two drivers share |
 | `trust_region_diagnostics` | records, `ResumeState`, and text output of the trust region |
 | `trust_region_core` | the trust-region update as a pure piece |

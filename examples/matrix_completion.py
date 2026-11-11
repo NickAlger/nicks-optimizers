@@ -369,13 +369,19 @@ def derivative_check(samples: Samples, x: LowRank, rng: np.random.Generator,
 def complete(samples: Samples, x0: LowRank, saddle_free: bool = False, curvature: bool = True,
              project: bool = True, radius: float = 1.0, display: int = 0,
              max_iter: int = 200, max_krylov: int = 50, rtol: float = 1e-10,
-             krylov: Literal["auto", "cg", "lanczos"] = "auto") -> tuple[LowRank, RunSummary]:
+             krylov: Literal["auto", "cg", "lanczos"] = "auto",
+             hessian: Literal["full", "switch"] = "full") -> tuple[LowRank, RunSummary]:
     """Fit a matrix of the rank of x0 to the samples, starting from x0 with
     the given trust-region radius (a Frobenius norm). curvature=False uses
-    the Gauss-Newton Hessian; project=False omits project_covector (to see
-    what goes wrong without it). With the defaults the subproblems are
-    solved by truncated CG (P = M = I); krylov="lanczos" uses the
-    reorthogonalized Lanczos solver instead."""
+    the Gauss-Newton Hessian; hessian="switch" starts with it and switches
+    to the full Hessian once its model predicts the steps clearly better;
+    project=False omits project_covector (to see what goes wrong without
+    it). With the defaults the subproblems are solved by truncated CG
+    (P = M = I); krylov="lanczos" uses the reorthogonalized Lanczos solver
+    instead."""
+    def gauss_newton(x: LowRank, v: Tangent) -> Cotangent:
+        return hessian_action(samples, x, v, False)
+
     return trust_region_newton(
         lambda x: objective(samples, x),
         lambda x: gradient(samples, x),
@@ -383,7 +389,8 @@ def complete(samples: Samples, x0: LowRank, saddle_free: bool = False, curvature
         x0, space=fixed_rank_space(), retract=retract, metric_solve=euclidean_metric_solve,
         project_covector=gauge_projection if project else None,
         saddle_free=saddle_free, krylov=krylov, radius=radius, display=display,
-        max_iter=max_iter, max_krylov=max_krylov, rtol=rtol)
+        max_iter=max_iter, max_krylov=max_krylov, rtol=rtol, hessian=hessian,
+        gn_hessvec=gauss_newton if hessian == "switch" else None)
 
 
 def complete_lbfgs(samples: Samples, x0: LowRank, initial_step: Optional[float] = None,
@@ -470,3 +477,17 @@ if __name__ == "__main__":
         print(f"{k:4d}  {len(summary.iterations):10d}  {steps:12d}  {relative_error(x, a):8.2e}  "
               f"{len(sq.iterations):10d}  {sq.grad_calls:9d}  {relative_error(xq, a):8.2e}  "
               f"{best_error(k):17.2e}")
+
+    print(f"\n=== the rank-{r} stage again: Gauss-Newton, switch, full Hessian ===")
+    print("The data are not of rank r (singular values 2^-k beyond it), so the residual at the")
+    print("solution is nonzero and Gauss-Newton converges only linearly; hessian='switch' starts")
+    print("with it and moves to the full Hessian once that model predicts the steps clearly better.")
+    x_prev = stages[r - 2][0]
+    start = add_zero_component(x_prev, np.random.default_rng(2))
+    print("model         iterations  Hessian products (GN + full)  switched at  error")
+    for label, options in (("Gauss-Newton", {"curvature": False}), ("switch", {"hessian": "switch"}),
+                           ("full", {})):
+        x, summary = complete(samples, start, radius=float(x_prev[1][-1]), **options)
+        print(f"{label:12s}  {len(summary.iterations):10d}  "
+              f"{summary.gn_hessvec_calls + summary.hessvec_calls:28d}  "
+              f"{str(summary.switch_iteration):>11s}  {relative_error(x, a):.2e}")
