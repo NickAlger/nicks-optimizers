@@ -24,7 +24,7 @@ def check_arguments(*, hessvec: Optional[Callable[..., Any]], space: Optional[Ve
                     metric_apply: Optional[Callable[..., Any]], precond_solve: Optional[Callable[..., Any]],
                     operators_at: Optional[Callable[..., Any]], point_data: Optional[Callable[..., Any]],
                     saddle_free: bool, krylov: str, convergence_norm: str,
-                    krylov_capacity: Optional[int]) -> None:
+                    krylov_capacity: Optional[int], forcing_power: Optional[float] = None) -> None:
     """Raise ValueError for an inconsistent combination of arguments."""
     if operators_at is not None:
         if any(f is not None for f in (hessvec, metric_solve, metric_apply, precond_solve)):
@@ -52,6 +52,8 @@ def check_arguments(*, hessvec: Optional[Callable[..., Any]], space: Optional[Ve
                          f"not {convergence_norm!r}")
     if krylov_capacity is not None and krylov_capacity < 1:
         raise ValueError(f"krylov_capacity must be positive, not {krylov_capacity}")
+    if forcing_power is not None and not (0.0 < forcing_power < np.inf):
+        raise ValueError(f"forcing_power must be positive and finite, not {forcing_power}")
 
 
 def make_problem(*, fun: Callable[[Any], Any], grad: Callable[[Any], Any],
@@ -65,7 +67,7 @@ def make_problem(*, fun: Callable[[Any], Any], grad: Callable[[Any], Any],
                  project_covector: Optional[Callable[[Any, Any], Any]], saddle_free: bool,
                  krylov: Krylov, convergence_norm: ConvergenceNorm, forcing_max: float,
                  stall_tol: float, max_krylov: int, trust_region: bool = True,
-                 curvature_floor: float = 1e-6) -> CoreProblem:
+                 curvature_floor: float = 1e-6, forcing_power: float = 0.5) -> CoreProblem:
     """The CoreProblem, with the numpy defaults (numpy_space, x + s) filled in."""
     return CoreProblem(
         fun=fun, grad=grad, hessvec=hessvec,
@@ -76,7 +78,7 @@ def make_problem(*, fun: Callable[[Any], Any], grad: Callable[[Any], Any],
         operators_at=operators_at, point_data=point_data, project_covector=project_covector,
         saddle_free=saddle_free, krylov=krylov, convergence_norm=convergence_norm,
         forcing_max=forcing_max, stall_tol=stall_tol, max_krylov=max_krylov,
-        trust_region=trust_region, curvature_floor=curvature_floor)
+        trust_region=trust_region, curvature_floor=curvature_floor, forcing_power=forcing_power)
 
 
 @dataclass(frozen=True)

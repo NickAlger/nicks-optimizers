@@ -144,7 +144,8 @@ def line_search_finish(problem: CoreProblem, options: LineSearchOptions, backend
     direction = xp.where(~descent, FALLBACK, xp.where(
         sub.status == NEGATIVE, xp.where(sub.krylov_steps == 1, STEEPEST, TRUNCATED), NEWTON))
     return new_state, RawLineSearchIteration(
-        forcing=forcing_term(xp, state.gnorm, gnorm0, problem.forcing_max), direction=direction,
+        forcing=forcing_term(xp, state.gnorm, gnorm0, problem.forcing_max, problem.forcing_power),
+        direction=direction,
         slope=slope, step_norm=step_norm, alpha=alpha, trials=found.trials, status=found.status,
         predicted=predicted, actual=state.f - found.f, subproblem=sub,
         step=space.scale_vector(alpha, d), trace_alpha=found.trace_alpha, trace_f=found.trace_f,

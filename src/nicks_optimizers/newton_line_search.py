@@ -183,7 +183,8 @@ def line_search_newton(
         krylov: Literal["auto", "cg", "lanczos", "flexible"] = "auto",
         convergence_norm: Literal["metric", "preconditioner"] = "metric",
         gtol: float = 0.0, rtol: float = 1e-8, gnorm0: Optional[float] = None,
-        forcing_max: float = 0.5, max_iter: int = 500, max_krylov: int = 50,
+        forcing_max: float = 0.5, forcing_power: Optional[float] = None,
+        max_iter: int = 500, max_krylov: int = 50,
         c1: float = 1e-4, max_backtracks: int = 30, step_max: Optional[float] = None,
         curvature_floor: float = 1e-6,
         display: int = 0, print_fn: Callable[[str], None] = print,
@@ -199,11 +200,13 @@ def line_search_newton(
     space, retract, metric_solve, metric_apply, precond_solve,
     project_covector), the Krylov solver choice (krylov: "auto" is CG for
     P = M without saddle_free, else Lanczos), convergence_norm, gtol, rtol,
-    gnorm0, forcing_max, max_iter, max_krylov, display, print_fn, callback,
-    g0, backend and krylov_capacity are those of trust_region_newton.
+    gnorm0, forcing_max, forcing_power, max_iter, max_krylov, display,
+    print_fn, callback, g0, backend and krylov_capacity are those of
+    trust_region_newton.
 
     Each iteration computes a direction d by a Krylov solve of H d = -g to
-    the relative tolerance min(forcing_max, sqrt(||g|| / ||g0||)), with
+    the relative tolerance min(forcing_max, (||g|| / ||g0||)^forcing_power)
+    (forcing_power=None: 0.5, the square root), with
     nonpositive curvature truncated (or the saddle-free model |H|_M with its
     M-Ritz values floored at curvature_floor times the largest, see the
     module docstring), then backtracks along retract(x, alpha d) from
@@ -232,7 +235,7 @@ def line_search_newton(
                     metric_apply=metric_apply, precond_solve=precond_solve,
                     operators_at=operators_at, point_data=point_data, saddle_free=saddle_free,
                     krylov=krylov, convergence_norm=convergence_norm,
-                    krylov_capacity=krylov_capacity)
+                    krylov_capacity=krylov_capacity, forcing_power=forcing_power)
     if not 0.0 < c1 < 1.0:
         raise ValueError(f"c1 must lie in (0, 1), not {c1}")
     if max_backtracks < 1:
@@ -250,7 +253,8 @@ def line_search_newton(
         operators_at=operators_at, point_data=point_data, project_covector=project_covector,
         saddle_free=saddle_free, krylov=krylov, convergence_norm=convergence_norm,
         forcing_max=forcing_max, stall_tol=0.0, max_krylov=max_krylov, trust_region=False,
-        curvature_floor=curvature_floor)
+        curvature_floor=curvature_floor,
+        forcing_power=0.5 if forcing_power is None else forcing_power)
     pieces = step_solve(problem, bk, krylov_capacity)
     options = LineSearchOptions(c1=c1, max_backtracks=max_backtracks, step_max=step_max)
     finish_piece = compile_function(bk, partial(line_search_finish, problem, options, bk))

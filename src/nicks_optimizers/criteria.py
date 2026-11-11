@@ -11,15 +11,18 @@ def gradient_converged(gnorm: float, gnorm0: float, gtol: float, rtol: float) ->
     return gnorm <= max(gtol, rtol * gnorm0)
 
 
-def forcing_term(gnorm: float, gnorm0: float, forcing_max: float) -> float:
-    """Relative Krylov tolerance min(forcing_max, sqrt(||g|| / ||g0||)).
+def forcing_term(gnorm: float, gnorm0: float, forcing_max: float, power: float = 0.5) -> float:
+    """Relative Krylov tolerance min(forcing_max, (||g|| / ||g0||)^power).
 
     Using the ratio makes it invariant to scaling f; it tends to zero as the
-    gradient does, which gives superlinear local convergence.
+    gradient does, which gives superlinear local convergence (of order
+    1 + power for an exact Hessian, quadratic with power = 1). The default
+    power 0.5 is the square root.
     """
     if gnorm0 <= 0.0:
         return forcing_max
-    return min(forcing_max, float(np.sqrt(gnorm / gnorm0)))
+    ratio = gnorm / gnorm0
+    return min(forcing_max, float(np.sqrt(ratio) if power == 0.5 else ratio ** power))
 
 
 def reduction_ratio(f_old: float, f_trial: float, pred: float) -> float:

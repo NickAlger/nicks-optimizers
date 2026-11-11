@@ -118,7 +118,7 @@ def step_finish(problem: CoreProblem, options: TrustRegionOptions, backend: Back
         return state
 
     new_state = run_cond(backend, accepted, move, stay, None)
-    forcing = forcing_term(xp, state.gnorm, gnorm0, problem.forcing_max)
+    forcing = forcing_term(xp, state.gnorm, gnorm0, problem.forcing_max, problem.forcing_power)
     return new_state, RawIteration(forcing=forcing, predicted=predicted, actual=state.f - f_trial,
                                    rho=rho, accepted=accepted, new_radius=new_radius,
                                    subproblem=sub, step=s)
