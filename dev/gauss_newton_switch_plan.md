@@ -1,7 +1,6 @@
 # Plan: switching from Gauss-Newton to the full Hessian
 
-November 2026. **Status: approved (2026-11-11), in implementation**; see
-[Progress](#progress). Nick settled the mode name ("switch"), line-search
+November 2026. **Status: done (2026-11-11)**; see [Progress](#progress). Nick settled the mode name ("switch"), line-search
 support, the detector's parameters (tau = 0.25 and k = 2, exposed as
 keywords), a one-way switch, the forcing powers (0.5 before the switch and
 1.0 after it, changed after phase 6 to 0.5 in both, D10; the keyword logic
@@ -495,4 +494,8 @@ passing, and is committed separately.
   costs more on Rosenbrock with the trust region, where it fires one or two
   iterations before convergence; a power of 0.5 after the switch was cheaper
   than 1.0 in 46 of 58 runs. Following D10, the default power after the
-  switch is now 0.5.
+  switch is now 0.5 (bd7544d).
+- **Phase 7**: the README section, the switch run in
+  `examples/matrix_completion.py` (shown in CI), the `dev/TODO.md` entry
+  with what is open; the vendored baseline and `tests/test_baseline.py`
+  deleted after a last bit-for-bit pass.
