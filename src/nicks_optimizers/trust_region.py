@@ -81,6 +81,19 @@ tangent vectors of a low-rank manifold):
                                        otherwise amplify rounding errors in
                                        the invisible components (see krylov).
 
+Switching from Gauss-Newton to the full Hessian (hessian="switch"):
+  gn_hessvec(x, v) -> Covector         a positive semidefinite model
+                                       Hessian, usually Gauss-Newton J^T J
+                                       (with operators_at: the gn_hessvec of
+                                       its PointOperators)
+The run starts with gn_hessvec as the model Hessian. After each step s it
+compares the actual change of f with the change each model predicts (one
+product with hessvec on s), and once the full model's error has been below
+switch_tau times Gauss-Newton's for switch_k consecutive accepted steps it
+uses hessvec for the rest of the run (see newton_switch and
+dev/gauss_newton_switch_plan.md). For least squares with a nonzero residual
+at the solution, where Gauss-Newton converges only linearly.
+
 The radius carries over from one point to the next, so the theory wants
 M(x) uniformly equivalent to a fixed norm over the iterates; an x-dependent
 M also moves the norm of the stopping test.
@@ -108,7 +121,16 @@ import numpy as np
 
 from .backend import Backend, compile_function, numpy_backend
 from .criteria import gradient_converged
-from .newton_driver import check_arguments, check_resumed_f, make_problem, number, step_solve
+from .newton_driver import (
+    PhasePieces,
+    check_arguments,
+    check_resumed_f,
+    check_resumed_switch,
+    gauss_newton_phase,
+    make_problem,
+    number,
+)
+from .newton_switch import Hessian, SwitchTracker, resolve_switch
 from .spaces import (
     CovectorBlockT,
     CovectorT,
@@ -117,7 +139,7 @@ from .spaces import (
     VectorSpace,
     VectorT,
 )
-from .trust_region_core import OuterState, PointOperators, TrustRegionOptions, step_finish
+from .trust_region_core import CoreProblem, OuterState, PointOperators, TrustRegionOptions, step_finish
 from .trust_region_diagnostics import (
     IterationInfo,
     IterationRecord,
@@ -175,6 +197,10 @@ def trust_region_newton(
         gtol: float = 0.0, rtol: float = 1e-8,
         gnorm0: Optional[float] = None, forcing_max: float = 0.5,
         forcing_power: Optional[float] = None,
+        hessian: Hessian = "full",
+        gn_hessvec: Optional[Callable[[PointT, VectorT], CovectorT]] = None,
+        switch_tau: Optional[float] = None, switch_k: Optional[int] = None,
+        pre_switch_forcing_power: Optional[float] = None,
         stall_tol: float = 1e-3, max_iter: int = 500, max_krylov: int = 50,
         display: int = 0, print_fn: Callable[[str], None] = print,
         callback: Optional[Callable[[PointT, IterationInfo[VectorT, CovectorT]], Optional[bool]]] = None,
@@ -222,6 +248,20 @@ def trust_region_newton(
     (stall_tol); CG stops when its next iterate would leave the trust region
     or it meets negative curvature, and then steps to the boundary; the
     flexible solver stops on the residual (or a breakdown) only.
+
+    hessian="switch" (with gn_hessvec, see the module docstring) starts
+    with the Gauss-Newton model Hessian and switches to hessvec, for good,
+    after switch_k consecutive accepted steps (default 2) on which the full
+    model's error |change - m(s)| was below switch_tau (default 0.25) times
+    the Gauss-Newton model's; a rejected step or a sample at the level of
+    rounding in f resets the count (criteria.switch_sample). Until the
+    switch each iteration costs one more product with hessvec. The forcing
+    powers before and after the switch are pre_switch_forcing_power and
+    forcing_power: (0.5, 1.0) by default, (q, q) when only forcing_power = q
+    is given (see newton_switch.resolve_switch). The records say which model
+    each iteration used and the two model errors, the summary when the
+    switch happened (switch_iteration) and the products with each Hessian
+    (gn_hessvec_calls, hessvec_calls), and the display adds both.
 
     Convergence: stops when ||g|| <= max(gtol, rtol * gnorm0); with the
     default gtol = 0, when ||g|| <= rtol ||g(x0)||. The norm is
@@ -271,23 +311,37 @@ def trust_region_newton(
                     metric_apply=metric_apply, precond_solve=precond_solve,
                     operators_at=operators_at, point_data=point_data, saddle_free=saddle_free,
                     krylov=krylov, convergence_norm=convergence_norm,
-                    krylov_capacity=krylov_capacity, forcing_power=forcing_power)
+                    krylov_capacity=krylov_capacity)
+    settings = resolve_switch(hessian=hessian, gn_hessvec=gn_hessvec, operators_at=operators_at,
+                              switch_tau=switch_tau, switch_k=switch_k,
+                              pre_switch_forcing_power=pre_switch_forcing_power,
+                              forcing_power=forcing_power)
+    if resume is not None:
+        check_resumed_switch(hessian, resume.switched, resume.switch_hits)
+    tracker = (SwitchTracker(settings) if resume is None
+               else SwitchTracker(settings, resume.switched, resume.switch_hits))
     bk = numpy_backend if backend is None else backend
     xp = bk.xp
     problem = make_problem(
-        fun=fun, grad=grad, hessvec=hessvec, space=space, retract=retract,
+        fun=fun, grad=grad, hessvec=hessvec, gn_hessvec=gn_hessvec, space=space, retract=retract,
         metric_solve=metric_solve, metric_apply=metric_apply, precond_solve=precond_solve,
         operators_at=operators_at, point_data=point_data, project_covector=project_covector,
         saddle_free=saddle_free, krylov=krylov, convergence_norm=convergence_norm,
         forcing_max=forcing_max, stall_tol=stall_tol, max_krylov=max_krylov,
-        forcing_power=0.5 if forcing_power is None else forcing_power)
-    pieces = step_solve(problem, bk, krylov_capacity)
-    finish_piece = compile_function(bk, partial(step_finish, problem,
-                                                TrustRegionOptions(eta=eta, radius_max=radius_max), bk))
+        forcing_power=settings.post_power)
+    options = TrustRegionOptions(eta=eta, radius_max=radius_max)
+
+    def finish(p: CoreProblem, track: Optional[CoreProblem]) -> Callable[..., Any]:
+        if track is None:
+            return compile_function(bk, partial(step_finish, p, options, bk))
+        return compile_function(bk, partial(step_finish, p, options, bk, track=track))
+
+    phases = PhasePieces(problem, gauss_newton_phase(problem, settings.pre_power)
+                         if settings.switch else None, bk, krylov_capacity, finish)
     growths = 0
 
     start = time.perf_counter()
-    state: OuterState = pieces.start(x0, g0)
+    state: OuterState = phases(tracker.tracking)[0].start(x0, g0)
     fx = number(state.f)                        # records hold Python floats
     fun_calls, grad_calls = 1, (0 if g0 is not None else 1)
     it = 0
@@ -310,6 +364,7 @@ def trust_region_newton(
             reason = "max_iter"
             break
         radius_x, gnorm0_x = xp.asarray(radius), xp.asarray(gnorm0)
+        pieces, finish_piece = phases(tracker.tracking)
         carry, grown = pieces.solve(state, radius_x, gnorm0_x)
         growths += grown
         new_state, raw = finish_piece(state, carry, radius_x, gnorm0_x)
@@ -317,12 +372,15 @@ def trust_region_newton(
         fun_calls += 1
         accepted = bool(np.asarray(raw.accepted))
         new_radius = number(raw.new_radius)
+        switch_fields = tracker.observe(it, fx, number(raw.actual), number(raw.gn_model),
+                                        number(raw.full_model), accepted)
         record = IterationRecord(
             iteration=it, f=fx, gnorm=gnorm,
             gnorm_ratio=gnorm / gnorm0 if gnorm0 > 0.0 else 0.0,
             radius=radius, new_radius=new_radius, forcing=number(raw.forcing),
             predicted=number(raw.predicted), actual=number(raw.actual), rho=number(raw.rho),
-            accepted=accepted, elapsed=time.perf_counter() - start, subproblem=stats)
+            accepted=accepted, elapsed=time.perf_counter() - start, subproblem=stats,
+            **switch_fields)
         records.append(record)
         state = new_state
         if accepted:
@@ -335,17 +393,20 @@ def trust_region_newton(
         if display >= 1:
             display_iteration(record, display, print_fn)
         if callback is not None:
-            resume_state = ResumeState(radius=radius, gnorm0=gnorm0, next_iteration=it, f=fx)
+            resume_state = ResumeState(radius=radius, gnorm0=gnorm0, next_iteration=it, f=fx,
+                                       switched=tracker.switched, switch_hits=tracker.hits)
             info: IterationInfo[VectorT, CovectorT] = IterationInfo(
                 record=record, f=fx, g=state.g, step=raw.step, resume=resume_state)
             if callback(state.x, info):
                 reason = "callback"
                 break
 
-    final_state = ResumeState(radius=radius, gnorm0=gnorm0, next_iteration=it, f=fx)
+    final_state = ResumeState(radius=radius, gnorm0=gnorm0, next_iteration=it, f=fx,
+                              switched=tracker.switched, switch_hits=tracker.hits)
     summary = build_summary(reason, records, fx, gnorm, gnorm0, fun_calls, grad_calls,
                             metric_solves, precond_solves, time.perf_counter() - start,
-                            final_state, capacity_growths=growths)
+                            final_state, capacity_growths=growths, hessian=hessian,
+                            switch_iteration=tracker.switch_iteration)
     if display >= 1:
         print_fn(format_summary(summary))
     x: PointT = state.x

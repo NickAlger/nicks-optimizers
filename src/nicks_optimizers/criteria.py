@@ -1,6 +1,7 @@
 """Tests shared by inexact Newton methods: gradient convergence, the forcing
-term for the inner solve, and a rounding-safe ratio of actual to predicted
-reduction.
+term for the inner solve, a rounding-safe ratio of actual to predicted
+reduction, and one sample of the Gauss-Newton to full-Hessian switch
+detector.
 """
 
 import numpy as np
@@ -38,3 +39,31 @@ def reduction_ratio(f_old: float, f_trial: float, pred: float) -> float:
         return -np.inf
     delta = 10.0 * float(np.finfo(float).eps) * max(1.0, abs(f_old))
     return ((f_old - f_trial) + delta) / (pred + delta)
+
+
+SWITCH_ROUNDING = 100.0
+"""A switch sample is valid when e_GN > SWITCH_ROUNDING * 10 eps max(1, |f|):
+Gauss-Newton's own error must stand clear of the rounding in f
+(dev/gauss_newton_switch_plan.md, D4)."""
+
+
+def switch_sample(f: float, change: float, gn_model: float, full_model: float,
+                  tau: float) -> tuple[bool, bool, float, float]:
+    """One sample of the Gauss-Newton to full-Hessian switch detector.
+
+    f is f(x), change = f(retract(x, s)) - f(x) for the step s tried, and
+    gn_model, full_model the two quadratic models' values at s (the change
+    each predicts). Returns (valid, hit, e_gn, e_full) with
+
+        e_gn = |change - gn_model|,  e_full = |change - full_model|,
+
+    valid when both are finite and e_gn > SWITCH_ROUNDING * 10 eps max(1, |f|)
+    (a Gauss-Newton error at the level of rounding in f leaves nothing to
+    gain), and hit when valid and e_full < tau * e_gn. Near a minimizer with
+    a nonzero residual e_gn is of order ||s||^2 and e_full of order ||s||^3
+    (along a second-order retraction), so hits become persistent there.
+    """
+    e_gn, e_full = abs(change - gn_model), abs(change - full_model)
+    delta = 10.0 * float(np.finfo(float).eps) * max(1.0, abs(f))
+    valid = bool(np.isfinite(e_gn) and np.isfinite(e_full) and e_gn > SWITCH_ROUNDING * delta)
+    return valid, valid and e_full < tau * e_gn, e_gn, e_full

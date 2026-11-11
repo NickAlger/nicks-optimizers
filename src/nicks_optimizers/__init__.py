@@ -24,6 +24,9 @@ Modules, in dependency order:
                             (the state at a point, the step solve) as pure
                             pieces
   newton_driver             what the optimizers' drivers share
+  newton_switch             the switch from the Gauss-Newton to the full
+                            Hessian (hessian="switch"), as the drivers
+                            share it
   trust_region_diagnostics  records, resumption state and text output
   trust_region_core         the trust-region update as a pure piece
   trust_region              trust_region_newton, the driver around them
@@ -43,13 +46,14 @@ Modules, in dependency order:
 
 backend, trees, spaces, metrics, transport, dense, krylov, criteria and
 line_search do not depend on the optimizers and are meant to be reused by other methods; krylov_solvers,
-newton_core and newton_driver are shared by the Newton optimizers. The names
+newton_core, newton_driver and newton_switch are shared by the Newton
+optimizers. The names
 below are the public interface; lower-level pieces are available from their
 modules.
 """
 
 from .backend import Backend, loop_from_scan, loop_from_while, numpy_backend
-from .criteria import forcing_term, gradient_converged, reduction_ratio
+from .criteria import forcing_term, gradient_converged, reduction_ratio, switch_sample
 from .dense import (
     pencil_ritz,
     solve_projected_newton,
@@ -237,6 +241,7 @@ __all__ = [
     "forcing_term",
     "gradient_converged",
     "reduction_ratio",
+    "switch_sample",
     # trust region
     "IterationInfo",
     "IterationRecord",
