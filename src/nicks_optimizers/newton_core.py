@@ -91,6 +91,7 @@ class CoreProblem:
     max_krylov: int
     trust_region: bool = True                # the solvers' mode: trust region, or line search
     curvature_floor: float = 1e-6            # saddle-free model of a line search
+    forcing_power: float = 0.5               # the forcing term's power (0.5: the square root)
 
 
 @backend_state
@@ -118,11 +119,15 @@ class OuterState:
     precond_solves: Any
 
 
-def forcing_term(xp: Any, gnorm: Any, gnorm0: Any, forcing_max: Any) -> Any:
-    """criteria.forcing_term: min(forcing_max, sqrt(||g|| / ||g0||))."""
+def forcing_term(xp: Any, gnorm: Any, gnorm0: Any, forcing_max: Any, power: float = 0.5) -> Any:
+    """criteria.forcing_term: min(forcing_max, (||g|| / ||g0||)^power).
+    The power is static: 0.5 takes the square root (as before the power
+    existed, bit for bit), any other value the ** operator (not a name of
+    the backend contract)."""
     positive = gnorm0 > 0.0
     ratio = gnorm / xp.where(positive, gnorm0, 1.0)
-    return xp.where(positive, xp.minimum(forcing_max, xp.sqrt(ratio)), forcing_max)
+    scaled = xp.sqrt(ratio) if power == 0.5 else ratio ** power
+    return xp.where(positive, xp.minimum(forcing_max, scaled), forcing_max)
 
 
 def _identity(w: Any) -> Any:
@@ -240,7 +245,8 @@ def step_start(problem: CoreProblem, backend: Backend, state: OuterState, radius
     until it stops or its basis (of the given capacity)
     is full. Returns the solver's carry."""
     solver, ops = subproblem_at(problem, state)
-    forcing = forcing_term(backend.xp, state.gnorm, gnorm0, problem.forcing_max)
+    forcing = forcing_term(backend.xp, state.gnorm, gnorm0, problem.forcing_max,
+                           problem.forcing_power)
     carry = solver.begin(backend, problem.space, ops, state.g, radius, forcing * state.metric_gnorm,
                          state.start, capacity)
     return solver.run(backend, problem.space, ops, state.g, carry)

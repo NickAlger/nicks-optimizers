@@ -174,6 +174,7 @@ def trust_region_newton(
         radius_min: float = 1e-14, eta: float = 1e-4,
         gtol: float = 0.0, rtol: float = 1e-8,
         gnorm0: Optional[float] = None, forcing_max: float = 0.5,
+        forcing_power: Optional[float] = None,
         stall_tol: float = 1e-3, max_iter: int = 500, max_krylov: int = 50,
         display: int = 0, print_fn: Callable[[str], None] = print,
         callback: Optional[Callable[[PointT, IterationInfo[VectorT, CovectorT]], Optional[bool]]] = None,
@@ -213,7 +214,10 @@ def trust_region_newton(
 
     The Krylov solve stops when the (surrogate) residual satisfies
     ||R||_{M^{-1}} <= forcing * ||g||_{M^{-1}}, with
-    forcing = forcing_term(...) computed from the convergence norm. Lanczos
+    forcing = min(forcing_max, (||g|| / gnorm0)^forcing_power) computed from
+    the convergence norm (criteria.forcing_term). forcing_power=None is 0.5,
+    the square root; 1.0 gives quadratic local convergence with an exact
+    Hessian, at more Krylov steps per iteration. Lanczos
     also stops when the trust region is active and the model stops changing
     (stall_tol); CG stops when its next iterate would leave the trust region
     or it meets negative curvature, and then steps to the boundary; the
@@ -267,7 +271,7 @@ def trust_region_newton(
                     metric_apply=metric_apply, precond_solve=precond_solve,
                     operators_at=operators_at, point_data=point_data, saddle_free=saddle_free,
                     krylov=krylov, convergence_norm=convergence_norm,
-                    krylov_capacity=krylov_capacity)
+                    krylov_capacity=krylov_capacity, forcing_power=forcing_power)
     bk = numpy_backend if backend is None else backend
     xp = bk.xp
     problem = make_problem(
@@ -275,7 +279,8 @@ def trust_region_newton(
         metric_solve=metric_solve, metric_apply=metric_apply, precond_solve=precond_solve,
         operators_at=operators_at, point_data=point_data, project_covector=project_covector,
         saddle_free=saddle_free, krylov=krylov, convergence_norm=convergence_norm,
-        forcing_max=forcing_max, stall_tol=stall_tol, max_krylov=max_krylov)
+        forcing_max=forcing_max, stall_tol=stall_tol, max_krylov=max_krylov,
+        forcing_power=0.5 if forcing_power is None else forcing_power)
     pieces = step_solve(problem, bk, krylov_capacity)
     finish_piece = compile_function(bk, partial(step_finish, problem,
                                                 TrustRegionOptions(eta=eta, radius_max=radius_max), bk))
