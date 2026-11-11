@@ -1,10 +1,11 @@
 # Plan: switching from Gauss-Newton to the full Hessian
 
-November 2026. **Status: draft for review.** Nick has settled the mode name
-("switch"), line-search support, the detector's parameters (tau = 0.25 and
-k = 2, exposed as keywords), a one-way switch, and the forcing powers (0.5
-before the switch, 1.0 after it). The remaining decisions D1 to D9 are
-listed under [Decisions](#decisions).
+November 2026. **Status: approved (2026-11-11), in implementation**; see
+[Progress](#progress). Nick settled the mode name ("switch"), line-search
+support, the detector's parameters (tau = 0.25 and k = 2, exposed as
+keywords), a one-way switch, the forcing powers (0.5 before the switch, 1.0
+after it, with the keyword logic of [Forcing power](#forcing-power)), and
+D1 to D9 under [Decisions](#decisions).
 
 Background: the study "Gauss-Newton to full-Newton switching" (Nick Alger
 and Claude, November 2026; artifact V9rpRsqpod3aSuBVNbxhLo), on a
@@ -70,8 +71,8 @@ e_N      = |change - m_N(s)|
 - Line search: `-predicted`, which `line_search_finish` already computes as
   `-(alpha slope + 1/2 alpha^2 <H_GN d, d>)`.
 
-A rejected trust-region trial also counts: its step was evaluated, so its
-errors are valid measurements.
+A rejected trust-region trial resets the hit count, whatever its errors
+(D5). A failed line search ends the run, so the rule does not arise there.
 
 **The detector** runs in the driver, in Python floats, like the stopping
 tests:
@@ -80,7 +81,8 @@ tests:
 valid = isfinite(e_GN) and isfinite(e_N) and e_GN > c_round * delta
         where delta = 10 eps max(1, |f(x)|)        (the rounding allowance of rho, D4)
 hit   = valid and e_N < tau * e_GN                   (tau = switch_tau = 0.25)
-hits  = hits + 1 if hit else 0                       (D3: an invalid sample resets)
+hits  = hits + 1 if hit and accepted else 0          (D3: an invalid sample resets;
+                                                      D5: so does a rejected trial)
 if hits >= k:  switch                                (k = switch_k = 2)
 ```
 
@@ -120,10 +122,20 @@ The forcing term is now hard-coded as
 `min(forcing_max, sqrt(||g|| / ||g0||))`. It gets a power:
 `min(forcing_max, (||g|| / ||g0||)^p)`.
 
-- `forcing_power` (new, all modes): the power. `None` means 0.5 for
-  `hessian="full"` and 1.0 for the phase after a switch (D2).
-- `switch_forcing_power` (new, switch only, default 0.5): the power before
-  the switch.
+- `forcing_power` (new, all modes): the power. With `hessian="full"`,
+  `None` means 0.5 (today's term). With `hessian="switch"`, it is the power
+  after the switch.
+- `pre_switch_forcing_power` (new, switch only): the power before the
+  switch. Given with `hessian="full"`, it raises.
+
+In switch mode the two resolve as (D2):
+
+| `pre_switch_forcing_power` | `forcing_power` | before the switch | after the switch |
+|---|---|---|---|
+| None | None | 0.5 | 1.0 |
+| p | None | p | 1.0 |
+| None | q | q | q |
+| p | q | p | q |
 
 The power lives in `CoreProblem`, so it is static and closed over by the
 compiled pieces, like `forcing_max`. A power of exactly 0.5 keeps the
@@ -140,7 +152,7 @@ The switch run uses two `CoreProblem`s that differ in two fields:
 | | before the switch | after the switch |
 |---|---|---|
 | model Hessian | `gn_hessvec` | `hessvec` |
-| forcing power | `switch_forcing_power` | `forcing_power` |
+| forcing power | `pre_switch_forcing_power` | `forcing_power` |
 
 The two share `fun`, `grad`, the metric, the preconditioner, `point_data`,
 the retraction and the space. So the `OuterState` computed by either is
@@ -201,7 +213,7 @@ search, a fallback direction has no Gauss-Newton curvature, so its
   - `hessian="switch"` without `gn_hessvec`, or with `operators_at` and no
     `gn_hessvec` in the returned `PointOperators` (checked at the first
     point);
-  - `gn_hessvec`, `switch_tau`, `switch_k` or `switch_forcing_power` given
+  - `gn_hessvec`, `switch_tau`, `switch_k` or `pre_switch_forcing_power` given
     with `hessian="full"`;
   - `switch_tau` not in (0, 1);
   - `switch_k < 1`;
@@ -230,14 +242,14 @@ trust_region_newton(fun, grad, hessvec, x0, *, ...,          # as today, plus
                     switch_tau=0.25,             # hit when e_N < tau * e_GN
                     switch_k=2,                  # consecutive hits that trigger the switch
                     forcing_power=None,          # None: 0.5 ("full"), 1.0 (after a switch)
-                    switch_forcing_power=0.5,    # the power before the switch
+                    pre_switch_forcing_power=None,  # see Forcing power
                     ...)
 line_search_newton(...)                          # the same five keywords
 ```
 
 With `operators_at`, the returned `PointOperators` carry `gn_hessvec`
 beside `hessvec`. The keyword defaults shown are the effective ones. In
-code, `switch_tau`, `switch_k` and `switch_forcing_power` default to `None`,
+code, `switch_tau`, `switch_k` and `pre_switch_forcing_power` default to `None`,
 so that giving them with `hessian="full"` can raise.
 
 On a manifold, `hessvec` is the Hessian of the pullback (the Riemannian
@@ -297,8 +309,8 @@ line search as well as the trust region; `tau = 0.25` and `k = 2`, exposed
 as keywords; one-way; a keyword for the forcing power before the switch,
 with defaults of 0.5 before and 1.0 after.
 
-- **D1. The names of the keywords.** `hessian="full" | "switch"`,
-  `gn_hessvec`, `switch_tau`, `switch_k`, `switch_forcing_power`,
+- **D1. The names of the keywords.** **Decided: `gn_hessvec`.** `hessian="full" | "switch"`,
+  `gn_hessvec`, `switch_tau`, `switch_k`, `pre_switch_forcing_power`,
   `forcing_power`. Alternative for the operator: `model_hessvec` or
   `approx_hessvec`, since nothing in the method needs it to be
   Gauss-Newton. Any positive semidefinite model whose error is of second
@@ -315,40 +327,43 @@ with defaults of 0.5 before and 1.0 after.
   that 1.0 gives the full Hessian its q-quadratic tail. (a) adds that knob
   to every run, and the switch keyword is then "the other phase's power".
   The cost is a default that depends on the mode, which the docstring must
-  state.
+  state. **Decided:** `forcing_power` and `pre_switch_forcing_power`, with
+  the table in [Forcing power](#forcing-power).
 - **D3. An invalid sample** (a rounding-level `e_GN`, a non-finite value,
   or a line-search fallback direction): (a) resets the hit count; (b)
   leaves the count unchanged. *Recommendation: (a)*, the conservative
-  reading of "k in a row".
+  reading of "k in a row". **Decided: (a).**
 - **D4. The rounding gate.** A sample is valid when `e_GN > c_round *
   delta`, with `delta = 10 eps max(1, |f|)`, the same allowance as rho.
   *Recommendation: `c_round = 100`*, a module constant, not a keyword. With
-  that value, `e_GN` is at least about `1e-12 |f|` in float64.
-- **D5. Rejected trust-region trials count as samples.** *Recommendation:
-  yes.* Their step was evaluated, and near the switch point steps are
-  rarely rejected anyway.
+  that value, `e_GN` is at least about `1e-12 |f|` in float64. **Decided:
+  as recommended.**
+- **D5. Rejected trust-region trials.** *Recommendation was: count them as
+  samples.* **Decided: a rejection resets the hit count** (conservative,
+  like D3).
 - **D6. history_array** keeps its eight columns. The switch fields are on
   the records only. *Recommendation: yes*, so that existing code that
   slices the array keeps working. A `switch_history_array` can be added if
-  it is wanted.
+  it is wanted. **Agreed.**
 - **D7. Display columns** only in switch mode. *Recommendation: yes*, so
-  that the display of other runs does not change.
+  that the display of other runs does not change. **Agreed.**
 - **D8. Tracking starts at iteration 0**, with no delay or cheap
   pre-trigger. *Recommendation: yes, for now.* It is the method the study
   measured. A delayed start is a later option, if the experiments show the
-  tracking product matters (see Risks).
+  tracking product matters (see Risks). **Agreed, for now**; a delayed
+  start may follow.
 - **D9. Safety net.** As in the line-search plan: vendor the current
   package as `tests/nicks_optimizers_baseline/`, and compare the trust-region
   configurations (42 last time) and line-search ones bit for bit. This
   covers `hessian="full"` and `forcing_power=None`. Delete the copy at the
-  end. *Recommendation: yes.*
+  end. *Recommendation: yes.* **Agreed.**
 
 ## Testing
 
 - **Trajectory identity**, the central tests:
   - Before the switch, a switch run's iterates, records (except the switch
     fields) and work are bit for bit those of a `hessian="full"` run with
-    `hessvec=gn_hessvec` and `forcing_power=switch_forcing_power`, because
+    `hessvec=gn_hessvec` and `forcing_power=<the pre-switch power>`, because
     tracking never changes the trajectory.
   - After the switch, they are those of a `hessian="full"` run with the
     full Hessian, resumed at the switch point with the switch run's radius
@@ -435,4 +450,4 @@ passing, and is committed separately.
 
 ## Progress
 
-Not started.
+- **Plan approved** (2026-11-11), with the decisions above.
