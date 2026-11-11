@@ -257,8 +257,8 @@ def trust_region_newton(
     rounding in f resets the count (criteria.switch_sample). Until the
     switch each iteration costs one more product with hessvec. The forcing
     powers before and after the switch are pre_switch_forcing_power and
-    forcing_power: (0.5, 1.0) by default, (q, q) when only forcing_power = q
-    is given (see newton_switch.resolve_switch). The records say which model
+    forcing_power: both 0.5 by default; forcing_power sets both unless
+    pre_switch_forcing_power is given (see newton_switch.resolve_switch). The records say which model
     each iteration used and the two model errors, the summary when the
     switch happened (switch_iteration) and the products with each Hessian
     (gn_hessvec_calls, hessvec_calls), and the display adds both.

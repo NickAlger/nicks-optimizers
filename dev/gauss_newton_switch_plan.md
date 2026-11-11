@@ -3,9 +3,10 @@
 November 2026. **Status: approved (2026-11-11), in implementation**; see
 [Progress](#progress). Nick settled the mode name ("switch"), line-search
 support, the detector's parameters (tau = 0.25 and k = 2, exposed as
-keywords), a one-way switch, the forcing powers (0.5 before the switch, 1.0
-after it, with the keyword logic of [Forcing power](#forcing-power)), and
-D1 to D9 under [Decisions](#decisions).
+keywords), a one-way switch, the forcing powers (0.5 before the switch and
+1.0 after it, changed after phase 6 to 0.5 in both, D10; the keyword logic
+is in [Forcing power](#forcing-power)), and
+D1 to D10 under [Decisions](#decisions).
 
 Background: the study "Gauss-Newton to full-Newton switching" (Nick Alger
 and Claude, November 2026; artifact V9rpRsqpod3aSuBVNbxhLo), on a
@@ -103,7 +104,7 @@ one.
 **After the switch.** These are ordinary iterations with these settings:
 
 - the model Hessian is `hessvec`;
-- the forcing power is `p_post = 1.0` by default;
+- the forcing power is `p_post`, 0.5 by default (D10; the plan had 1.0);
 - there is no tracking product.
 
 The trust-region radius carries over unchanged, and rho uses the full
@@ -128,12 +129,13 @@ The forcing term is now hard-coded as
 - `pre_switch_forcing_power` (new, switch only): the power before the
   switch. Given with `hessian="full"`, it raises.
 
-In switch mode the two resolve as (D2):
+In switch mode the two resolve as (D2; the defaults after the switch were
+1.0 until D10):
 
 | `pre_switch_forcing_power` | `forcing_power` | before the switch | after the switch |
 |---|---|---|---|
-| None | None | 0.5 | 1.0 |
-| p | None | p | 1.0 |
+| None | None | 0.5 | 0.5 |
+| p | None | p | 0.5 |
 | None | q | q | q |
 | p | q | p | q |
 
@@ -241,7 +243,7 @@ trust_region_newton(fun, grad, hessvec, x0, *, ...,          # as today, plus
                     gn_hessvec=None,             # (x, v) -> Covector; required with "switch"
                     switch_tau=0.25,             # hit when e_N < tau * e_GN
                     switch_k=2,                  # consecutive hits that trigger the switch
-                    forcing_power=None,          # None: 0.5 ("full"), 1.0 (after a switch)
+                    forcing_power=None,          # None: 0.5 (both modes, both phases; D10)
                     pre_switch_forcing_power=None,  # see Forcing power
                     ...)
 line_search_newton(...)                          # the same five keywords
@@ -307,7 +309,7 @@ switch`. The work line splits the products into Gauss-Newton and full.
 Settled by Nick (2026-11-11): the mode name `"switch"`; allowed with the
 line search as well as the trust region; `tau = 0.25` and `k = 2`, exposed
 as keywords; one-way; a keyword for the forcing power before the switch,
-with defaults of 0.5 before and 1.0 after.
+with defaults of 0.5 before and 1.0 after (changed to 0.5 after, D10).
 
 - **D1. The names of the keywords.** **Decided: `gn_hessvec`.** `hessian="full" | "switch"`,
   `gn_hessvec`, `switch_tau`, `switch_k`, `pre_switch_forcing_power`,
@@ -351,12 +353,17 @@ with defaults of 0.5 before and 1.0 after.
   pre-trigger. *Recommendation: yes, for now.* It is the method the study
   measured. A delayed start is a later option, if the experiments show the
   tracking product matters (see Risks). **Agreed, for now**; a delayed
-  start may follow.
+  start may follow. After phase 6 (2026-11-11): still no delayed start.
 - **D9. Safety net.** As in the line-search plan: vendor the current
   package as `tests/nicks_optimizers_baseline/`, and compare the trust-region
   configurations (42 last time) and line-search ones bit for bit. This
   covers `hessian="full"` and `forcing_power=None`. Delete the copy at the
   end. *Recommendation: yes.* **Agreed.**
+- **D10. After phase 6** (Nick, 2026-11-11): the default forcing power is
+  0.5 before and after the switch (0.5 after the switch was cheaper than
+  1.0 in 46 of 58 runs); no delayed tracking for now; `tau` stays 0.25 (the
+  switch's weaker showing against the full Hessian from the start is taken
+  as a property of these examples).
 
 ## Testing
 
@@ -479,12 +486,13 @@ passing, and is committed separately.
   configurations, both methods) and `tests/test_jax_switch.py` (compiled
   scan and while loops against numpy; trace counts; the full-Hessian pieces
   compiled only when the switch fires), added to the CI job "jax".
-- **Phase 6** (experiments/gn_newton_switch/, check-in with Nick pending):
+- **Phase 6** (1edfb2a, experiments/gn_newton_switch/; checked in with
+  Nick, D10):
   the study's three problems (diffusion and matrix completion ported from
   the study's code), 29 cases x 2 methods x 5 variants (gn, switch, switch
   with power 0.5 after the switch, full, full with power 1). The switch
   beats Gauss-Newton in 41 of 44 diffusion and mc runs (up to 94%), but
   costs more on Rosenbrock with the trust region, where it fires one or two
   iterations before convergence; a power of 0.5 after the switch was cheaper
-  than 1.0 in 46 of 58 runs. Questions for the check-in in the experiment's
-  README. Phase 7 waits for the answers.
+  than 1.0 in 46 of 58 runs. Following D10, the default power after the
+  switch is now 0.5.

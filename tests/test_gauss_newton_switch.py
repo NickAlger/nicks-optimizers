@@ -272,7 +272,7 @@ def test_after_the_switch_it_is_the_full_run_resumed(method: str, krylov: str) -
     assert j is not None and saved["resume"].switched and saved["resume"].next_iteration == j
     resume = dataclasses.replace(saved["resume"], switched=False, switch_hits=0)
     x_full, full = optimizer(method)(p.fun, p.grad, p.hessvec, saved["x"], rtol=1e-12,
-                                     forcing_power=1.0, resume=resume, g0=saved["g"], **opts)
+                                     resume=resume, g0=saved["g"], **opts)
     assert plain(s.iterations[j:]) == plain(full.iterations)
     assert all(r.model == "full" for r in s.iterations[j:])
     assert x_switch.tobytes() == x_full.tobytes()
@@ -440,7 +440,8 @@ def test_display(method: str) -> None:
 
 @pytest.mark.parametrize("method", METHODS)
 @pytest.mark.parametrize("pre,power,expected", [
-    (None, None, (0.5, 1.0)), (0.75, None, (0.75, 1.0)), (None, 0.75, (0.75, 0.75)),
+    (None, None, (0.5, 0.5)), (0.75, None, (0.75, 0.5)), (None, 0.75, (0.75, 0.75)),
+    (0.5, 1.0, (0.5, 1.0)),
     (0.25, 2.0, (0.25, 2.0))])
 def test_forcing_powers_of_the_phases(method: str, pre: Optional[float], power: Optional[float],
                                       expected: tuple[float, float]) -> None:

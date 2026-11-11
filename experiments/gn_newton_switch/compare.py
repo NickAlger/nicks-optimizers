@@ -4,10 +4,10 @@ three problems, with both Newton optimizers of the library.
 
 Variants per case and method
   gn        hessvec = the Gauss-Newton Hessian (forcing power 0.5)
-  switch    hessian="switch" with the defaults (tau 0.25, k 2; forcing
-            powers 0.5 before, 1.0 after)
-  switch-p0.5  hessian="switch" with forcing_power=0.5: the power 0.5 in
-            both phases
+  switch    hessian="switch" (tau 0.25, k 2) with forcing powers 0.5
+            before and 1.0 after the switch (the default when this ran)
+  switch-p0.5  hessian="switch" with the power 0.5 in both phases (the
+            default since the plan's D10)
   full      hessvec = the full Hessian, forcing power 0.5
   full-p1   the full Hessian, forcing power 1.0 (the switch run's power
             after the switch)
@@ -85,8 +85,8 @@ def run(job: tuple[str, str, dict[str, Any], str, str]) -> dict[str, Any]:
         hv = gn
     elif variant.startswith("switch"):
         hv, opts = full, dict(opts, hessian="switch", gn_hessvec=gn)
-        if variant == "switch-p0.5":
-            opts["forcing_power"] = 0.5
+        opts["pre_switch_forcing_power"] = 0.5
+        opts["forcing_power"] = 0.5 if variant == "switch-p0.5" else 1.0
     else:
         hv = full
         if variant == "full-p1":
