@@ -24,6 +24,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from .backend import Backend, backend_state, run_cond
+from typing import Optional
+
 from .newton_core import (
     CoreProblem,
     OuterState,
@@ -36,6 +38,7 @@ from .newton_core import (
     step_grow,
     step_start,
     subproblem_at,
+    tracked_models,
 )
 
 __all__ = ["CoreProblem", "OuterState", "PointOperators", "RawIteration", "TrustRegionOptions",
@@ -57,7 +60,8 @@ class RawIteration:
     """What one iteration reports (arrays): the forcing term, the predicted
     and actual reductions, rho, acceptance, the new radius, the subproblem's
     statistics (RawSubproblem; SubproblemStats from the solvers not yet
-    converted) and the step tried."""
+    converted), the step tried, and, when tracking for the switch, the
+    Gauss-Newton and full model values at the step (nan otherwise)."""
     forcing: Any
     predicted: Any
     actual: Any
@@ -66,6 +70,8 @@ class RawIteration:
     new_radius: Any
     subproblem: Any
     step: Any
+    gn_model: Any
+    full_model: Any
 
 
 # --- the tests of criteria.py and the radius update, in where form -------------------------
@@ -95,11 +101,13 @@ def update_radius(xp: Any, radius: Any, rho: Any, step_norm: Any, radius_max: An
 
 
 def step_finish(problem: CoreProblem, options: TrustRegionOptions, backend: Backend,
-                state: OuterState, carry: Any, radius: Any, gnorm0: Any
-                ) -> tuple[OuterState, RawIteration]:
+                state: OuterState, carry: Any, radius: Any, gnorm0: Any, *,
+                track: Optional[CoreProblem] = None) -> tuple[OuterState, RawIteration]:
     """The rest of the iteration once the solve has stopped: the step, the
     trial point, rho, the new radius, and the state at the next point (the
-    trial point if accepted, else the same)."""
+    trial point if accepted, else the same). With track (the problem with
+    the full Hessian, before a switch) also the two model values at the
+    step, by one product with the full Hessian (tracked_models)."""
     xp = backend.xp
     solver, ops = subproblem_at(problem, state)
     s, sub = solver.result(backend, problem.space, ops, carry)
@@ -119,6 +127,8 @@ def step_finish(problem: CoreProblem, options: TrustRegionOptions, backend: Back
 
     new_state = run_cond(backend, accepted, move, stay, None)
     forcing = forcing_term(xp, state.gnorm, gnorm0, problem.forcing_max, problem.forcing_power)
+    gn_model, full_model = tracked_models(problem, backend, state, s, sub.true_model_value, track)
     return new_state, RawIteration(forcing=forcing, predicted=predicted, actual=state.f - f_trial,
                                    rho=rho, accepted=accepted, new_radius=new_radius,
-                                   subproblem=sub, step=s)
+                                   subproblem=sub, step=s, gn_model=gn_model,
+                                   full_model=full_model)

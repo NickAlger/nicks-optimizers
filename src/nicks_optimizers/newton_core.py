@@ -51,6 +51,9 @@ class PointOperators(Generic[VectorT, CovectorT]):
 
       hessvec(v) -> Covector         H v (needed by the Newton methods; lbfgs
                                      uses no Hessian)
+      gn_hessvec(v) -> Covector      the Gauss-Newton (or another positive
+                                     semidefinite model) Hessian, needed
+                                     only by hessian="switch"
       metric_solve(w) -> Vector      M^{-1} w (None: M = I, for numpy arrays
                                      without a space only)
       precond_solve(w) -> Vector     P^{-1} w (None: P = M)
@@ -62,6 +65,7 @@ class PointOperators(Generic[VectorT, CovectorT]):
     metric_solve: Optional[Callable[[CovectorT], VectorT]] = None
     precond_solve: Optional[Callable[[CovectorT], VectorT]] = None
     metric_apply: Optional[Callable[[VectorT], CovectorT]] = None
+    gn_hessvec: Optional[Callable[[VectorT], CovectorT]] = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -70,7 +74,11 @@ class CoreProblem:
     the optimizers (see trust_region_newton), with defaults filled in. Fixed
     during the run: compiled pieces close over it, so none of it is traced.
     The options of the globalization (the radius update, the line search)
-    are passed to its own pieces."""
+    are passed to its own pieces.
+
+    model says which operator is the model Hessian: "full" (hessvec, the
+    default) or "gauss_newton" (gn_hessvec, the phase of hessian="switch"
+    before the switch). Everything else sees one hessvec."""
     fun: Callable[[Any], Any]
     grad: Callable[[Any], Any]
     hessvec: Optional[Callable[[Any, Any], Any]]
@@ -92,6 +100,8 @@ class CoreProblem:
     trust_region: bool = True                # the solvers' mode: trust region, or line search
     curvature_floor: float = 1e-6            # saddle-free model of a line search
     forcing_power: float = 0.5               # the forcing term's power (0.5: the square root)
+    gn_hessvec: Optional[Callable[[Any, Any], Any]] = None    # keyword version, like hessvec
+    model: Literal["full", "gauss_newton"] = "full"           # which one is the model Hessian
 
 
 @backend_state
@@ -142,14 +152,22 @@ def operators(problem: CoreProblem, x: Any, data: Any) -> PointOperators[Any, An
         given = problem.operators_at(x, data)
     else:
         hv, ms, ma, ps = problem.hessvec, problem.metric_solve, problem.metric_apply, problem.precond_solve
+        gn = problem.gn_hessvec
         assert hv is not None
         given = PointOperators(
             hessvec=lambda v: hv(x, v),
             metric_solve=None if ms is None else (lambda w: ms(x, w)),
             metric_apply=None if ma is None else (lambda v: ma(x, v)),
-            precond_solve=None if ps is None else (lambda w: ps(x, w)))
+            precond_solve=None if ps is None else (lambda w: ps(x, w)),
+            gn_hessvec=None if gn is None else (lambda v: gn(x, v)))
     if given.hessvec is None:
         raise ValueError("operators_at must give hessvec for the Newton methods")
+    model_hessvec = given.hessvec
+    if problem.model == "gauss_newton":
+        if given.gn_hessvec is None:
+            raise ValueError("hessian='switch' needs gn_hessvec (in the PointOperators that "
+                             "operators_at returns)")
+        model_hessvec = given.gn_hessvec
     Ms, Ma = given.metric_solve, given.metric_apply
     if Ms is None:
         if Ma is not None:
@@ -163,8 +181,9 @@ def operators(problem: CoreProblem, x: Any, data: Any) -> PointOperators[Any, An
         raise ValueError("krylov='cg' needs P = M (no precond_solve)")
     if problem.krylov == "flexible" and given.precond_solve is None:
         raise ValueError("krylov='flexible' needs a separate precond_solve, and metric_apply")
-    return PointOperators(hessvec=given.hessvec, metric_solve=Ms,
-                          precond_solve=given.precond_solve, metric_apply=Ma)
+    return PointOperators(hessvec=model_hessvec, metric_solve=Ms,
+                          precond_solve=given.precond_solve, metric_apply=Ma,
+                          gn_hessvec=given.gn_hessvec)
 
 
 def canonical(problem: CoreProblem, x: Any, w: Any) -> Any:
@@ -263,3 +282,19 @@ def step_grow(problem: CoreProblem, backend: Backend, state: OuterState, carry: 
     """The same solve with room for capacity basis vectors (copies only)."""
     solver, _ = subproblem_at(problem, state)
     return solver.grow(backend, problem.space, carry, capacity)
+
+
+def tracked_models(problem: CoreProblem, backend: Backend, state: OuterState, step: Any,
+                   gn_model: Any, track: Optional[CoreProblem]) -> tuple[Any, Any]:
+    """The model values along a step for the switch detector: (gn_model,
+    full_model), with full_model = <g, s> + 1/2 <H s, s> by ONE product
+    with track's (full) Hessian. Both are nan when track is None (no
+    tracking: hessian="full", or after the switch); whether to track is
+    decided in Python, so a traced piece has the product or not."""
+    xp, space = backend.xp, problem.space
+    if track is None:
+        return xp.asarray(xp.nan), xp.asarray(xp.nan)
+    hessvec = operators(track, state.x, state.data).hessvec
+    assert hessvec is not None
+    full = space.pair(state.g, step) + 0.5 * space.pair(hessvec(step), step)
+    return gn_model, full
