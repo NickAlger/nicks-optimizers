@@ -1,5 +1,5 @@
 """The backtracking line search (src/nicks_optimizers/line_search.py,
-dev/line_search_plan.md phase 4) on one-dimensional functions."""
+dev/archive/line_search_plan.md phase 4) on one-dimensional functions."""
 
 from typing import Any, Callable
 

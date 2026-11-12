@@ -1,4 +1,4 @@
-"""Phase 7 of dev/jit_backends_plan.md: how the basis capacity and its
+"""Phase 7 of dev/archive/jit_backends_plan.md: how the basis capacity and its
 growth policy affect compiled Lanczos and flexible solves, against numpy.
 
 Same problems and configurations as solvers.py. Runs per configuration:

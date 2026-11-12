@@ -1,5 +1,5 @@
 """A strict numpy backend: checks, without any framework, that the core
-could be compiled (dev/jit_backends_plan.md, "Guarding against drift").
+could be compiled (dev/archive/jit_backends_plan.md, "Guarding against drift").
 
   * Values are Strict arrays, an ndarray subclass whose bool(), float(),
     int() and index() raise StrictError, so Python control flow on data

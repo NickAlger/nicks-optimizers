@@ -457,19 +457,19 @@ passing, and is committed separately.
 ## Progress
 
 - **Plan approved** (2026-11-11), with the decisions above.
-- **Phase 0** (36375de): the package vendored as
+- **Phase 0** (72b5f0b): the package vendored as
   `tests/nicks_optimizers_baseline/`; `tests/test_baseline.py` restored from
   the line-search plan and extended to run every case with both optimizers,
   comparing records and summaries over the baseline's fields (26 cases x 2
   methods, 12 subproblem solves), bit for bit.
-- **Phase 1** (7e3dde0): `forcing_power` in both drivers and
+- **Phase 1** (935ba43): `forcing_power` in both drivers and
   `criteria.forcing_term(..., power)`. Other powers use the `**` operator,
   not `xp.power`, which is not in the backend contract.
-- **Phase 2** (cadada9): `PointOperators.gn_hessvec`, `CoreProblem.model`
+- **Phase 2** (73920b7): `PointOperators.gn_hessvec`, `CoreProblem.model`
   and `.gn_hessvec`, `newton_core.tracked_models`, `track=` in both finish
   pieces; `tests/problems.py` gained `regularized_rosenbrock` (the study's
   P1, nonzero or zero residual) and `linear_least_squares`.
-- **Phases 3-4** (5772cf8), together, since the two drivers share nearly
+- **Phases 3-4** (9df0d63), together, since the two drivers share nearly
   all of it. Deviations from the plan:
   - a new module `newton_switch` holds what the drivers share (keyword
     resolution, `SwitchTracker`, the work split, the display columns), so
@@ -481,11 +481,11 @@ passing, and is committed separately.
     summary line;
   - the keyword checks live in `newton_switch.resolve_switch`, not in
     `check_arguments`.
-- **Phase 5** (e700fd6): switch runs on the strict backend (all four solver
+- **Phase 5** (49b246b): switch runs on the strict backend (all four solver
   configurations, both methods) and `tests/test_jax_switch.py` (compiled
   scan and while loops against numpy; trace counts; the full-Hessian pieces
   compiled only when the switch fires), added to the CI job "jax".
-- **Phase 6** (1edfb2a, experiments/gn_newton_switch/; checked in with
+- **Phase 6** (3381c3f, experiments/gn_newton_switch/; checked in with
   Nick, D10):
   the study's three problems (diffusion and matrix completion ported from
   the study's code), 29 cases x 2 methods x 5 variants (gn, switch, switch
@@ -494,7 +494,7 @@ passing, and is committed separately.
   costs more on Rosenbrock with the trust region, where it fires one or two
   iterations before convergence; a power of 0.5 after the switch was cheaper
   than 1.0 in 46 of 58 runs. Following D10, the default power after the
-  switch is now 0.5 (bd7544d).
+  switch is now 0.5 (4d045c3).
 - **Phase 7**: the README section, the switch run in
   `examples/matrix_completion.py` (shown in CI), the `dev/TODO.md` entry
   with what is open; the vendored baseline and `tests/test_baseline.py`

@@ -1,5 +1,5 @@
 """The line-search part of an iteration of line_search_newton, as a pure
-piece a backend can compile (see backend and dev/line_search_plan.md).
+piece a backend can compile (see backend and dev/archive/line_search_plan.md).
 
 The direction is computed by the shared pieces of newton_core (step_start,
 step_grow, step_continue) with the solvers in line-search mode; then

@@ -1,5 +1,5 @@
-"""The small dense kernels with padding (dev/jit_backends_plan.md, phase 5),
-and the projected Newton step of the line search (dev/line_search_plan.md):
+"""The small dense kernels with padding (dev/archive/jit_backends_plan.md, phase 5),
+and the projected Newton step of the line search (dev/archive/line_search_plan.md):
 the projected trust-region problem padded to a larger capacity, on the
 strict backend (static shapes), has the solution of the unpadded problem;
 on numpy the padded problem is cut down to the active block and gives the
@@ -129,7 +129,7 @@ def test_ball_solver_cases_on_the_strict_backend() -> None:
         assert (float(lam_ref) == 0.0) == expect_lam_zero
 
 
-# --- the projected Newton step of a line search (dev/line_search_plan.md, phase 2) ----------
+# --- the projected Newton step of a line search (dev/archive/line_search_plan.md, phase 2) --
 
 
 def spd_problem(k: int, seed: int) -> tuple[Any, Any]:

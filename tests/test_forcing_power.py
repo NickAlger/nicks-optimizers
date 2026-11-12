@@ -1,5 +1,5 @@
 """The forcing power: the Krylov tolerance min(forcing_max, (||g|| /
-||g0||)^forcing_power) of both Newton optimizers (dev/gauss_newton_switch_plan.md,
+||g0||)^forcing_power) of both Newton optimizers (dev/archive/gauss_newton_switch_plan.md,
 phase 1)."""
 
 import dataclasses

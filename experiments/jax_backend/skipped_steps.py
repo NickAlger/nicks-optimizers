@@ -1,6 +1,6 @@
 """What finished steps cost in a scan-built bounded loop: per-iteration time
 of the compiled CG path against max_krylov, for loops built from scan and
-from while_loop (dev/jit_backends_plan.md, phase 3). The CG solves here use
+from while_loop (dev/archive/jit_backends_plan.md, phase 3). The CG solves here use
 about 12 Krylov steps per iteration, so a scan runs max_krylov - 12 skipped
 steps per iteration, carrying five vectors of length n through each.
 

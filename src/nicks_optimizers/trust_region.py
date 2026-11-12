@@ -91,7 +91,7 @@ compares the actual change of f with the change each model predicts (one
 product with hessvec on s), and once the full model's error has been below
 switch_tau times Gauss-Newton's for switch_k consecutive accepted steps it
 uses hessvec for the rest of the run (see newton_switch and
-dev/gauss_newton_switch_plan.md). For least squares with a nonzero residual
+dev/archive/gauss_newton_switch_plan.md). For least squares with a nonzero residual
 at the solution, where Gauss-Newton converges only linearly.
 
 The radius carries over from one point to the next, so the theory wants

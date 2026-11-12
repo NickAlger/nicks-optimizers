@@ -1,4 +1,4 @@
-"""The Lanczos and flexible solvers compiled by JAX (dev/jit_backends_plan.md,
+"""The Lanczos and flexible solvers compiled by JAX (dev/archive/jit_backends_plan.md,
 phase 6): fixed-capacity Krylov bases that double when a solve fills them,
 against the numpy backend.
 

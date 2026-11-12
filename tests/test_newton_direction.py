@@ -1,4 +1,4 @@
-"""Newton directions for the line search (dev/line_search_plan.md, phase 3):
+"""Newton directions for the line search (dev/archive/line_search_plan.md, phase 3):
 the Krylov solvers in line-search mode, against dense references."""
 
 from typing import Any, Callable, Optional

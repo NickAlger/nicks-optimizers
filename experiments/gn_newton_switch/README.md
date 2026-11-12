@@ -1,7 +1,7 @@
 # Switching from Gauss-Newton to the full Hessian
 
 **Question.** On the switching study's problems, run through the library
-(`hessian="switch"`, dev/gauss_newton_switch_plan.md), how much work does
+(`hessian="switch"`, dev/archive/gauss_newton_switch_plan.md), how much work does
 the switch save against pure Gauss-Newton and against the full Hessian from
 the start, with the trust region and with the line search? And what do the
 defaults (tau = 0.25, k = 2, forcing power 0.5 before the switch and 1.0

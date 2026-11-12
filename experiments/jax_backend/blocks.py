@@ -1,4 +1,4 @@
-"""Phase 7 of dev/jit_backends_plan.md: what fixed capacity costs in
+"""Phase 7 of dev/archive/jit_backends_plan.md: what fixed capacity costs in
 compiled code, piece by piece, and whether block products can be made to
 follow the members in use.
 

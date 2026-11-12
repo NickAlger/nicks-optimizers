@@ -293,7 +293,7 @@ preconditioner rescued a cold start at full rank. Write-up:
 
 ## Line-search Newton-Krylov (2026-10-25)
 
-Done (`dev/line_search_plan.md`): `line_search_newton`, the inexact Newton
+Done (`dev/archive/line_search_plan.md`): `line_search_newton`, the inexact Newton
 method of `trust_region_newton` with a backtracking Armijo line search
 (safeguarded quadratic and cubic interpolation, a rounding allowance, an
 optional `step_max`), compiled with the rest of each iteration under a
@@ -319,7 +319,7 @@ Open:
 
 ## Switching from Gauss-Newton to the full Hessian (2026-11-11)
 
-Done (`dev/gauss_newton_switch_plan.md`; the idea and the study are Nick's):
+Done (`dev/archive/gauss_newton_switch_plan.md`; the idea and the study are Nick's):
 `hessian="switch"` in both Newton optimizers. The run starts with
 `gn_hessvec`. After each step it compares the Gauss-Newton and the full
 model's errors (one more full product per iteration), and switches for good
@@ -396,7 +396,7 @@ Open:
 
 ## Compiled iterations with a pluggable backend (2026-10-25)
 
-Done (all eight phases of `dev/jit_backends_plan.md`): a `Backend` record
+Done (all eight phases of `dev/archive/jit_backends_plan.md`): a `Backend` record
 (jit, a bounded loop built from scan or while_loop, cond, index_update, an
 array namespace) lets JAX or another framework compile the pieces of each
 iteration, with numpy as the default and reference and no framework imports

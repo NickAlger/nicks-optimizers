@@ -73,7 +73,7 @@ Cond = Callable[[Any, Callable[[Any], Any], Callable[[Any], Any], Any], Any]
 
 # The names the core may use from xp: a subset common to numpy >= 1.24,
 # jax.numpy and the array API standard. Adding a name is a design change
-# (dev/jit_backends_plan.md); tests/test_backend.py checks the core against it.
+# (dev/archive/jit_backends_plan.md); tests/test_backend.py checks the core against it.
 CONTRACT: frozenset[str] = frozenset({
     # creation
     "asarray", "zeros", "ones", "full", "eye", "arange", "reshape",

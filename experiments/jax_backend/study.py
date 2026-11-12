@@ -1,4 +1,4 @@
-"""JAX proof of concept for the backend design (dev/jit_backends_plan.md,
+"""JAX proof of concept for the backend design (dev/archive/jit_backends_plan.md,
 phase 3): trust_region_newton with each iteration compiled by JAX, on the CG
 path, against the same problems on the numpy backend.
 

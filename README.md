@@ -70,6 +70,7 @@ same problem pieces and differs in how it globalizes the step (see
   tested surface. An experiment that pans out graduates to `src/` and
   `examples/`. See [`experiments/README.md`](experiments/README.md).
 - `dev/TODO.md`: findings and open questions.
+- `dev/archive/`: the plans of finished work, kept for the record.
 
 ## Installation
 
@@ -603,7 +604,7 @@ iterations pay off for long runs and large problems. On CPU
 iterations were 1.6 to 2.3 times faster than numpy at n = 4,000 to 16,000,
 and compiled Lanczos and flexible iterations took 0.5 to 1.1 times numpy's
 time; GPUs are not measured yet. The design and the rules the core follows
-are in [`dev/jit_backends_plan.md`](dev/jit_backends_plan.md); a strict numpy
+are in [`dev/archive/jit_backends_plan.md`](dev/archive/jit_backends_plan.md); a strict numpy
 backend in the tests checks that the core stays traceable without any
 framework installed.
 

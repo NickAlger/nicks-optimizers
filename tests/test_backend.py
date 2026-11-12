@@ -1,5 +1,5 @@
 """The backend record, the bounded loop, state flattening, and the guardrails
-against drifting toward one framework (dev/jit_backends_plan.md):
+against drifting toward one framework (dev/archive/jit_backends_plan.md):
 
   * src/ imports nothing but the standard library and numpy, and the core
     modules (NUMPY_FREE) not even numpy;
