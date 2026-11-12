@@ -1,6 +1,6 @@
 """The parts of an inexact Newton iteration that the optimizers share, as
 pure pieces a backend can compile (see backend and
-dev/jit_backends_plan.md): what is known at a point, and the Krylov solve
+dev/archive/jit_backends_plan.md): what is known at a point, and the Krylov solve
 of the step.
 
   PointOperators the linear operators at one point (what operators_at

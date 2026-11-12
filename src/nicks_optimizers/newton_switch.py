@@ -1,6 +1,6 @@
 """The switch from the Gauss-Newton to the full Hessian (hessian="switch"),
 as far as the drivers of the two Newton optimizers share it (Python, around
-the compiled pieces; see dev/gauss_newton_switch_plan.md):
+the compiled pieces; see dev/archive/gauss_newton_switch_plan.md):
 
   resolve_switch      the keywords checked and resolved: the detector's
                       tau and k and the forcing powers of the two phases

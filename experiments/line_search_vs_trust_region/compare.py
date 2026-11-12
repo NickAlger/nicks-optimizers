@@ -1,4 +1,4 @@
-"""line_search_newton against trust_region_newton (dev/line_search_plan.md,
+"""line_search_newton against trust_region_newton (dev/archive/line_search_plan.md,
 phase 5 check-in): the same problems, operators and options, and the work
 each method spends.
 

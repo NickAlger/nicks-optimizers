@@ -1,5 +1,5 @@
 """How often the user's operators run inside compiled code (phase 7 of
-dev/jit_backends_plan.md): each operator is wrapped with a host callback
+dev/archive/jit_backends_plan.md): each operator is wrapped with a host callback
 that counts its executions at run time (a trace happens once, so counting
 calls in Python would not do). Checked: the counts equal the summary's, and
 they do not depend on the room the basis starts with (2 or 8 vectors, so it

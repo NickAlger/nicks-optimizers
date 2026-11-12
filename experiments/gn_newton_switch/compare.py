@@ -1,5 +1,5 @@
 """hessian="switch" against pure Gauss-Newton and the full Hessian from the
-start (dev/gauss_newton_switch_plan.md, phase 6), on the switching study's
+start (dev/archive/gauss_newton_switch_plan.md, phase 6), on the switching study's
 three problems, with both Newton optimizers of the library.
 
 Variants per case and method

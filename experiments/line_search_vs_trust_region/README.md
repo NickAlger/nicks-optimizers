@@ -1,7 +1,7 @@
 # Line search against trust region
 
 **Question.** On the same problems, operators and options, where does
-`line_search_newton` (dev/line_search_plan.md) spend less work than
+`line_search_newton` (dev/archive/line_search_plan.md) spend less work than
 `trust_region_newton`, and where more?
 
 **Status.** First round (the phase 5 check-in of the plan), CPU, numpy

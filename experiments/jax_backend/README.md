@@ -1,7 +1,7 @@
 # JAX backend: proof of concept (CG path)
 
 **Question.** Does the backend design of
-[`dev/jit_backends_plan.md`](../../dev/jit_backends_plan.md) work with a real
+[`dev/archive/jit_backends_plan.md`](../../dev/archive/jit_backends_plan.md) work with a real
 compiling framework? Specifically: can `trust_region_newton` run with each
 iteration compiled by JAX, through a `Backend` record written outside the
 library, and with the same results as the numpy backend? And what does it

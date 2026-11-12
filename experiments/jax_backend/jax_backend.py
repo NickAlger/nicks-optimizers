@@ -1,4 +1,4 @@
-"""Backend records for JAX (dev/jit_backends_plan.md, phase 3): everything
+"""Backend records for JAX (dev/archive/jit_backends_plan.md, phase 3): everything
 JAX-specific the library needs, in a few lines outside the library.
 
     import jax_backend

@@ -44,7 +44,7 @@ def reduction_ratio(f_old: float, f_trial: float, pred: float) -> float:
 SWITCH_ROUNDING = 100.0
 """A switch sample is valid when e_GN > SWITCH_ROUNDING * 10 eps max(1, |f|):
 Gauss-Newton's own error must stand clear of the rounding in f
-(dev/gauss_newton_switch_plan.md, D4)."""
+(dev/archive/gauss_newton_switch_plan.md, D4)."""
 
 
 def switch_sample(f: float, change: float, gn_model: float, full_model: float,

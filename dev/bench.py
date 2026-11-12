@@ -6,7 +6,7 @@ Checks the baseline revision out into a temporary git worktree, runs each
 example from each checkout with that checkout's src/ first on the path, and
 prints the median wall times and their ratio. Each checkout runs its own
 examples, so API changes between the revisions do not matter. Used for the
-backend refactor (dev/jit_backends_plan.md): numpy runs must not slow down
+backend refactor (dev/archive/jit_backends_plan.md): numpy runs must not slow down
 by more than 5% without an explanation.
 """
 

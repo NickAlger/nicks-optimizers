@@ -1,4 +1,4 @@
-"""hessian="switch" compiled with JAX (dev/gauss_newton_switch_plan.md, phase
+"""hessian="switch" compiled with JAX (dev/archive/gauss_newton_switch_plan.md, phase
 5): compiled runs against numpy, how often each Hessian is traced, and the
 full-Hessian pieces compiled only once the switch fires. Skipped without JAX
 (the CI job "jax" installs it)."""

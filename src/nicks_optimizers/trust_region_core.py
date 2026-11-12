@@ -1,5 +1,5 @@
 """The trust-region part of an iteration of trust_region_newton, as a pure
-piece a backend can compile (see backend and dev/jit_backends_plan.md).
+piece a backend can compile (see backend and dev/archive/jit_backends_plan.md).
 
 The step is computed by the shared pieces of newton_core (step_start,
 step_grow, step_continue); then

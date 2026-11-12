@@ -1,5 +1,5 @@
 """hessian="switch": Gauss-Newton first, the full Hessian once the full model
-predicts the steps clearly better (dev/gauss_newton_switch_plan.md).
+predicts the steps clearly better (dev/archive/gauss_newton_switch_plan.md).
 
 The pieces: with track (the problem with the full Hessian) the finish
 pieces report the Gauss-Newton and the full model values at the step tried,

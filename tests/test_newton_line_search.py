@@ -1,4 +1,4 @@
-"""line_search_newton (dev/line_search_plan.md, phase 5): convergence, the
+"""line_search_newton (dev/archive/line_search_plan.md, phase 5): convergence, the
 line search in the records, resuming, display, operator calls, other
 representations, and the strict backend."""
 
